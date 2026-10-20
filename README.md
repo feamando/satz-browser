@@ -1,96 +1,59 @@
-# Satz (`feamando/satz-browser`)
+# Satz (`feamando/satz-browser`) — v0.3 Working Browser
 
-**Satz** is a local-first, AI-native desktop browser where **conversations replace tabs**.
+**Satz** is a local-first, terminal-aesthetic AI-native desktop browser where **conversations are the workspace** and **tabs live inside a conversation**.
 
-Instead of opening ten browser tabs and copy-pasting across sites, you open a conversation with an **intent** (for example, *"flights Berlin → Lisbon, mid-March, under €200"* or *"what's new on the Greenland story"*). Agents browse inside your own sessions, read and weigh pages, and answer with citations. At any point, one keystroke switches the conversation's viewport into **Focus Mode** (`Ctrl+F`) on the live native page—or **Compare View** (`Ctrl+M`) tiling 2 to 4 live pages side-by-side—with your conversation thread right beside you.
+Built on **Tauri v2** (`WebView2` on Windows 11, `WKWebView` on macOS) and powered by local models from [`feamando/sgs`](https://github.com/feamando/sgs) (**Gemma 4 E4B**, **Planck 3.0**, **Hertz 1.2**, and **Planck 1.3/1.5** cross-readers), Satz turns every browsed page in a conversation into a checked source that you can query, compare, and cite inline with `[1]`, `[2]`, `[3]`.
 
-Satz is **Planck 3.0's consumer surface** (reusing the `Satz` name and roadmap row `11-satz-0-1` from [`feamando/sgs`](https://github.com/feamando/sgs)) and integrates the local email classification and extraction stack from [`feamando/memail`](https://github.com/feamando/memail). Everything personal—what you read, your mail, and your source trust scores—stays in a local index on your machine.
-
----
-
-## Core Model: Conversations Instead of Tabs
-
-| Chrome-shaped Browsers (Comet, Atlas, Dia) | Satz Browser |
-| :--- | :--- |
-| URL bar → page | Intent → conversation |
-| Tabs are the unit | Conversations are the unit; pages are attached sources |
-| History = list of URLs | History = a local, searchable index of everything you read and received |
-| AI summarizes the current page | Agents read $N$ pages, weigh them, and answer with citations |
-| Gmail is a website | Mail is a built-in pinned surface and an input stream to the same agents |
-| You fill forms manually | Agents fill forms behind explicit confirmation gates (Phase 4) |
+![Satz v0.3 Terminal Shell](docs/screenshots/m1.png)
 
 ---
 
-## Key Surfaces & Architecture
+## What Changed in v0.3 (`docs/PLAN_v0.3_working_browser.md`)
 
-```
-Shell (keyboard-first, tiling; Windows WebView2 + macOS WKWebView via Tauri v2)
-  ├─ Search (home)   ├─ Mail (pinned)   ├─ Conversations (searchable left rail)
-  │                                         ├─ Focus Mode: live page pane + thread/agent rail
-  │                                         └─ Compare View: 2–4 live pages tiled side-by-side
-  ▼
-Harness (one tool set, strict read/act boundary)
-  ├─ Agents: Reader · Navigator · Comparer · Watcher · Actor (confirm-gated)
-  ▼
-Tools & Local Storage
-  ├─ Brave Search API           ├─ Headless engine (shares cookie jar)
-  ├─ System WebView (page pane) ├─ Mail classifier (local DistilBERT + rules)
-  ├─ POP3 / IMAP fetch          ├─ Local personal index (SQLite + graph store)
-  └─ Model runtime (user-selectable per role: SGS Planck/Hertz, Gemma, or opt-in cloud)
-```
-
-### 1. Shell, Focus Mode & Compare View (Phase 0 — Current)
-- **Wrapper over the System WebView:** Built on **Tauri v2** (`WebView2` on Windows, `WKWebView` on macOS) using Tauri's multi-webview API—never forking Chromium.
-- **Searchable Left Rail:** Conversations hold the intent thread, attached source pages (`Pane 1`–`Pane 4`), notes, and local browsing history. Conversations can be filtered (`Ctrl+K`), created (`Ctrl+N`), pinned (`★`), or resumed anytime with their sources intact.
-- **Focus Mode (`Ctrl+F`):** Switches the viewport between the conversation thread and a live native `WebView2` child pane with Back, Forward, Reload, and URL/Search bar controls (`Ctrl+L`), while keeping the conversation thread rail beside the page.
-- **Compare View (`Ctrl+M`):** Tiles **2 to 4 live `WebView2` child panes** (`Alt+2`, `Alt+3`, `Alt+4`) side-by-side inside the active conversation.
-
-### 2. Search Home Screen (Phase 1 — Built on Planck 3.0)
-- **Read → Weigh → Write Pipeline:**
-  - **Read:** Scores candidate answers without seeing source trust scores so user preferences cannot leak into reading.
-  - **Weigh:** Merges equivalent values, deduplicates mirror families, and itemizes confidence on a `0–10` scale into bands.
-  - **Write:** Uses a deterministic template writer or faithfulness-checked model writer with automatic fallback to template.
-- **Neutral by Default, Rebalanceable up to 30%:**
-  - Hand-scored source trust registry blended as $0.7 \times \text{system} + 0.3 \times \text{user}$ (hard 30% cap; max $\pm 3$ points).
-  - The **system-only answer** is computed every time and displayed whenever personal settings change the value or band.
-- **"For You" Digest & Perspective Spread:** Powered by Planck's `digest.py`, plus multi-family perspective comparison on contested topics.
-
-### 3. Mail Pinned Tab (Phase 2 — Built on `memail`)
-- **IMAP & POP3 from Day One:** IMAP is the default (syncs read state; files promotions locally without moving/deleting server mail unless opted in). POP3 forces *"leave messages on server"*. Credentials live in the OS keychain.
-- **Local DistilBERT Pre-Parse:** Classifies mail into 4 labels (`email`, `ping`, `information`, `promotion`) with local LLM fallback below `0.75` confidence and retraining after 20 corrections.
-- **Rule-Based Extraction (No LLM):** Extracts ping platforms, order/tracking numbers, and voucher codes.
-- **Promotions Meet Browsing:** Promotions stay out of the inbox and are stored by company—when browsing a shop in Focus Mode, Satz surfaces active voucher codes for that merchant.
-
-### 4. Agents, Model Picker & Read/Act Boundary (Phases 3–4)
-- **Five Agents:** `Reader`, `Navigator`, `Comparer`, `Watcher` (read-only), and `Actor` (confirm-gated in Phase 4).
-- **User-Selectable Models per Role:** Local defaults (`Hertz 1.2 int8` or `Planck` reader, `Template` writer, `Gemma` planner, `DistilBERT` mail classifier) with one-click model comparison and opt-in cloud providers using the user's own API keys.
-- **Strict Read/Act Boundary:** Text from a web page or email **never** authorizes an action. Every commit action in Phase 4 is checked against the user's request and requires explicit user confirmation.
+1. **Terminal Look (Strict Black & White):**
+   - Pure black `#000000` background, `#0d0d0d` panel surface, `#333333` `1px` borders, `#e8e8e8` foreground, bundled `JetBrains Mono` monospace font everywhere, `border-radius: 0`, and inverse-video selection (`background: var(--fg); color: var(--bg)`).
+2. **Tabs Inside Conversations (`chat` + Site Tabs):**
+   - Every conversation starts with a pinned `[chat]` tab (Tab 1) followed by normal browser site tabs (`[2]`, `[3]`, ...).
+   - Each site tab has its own persistent native `WebView2` / `WKWebView` (`tab-<id>`) so switching tabs or conversations preserves scroll position, video playback, and history without reloading.
+   - Live child webviews are capped at `8` (`max_live_tabs`) via LRU eviction; hidden tabs above the cap suspend cleanly and reload when revisited.
+   - Site tabs include a collapsible **agent rail** (`Mod+J`) on the right and **Compare mode** (`Mod+M`) tiling 2 to 4 selected tabs side-by-side.
+3. **Unified Start Screen & Direct Browsing:**
+   - One input routes automatically:
+     - **URL only** (`dw.com`, `https://...`, `localhost:3000`): opens a `direct` conversation on the site tab immediately with the agent rail collapsed (auto-archived after 24h if untouched).
+     - **Question only** (`what's new on the Greenland story`): opens the `chat` tab and answers with the selected local model.
+     - **URL + Question** (`nytimes.com/... summarize the main argument`): opens the URL as a tab/source and answers the prompt on the `chat` tab.
+4. **Sources as Context & Inline Citations:**
+   - Every page visited in a conversation's tabs is captured (via native `WebView2` `ExecuteScript` DOM capture on Windows, with `Web.fetch` fallback) and extracted to clean text via `trafilatura`.
+   - Checked sources in the `sources` panel are assembled into Gemma's context (`6,000` chars per open tab, top 3 passages per closed checked source up to `24,000` chars total).
+   - Clicking an inline `[n]` citation in chat switches directly to that tab (or reopens it).
+5. **Local Model Sidecar (`sidecar/satz_models.py` on `127.0.0.1:8020`):**
+   - Zero cloud models, zero external LLM API keys.
+   - Four local model options in the picker:
+     - `gemma-4-e4b` (default): local Gemma 4 E4B (`bfloat16` on GPU) streaming SSE answers with `[n]` citations (`~229 ms` warm first-token latency on RTX 4090).
+     - `planck3 (web)`: Planck 3.0 web search -> read -> weigh -> write pipeline (`Hertz` int8 reader + `Template` writer + source trust registry).
+     - `hertz (reader)`: Hertz cross-reader (`checkpoints/xreader_hertz_rc/reader.pt`, `int8` on CPU) for factual extraction over checked conversation sources.
+     - `planck (reader)`: Planck cross-reader (`checkpoints/xreader_planck_rc/reader.pt`, `int8` on CPU) for side-by-side comparison.
+6. **Satz-Owned Knowledge Base (`%APPDATA%\com.satz.browser\planck_store.sqlite`):**
+   - Background ingest worker indexes browsed passages, entity co-mentions, domain visits, and dwell time to power `for you` (`GET /digest`) and the `knowledge` view (`pause learning`, per-passage delete, and per-conversation `/forget`).
 
 ---
 
-## Roadmap Phases & Verification Gates
-
-| Phase | Scope | Gate to Advance |
-| :--- | :--- | :--- |
-| **0. Shell** *(Active)* | Conversations as tabs, Focus Mode (`Ctrl+F`), Compare View (`Ctrl+M`), local SQLite store, zero AI | Used as the only daily browser for **5 working days** ($N=5/5$, 0 Chrome fallbacks) |
-| **1. Search** | Home screen on Planck 3.0, trust settings, *"For you"* digest | Band 9–10 $\ge 90\%$ accuracy on fresh questions; local reader within 5 pts of Gemma; $\le 5\text{ s}$/answer on laptop CPU |
-| **2. Mail** | `memail` ported as pinned tab, IMAP + POP3, local fallback model | On 500 hand-labelled own emails: real email misfiled as promotion $\le 1\%$, promotion recall $\ge 90\%$, code extraction $\ge 90\%$ |
-| **3. Agents (Read-Only)** | `Navigator`, `Comparer`, `Watcher`; mail as an input stream | Faster than manual browsing in Chrome on 10 real tasks with equal or better answers |
-| **4. Actions** | `Actor` behind explicit confirm gates | Prompt-injection red-team suite (hostile pages & emails): **0 unauthorized actions** |
-
----
-
-## Keyboard Shortcuts (Phase 0 Shell)
+## Keyboard Shortcuts (`Mod` = `Ctrl` on Windows, `Cmd` on macOS)
 
 | Shortcut | Action |
 | :--- | :--- |
-| `Ctrl+K` | Focus the left rail search input to filter conversations |
-| `Ctrl+N` | Create a new **Intent / Conversation** |
-| `Ctrl+F` | Toggle **Focus Mode** (live native `WebView2` child pane + collapsible thread rail) |
-| `Ctrl+M` | Toggle **Compare View** (tile 2 to 4 live `WebView2` child panes side-by-side) |
-| `Alt+2` / `Alt+3` / `Alt+4` | Switch **Compare View** between 2, 3, and 4 tiled `WebView2` panes |
-| `Ctrl+L` | Focus the active pane's URL / Search bar |
-| `Escape` | Close inline New Intent creator |
+| `Mod+N` | New conversation (Start Screen) |
+| `Mod+K` | Filter conversations in the left rail |
+| `Mod+T` | New site tab in the active conversation (focuses address bar) |
+| `Mod+W` | Close active site tab (`chat` tab cannot be closed) |
+| `Mod+1` | Switch to `[1 chat]` tab |
+| `Mod+2` .. `Mod+9` | Switch to site tab `1` .. `8` |
+| `Mod+L` | Focus address bar of the current site tab |
+| `Mod+J` | Toggle collapsible chat/agent rail on a site tab |
+| `Mod+M` | Toggle Compare View (tile 2 to 4 selected tabs) |
+| `Mod+D` | Bookmark the current page |
+| `Mod+F` | Left to the page (native find-in-page) |
+| `Esc` | Exit Compare View / clear Start Screen input |
 
 ---
 
@@ -99,60 +62,71 @@ Tools & Local Storage
 ```text
 satz-browser/
 ├── .gemini/
-│   └── antigravity.md           # Workspace rules & Phase 0 scope lock
+│   └── antigravity.md           # Workspace rules (v0.3)
 ├── docs/
-│   └── PLANNING_v0.2.md         # Full Satz v0.2 planning specification
-├── src/                         # TypeScript + Vite frontend (Main UI webview)
-│   ├── main.ts                  # Conversation rail, Thread/Focus/Compare modes, IPC sync
-│   ├── style.css                # Keyboard-first dark UI & multi-pane grid styles
-│   └── types.ts                 # TypeScript interfaces for SQLite & WebView2 bounds
+│   ├── PLAN_v0.3_working_browser.md  # Full Satz v0.3 specification
+│   ├── PLANNING_v0.2.md         # Satz v0.2 roadmap specification
+│   ├── NOTES_v0.3.md            # Milestone verification notes & measurements
+│   └── screenshots/
+│       └── m1.png               # Terminal UI screenshot
+├── public/
+│   └── fonts/                   # Bundled JetBrains Mono (Regular & Bold woff2)
+├── sidecar/
+│   ├── satz_models.py           # Local model HTTP sidecar (127.0.0.1:8020)
+│   └── test_satz_models.py      # Unit tests for M5, M6, M7 sidecar endpoints
+├── src/                         # Modular TypeScript frontend (11 modules)
+│   ├── main.ts                  # App shell orchestration & region rendering
+│   ├── api.ts                   # Tauri invoke + sidecar HTTP/SSE client
+│   ├── state.ts                 # App state + URL/prompt start classifier
+│   ├── rail.ts                  # Left rail (pinned, recent, archived, bookmarks)
+│   ├── start.ts                 # Start screen (input, model picker, for you, resume)
+│   ├── tabs.ts                  # Per-conversation tab strip + webview bounds sync
+│   ├── chat.ts                  # Chat thread, streaming composer, [n] citations
+│   ├── sources.ts               # Sources panel & in-context checkboxes
+│   ├── knowledge.ts             # Knowledge base inspector & pause learning toggle
+│   ├── keys.ts                  # Cross-platform Mod keyboard shortcuts
+│   ├── status.ts                # Bottom status line
+│   ├── types.ts                 # Shared TypeScript interfaces
+│   └── style.css                # Strict terminal black & white CSS variables
 ├── src-tauri/                   # Rust + Tauri v2 backend
 │   ├── capabilities/
-│   │   └── default.json         # Tauri v2 ACL permissions for main & child webviews
-│   ├── src/
-│   │   ├── db.rs                # Local SQLite store (WAL mode: conversations, pages, notes, history)
-│   │   ├── webview_manager.rs   # Multi-webview child WebView2 manager (Focus & Compare panes)
-│   │   ├── lib.rs               # Tauri commands & window setup
-│   │   └── main.rs              # Windows application entry point
-│   ├── Cargo.toml               # Rust dependencies (tauri v2 unstable, rusqlite bundled)
-│   └── tauri.conf.json          # Window & bundle configuration
-├── index.html
-├── package.json
-├── tsconfig.json
-└── vite.config.ts
+│   │   └── default.json         # Scoped strictly to "main" webview
+│   └── src/
+│       ├── db.rs                # SQLite Schema v2 + v1->v2 migration + unit tests
+│       ├── webview_manager.rs   # Per-tab WebView2 manager, 8-tab LRU cap, DOM capture
+│       ├── lib.rs               # Tauri commands, app menu accelerators, sidecar spawn
+│       └── main.rs              # Application entry point
+└── package.json
 ```
 
 ---
 
-## Building & Running on Windows 11
+## Building, Testing & Running
 
-### Prerequisites
-- **Rust** (`cargo`, `rustc` with `x86_64-pc-windows-msvc`)
-- **Node.js** (`v20+` / `v22+`) & `npm`
-- **Microsoft Edge WebView2 Runtime** (pre-installed on Windows 11)
-
-### Commands
-
+### 1. Build & Run Unit Tests
 ```powershell
-# 1. Install frontend dependencies
-npm install
-
-# 2. Build TypeScript & Vite frontend bundle
+# Frontend TypeScript + Vite build
 npm run build
 
-# 3. Check or build the Rust / Tauri v2 backend
-cargo check --manifest-path src-tauri/Cargo.toml
-cargo build --manifest-path src-tauri/Cargo.toml
+# Rust Schema v2, migration, dedupe, URL classifier, and LRU cap unit tests
+cargo test --manifest-path src-tauri/Cargo.toml --offline
 
-# 4a. Launch standalone debug executable (embeds dist/ via custom-protocol)
-.\src-tauri\target\debug\satz-browser.exe
-
-# 4b. Or run in Tauri live-reload development mode
-npx tauri dev
+# Python sidecar unit tests (M5/M6/M7)
+..\sgs\.venv\Scripts\python.exe sidecar\test_satz_models.py -v
 ```
 
-### Local SQLite Database Location
-On Windows, Satz automatically initializes its WAL-mode SQLite database at:
-```text
-%APPDATA%\com.satz.browser\satz.db
+### 2. Sidecar Settings (`%APPDATA%\com.satz.browser\settings.json`)
+Tauri spawns `sidecar/satz_models.py` automatically on startup and terminates it on exit. Default settings are written to `%APPDATA%\com.satz.browser\settings.json`:
+```json
+{
+  "sgs_root": "..\\sgs",
+  "python": "..\\sgs\\.venv\\Scripts\\python.exe",
+  "gemma_path": "models/gemma-4-e4b-it",
+  "port": 8020,
+  "max_live_tabs": 8
+}
+```
+You can also run the sidecar standalone:
+```powershell
+..\sgs\.venv\Scripts\python.exe sidecar\satz_models.py --sgs-root ..\sgs --port 8020
 ```
