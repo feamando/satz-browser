@@ -93,7 +93,7 @@ export function extractDomain(rawUrl: string): string {
 
 export function isLikelyUrlToken(token: string): boolean {
   const t = token.trim();
-  if (!t || t.includes(" ")) return false;
+  if (!t || t.includes(" ") || t.startsWith("?")) return false;
   if (
     t.startsWith("http://") ||
     t.startsWith("https://") ||
@@ -101,7 +101,10 @@ export function isLikelyUrlToken(token: string): boolean {
   ) {
     return true;
   }
-  if (/^[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+(\/.*)?$/.test(t)) {
+  if (/^(localhost|127\.0\.0\.1)(:\d+)?(\/.*)?$/i.test(t)) {
+    return true;
+  }
+  if (/^[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+(:\d+)?(\/.*)?$/.test(t)) {
     return true;
   }
   return false;
@@ -116,6 +119,9 @@ export function normalizeUrl(raw: string): string {
     trimmed.startsWith("about:")
   ) {
     return trimmed;
+  }
+  if (/^(localhost|127\.0\.0\.1)(:\d+)?(\/.*)?$/i.test(trimmed)) {
+    return `http://${trimmed}`;
   }
   if (isLikelyUrlToken(trimmed)) {
     return `https://${trimmed}`;
