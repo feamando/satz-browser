@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capability for Satz Browser Phase 0 shell",
+  "windows": ["main"],
+  "webviews": ["main", "pane-0", "pane-1", "pane-2", "pane-3"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:default",
+    "core:webview:default"
+  ]
+}
