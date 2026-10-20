@@ -1,16 +1,19 @@
-# Satz-Browser Workspace Rules & Architecture Memory (v0.2)
+# Satz-Browser Workspace Rules & Architecture Memory (v0.3)
 
 - **Owner:** Nikita Gorshkov (2026-10-19 · Draft v0.2)
 - **Primary Write Repo:** `C:\Users\feama\satz-browser` (`feamando/satz-browser`)
 - **Read-Only Reference Repos (for Phases 1–2):** `..\sgs` (`feamando/sgs`) and `..\memail` (`feamando/memail`)
-- **Full Planning Spec:** `docs/PLANNING_v0.2.md`
+- **Full Planning Spec:** `docs/PLANNING_v0.2.md` (product), `docs/PLAN_v0.3_working_browser.md` (current execution plan)
 
-## Active Phase Lock: Phase 0 (Shell)
-- **Target:** Windows 11 (`WebView2` via `Tauri v2`) and macOS (`WKWebView`). Never fork an engine (lesson from `mchromium`).
-- **Scope:** Phase 0 Shell ONLY. Zero AI models, zero search pipelines, zero mail fetching until the Phase 0 gate passes.
-- **Phase 0 Gate:** Used as the only browser for **5 working days** ($N=5/5$, 0 Chrome fallbacks).
-- **Architecture:** Tauri v2 `unstable` multi-webview API. One main UI webview (searchable left conversation rail + thread + controls) and dynamic child WebView2 instances (`pane-0`..`pane-3`) for **Focus Mode** (`Ctrl+F`) and **Compare View** (`Ctrl+M`, 2 to 4 tiled panes).
-- **Storage:** Local SQLite (`%APPDATA%\com.satz.browser\satz.db`) for conversations, attached pages, thread notes, and browsing history.
+## Active Phase Lock: v0.3 Working Browser (supersedes the Phase 0 lock, 2026-10-20)
+- **Execute:** `docs/PLAN_v0.3_working_browser.md`, milestones M1 to M7 in order. One commit per milestone, only after its checks pass.
+- **Allowed now:** local models only (Gemma 4 E4B, Planck 3.0 answer pipeline, Hertz and Planck readers) through the `sidecar/` service. No Gemini, no Bedrock, no cloud keys.
+- **Still out of scope:** Mail, agents that click or type into pages, watchers, cloud models.
+- **Look:** black and white, monospace only, terminal style (plan section 2.1).
+- **Model:** conversations hold tabs. Tab 1 is the chat; site tabs are sources (plan sections 2.3 to 2.5).
+- **Target:** Windows 11 (`WebView2` via `Tauri v2`) first, macOS (`WKWebView`) second. Never fork an engine (lesson from `mchromium`).
+- **Storage:** Local SQLite (`%APPDATA%\com.satz.browser\satz.db`), schema v2 with migration (plan section 3.1).
+- **Precedence:** where the architecture memory below conflicts with the v0.3 plan ("intent" naming, 4 global panes, `Ctrl+F` focus mode, zero AI), the v0.3 plan wins.
 
 ## Full Product Architecture & Decisions (Memorized for Phases 0–4)
 
