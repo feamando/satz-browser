@@ -2658,7 +2658,7 @@ dependencies = [
 
 [[package]]
 name = "satz-browser"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "rusqlite",
  "serde",
@@ -2666,6 +2666,8 @@ dependencies = [
  "tauri",
  "tauri-build",
  "url",
+ "webview2-com",
+ "windows",
 ]
 
 [[package]]
