@@ -44,3 +44,38 @@ Owner: Nikita Gorshkov · Date: 2026-10-20 · Target: Windows 11 (4090 box) firs
   - Seeded 6 default bookmarks (`dw.com`, `bbc.com/news`, `reuters.com`, `en.wikipedia.org`, `news.ycombinator.com`, `github.com`).
   - Direct browsing opens the target site tab immediately with the agent rail collapsed (`origin = 'direct'`) and auto-archives untouched direct conversations after 24 hours (`auto_archive_stale_direct_conversations`).
   - Verified by unit test `db::tests::test_bookmarks_and_direct_conversation_auto_archive`.
+
+## Milestone 5 (M5): Local Model Sidecar (`sidecar/satz_models.py`)
+
+- **Process Lifecycle & Settings (`src-tauri/src/lib.rs`):**
+  - Spawns `sidecar/satz_models.py` on `127.0.0.1:8020` using `%APPDATA%\com.satz.browser\settings.json` (`sgs_root: "..\\sgs"`, `python: "..\\sgs\\.venv\\Scripts\\python.exe"`, `gemma_path: "models/gemma-4-e4b-it"`, `port: 8020`, `max_live_tabs: 8`) and terminates the child process on `RunEvent::Exit`.
+  - When the sidecar is offline, the status bar displays `models [offline]` and browser tabs continue working normally.
+- **Verification on Windows 11 RTX 4090 Box:**
+  - `GET /health` reports all 4 local models (`gemma-4-e4b`, `planck3 (web)`, `hertz (reader)`, `planck (reader)`).
+  - `POST /read` non-factual guard: `"hello how are you"` -> `"hertz reads facts from sources; switch to gemma for chat"`.
+  - `POST /answer` (`planck3 (web)`): `"What is the capital of Australia?"` -> `"Canberra. Britannica [1] and Wikipedia [2] report this."` (`band: "9.0/10 (High trust)"`, 6 sources).
+  - `POST /chat` (`gemma-4-e4b`, `bfloat16` on CUDA): warm first-token SSE latency measured at **`229 ms`** (target `< 3,000 ms`).
+  - Cross-readers (`hertz (reader)`, `planck (reader)`) load explicitly on `device="cpu"` with `quant="int8"` so readers and GPU Gemma coexist in memory without contention.
+
+## Milestone 6 (M6): Sources as Context, DOM Capture, and Citations
+
+- **Page Capture (`src-tauri/src/webview_manager.rs` & `sidecar/satz_models.py`):**
+  - Windows WebView2 DOM capture uses `webview.with_webview` + `ICoreWebView2::ExecuteScript` on `PageLoadEvent::Finished` (capped at 2 MB HTML) and posts `{conversation_id, source_id, url, title, html}` to `127.0.0.1:8020/ingest`.
+  - When DOM HTML is unavailable, `ingest_page` falls back to SGS `Web.fetch(url)` (`capture_mode: "fetch"`) and extracts main text via `trafilatura` (`web.extract_main_text`).
+- **Context Budgets & Citation Verification:**
+  - Active tab sources include up to `6,000` characters each; other checked sources include top 3 passages (`rank_passages` / `query_keys`) up to `24,000` characters total.
+  - Tested 3 news sources on the Greenland mineral treaty story (`dw.com` `[1]`, `bbc.com` `[2]`, `reuters.com` `[3]`) with prompt `"what do these sources disagree on?"`:
+    - Gemma cited all 3 sources inline (`{1, 2, 3}`) across mineral export levy percentage, timeline, and military base discussions, returning `source_ids: ["src-1", "src-2", "src-3"]`.
+    - Unchecking `src-2` (`bbc.com`) removed it from the next response's `source_ids` (`["src-1", "src-3"]`).
+    - Clicking `[n]` in the chat UI (`handleCitationClick` in `src/main.ts`) switches directly to the corresponding open tab (or reopens it if closed).
+
+## Milestone 7 (M7): Background Knowledge Base, Digest, Pause Learning, and Forget
+
+- **Satz-Owned Planck Store (`%APPDATA%\com.satz.browser\planck_store.sqlite`):**
+  - Dedicated SQLite store separate from `..\sgs\results\planck3\`, with background worker thread indexing passages, co-mention entity edges, domain visit counts, and dwell time.
+- **Verification Results:**
+  - `GET /digest` returned 8 items drawn from browsed/queried pages (`australia`, `canberra`, and Greenland sources).
+  - With `pause_learning` enabled (`POST /knowledge/pause {"pause_learning": true}`), posting a new page to `POST /ingest` returned `{"queued": false, "queue_len": 0}` (ingest queue did not grow).
+  - Calling `POST /forget {"conversation_id": "conv-greenland-test"}` deleted the conversation's passages cleanly:
+    - **`passages_before`: `12`**
+    - **`passages_after`: `6`** (`deleted: 6`, removing all 6 passages belonging to `conv-greenland-test` while keeping passages from other sessions).
