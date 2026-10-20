@@ -1,12 +1,47 @@
 pub mod db;
 pub mod webview_manager;
 
-use db::{AttachedPage, Conversation, ConversationBundle, DbState, ThreadNote};
-use tauri::{AppHandle, Manager, State};
-use webview_manager::{
-    control_pane_impl, hide_all_panes_impl, navigate_pane_impl, sync_panes_impl, PaneBoundsSpec,
-    WebviewManagerState,
+use db::{
+    BookmarkItem, BrowserTab, ChatMessage, Conversation, ConversationDetail, DbState,
 };
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
+use tauri::{
+    menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
+    AppHandle, Emitter, Manager, RunEvent, State,
+};
+use webview_manager::{
+    close_tab_webview, control_tab_webview_impl, navigate_tab_webview_impl,
+    sync_tab_webviews_impl, TabBoundsSpec, WebviewManagerState,
+};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SatzSettings {
+    pub sgs_root: String,
+    pub python: String,
+    pub gemma_path: String,
+    pub port: u16,
+    pub max_live_tabs: usize,
+}
+
+impl Default for SatzSettings {
+    fn default() -> Self {
+        Self {
+            sgs_root: "..\\sgs".to_string(),
+            python: "..\\sgs\\.venv\\Scripts\\python.exe".to_string(),
+            gemma_path: "models/gemma-4-e4b-it".to_string(),
+            port: 8020,
+            max_live_tabs: 8,
+        }
+    }
+}
+
+pub struct SidecarState {
+    pub child: Mutex<Option<Child>>,
+    pub settings: SatzSettings,
+}
 
 #[tauri::command]
 fn list_conversations(db: State<'_, DbState>) -> Result<Vec<Conversation>, String> {
@@ -14,21 +49,49 @@ fn list_conversations(db: State<'_, DbState>) -> Result<Vec<Conversation>, Strin
 }
 
 #[tauri::command]
+fn get_conversation(
+    db: State<'_, DbState>,
+    conversation_id: String,
+) -> Result<ConversationDetail, String> {
+    db.get_conversation(&conversation_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn get_conversation_bundle(
     db: State<'_, DbState>,
     conversation_id: String,
-) -> Result<ConversationBundle, String> {
-    db.get_conversation_bundle(&conversation_id)
+) -> Result<ConversationDetail, String> {
+    db.get_conversation(&conversation_id)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn create_conversation(
     db: State<'_, DbState>,
-    intent_title: String,
-    initial_url: Option<String>,
+    title: String,
+    origin: Option<String>,
 ) -> Result<Conversation, String> {
-    db.create_conversation(&intent_title, initial_url.as_deref())
+    db.create_conversation(&title, origin.as_deref().unwrap_or("chat"))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn rename_conversation(
+    db: State<'_, DbState>,
+    conversation_id: String,
+    title: String,
+) -> Result<Conversation, String> {
+    db.rename_conversation(&conversation_id, &title)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn pin_conversation(
+    db: State<'_, DbState>,
+    conversation_id: String,
+) -> Result<Conversation, String> {
+    db.pin_conversation(&conversation_id)
         .map_err(|e| e.to_string())
 }
 
@@ -37,47 +100,147 @@ fn toggle_pin_conversation(
     db: State<'_, DbState>,
     conversation_id: String,
 ) -> Result<Conversation, String> {
-    db.toggle_pin_conversation(&conversation_id)
+    db.pin_conversation(&conversation_id)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn update_conversation_status(
+fn archive_conversation(
     db: State<'_, DbState>,
     conversation_id: String,
-    status: String,
+    archived: bool,
 ) -> Result<Conversation, String> {
-    db.update_conversation_status(&conversation_id, &status)
+    db.archive_conversation(&conversation_id, archived)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn delete_conversation(db: State<'_, DbState>, conversation_id: String) -> Result<(), String> {
+fn delete_conversation(
+    app: AppHandle,
+    db: State<'_, DbState>,
+    wv_state: State<'_, WebviewManagerState>,
+    conversation_id: String,
+) -> Result<(), String> {
+    if let Ok(detail) = db.get_conversation(&conversation_id) {
+        for tab in detail.tabs {
+            close_tab_webview(&app, &wv_state, &tab.id);
+        }
+    }
     db.delete_conversation(&conversation_id)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn upsert_attached_page(
+fn open_tab(
     db: State<'_, DbState>,
     conversation_id: String,
-    pane_index: i32,
     url: String,
-    title: String,
-) -> Result<AttachedPage, String> {
-    db.upsert_attached_page(&conversation_id, pane_index, &url, &title)
+    title: Option<String>,
+) -> Result<BrowserTab, String> {
+    let (tab, _src) = db
+        .open_tab(&conversation_id, &url, title.as_deref())
+        .map_err(|e| e.to_string())?;
+    Ok(tab)
+}
+
+#[tauri::command]
+async fn close_tab(
+    app: AppHandle,
+    db: State<'_, DbState>,
+    wv_state: State<'_, WebviewManagerState>,
+    tab_id: String,
+) -> Result<(), String> {
+    close_tab_webview(&app, &wv_state, &tab_id);
+    db.close_tab(&tab_id).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn reorder_tabs(
+    db: State<'_, DbState>,
+    conversation_id: String,
+    tab_ids: Vec<String>,
+) -> Result<(), String> {
+    db.reorder_tabs(&conversation_id, &tab_ids)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn add_thread_note(
+async fn navigate_tab(
+    app: AppHandle,
+    wv_state: State<'_, WebviewManagerState>,
+    db: State<'_, DbState>,
+    tab_id: String,
+    url: String,
+) -> Result<BrowserTab, String> {
+    let normalized = navigate_tab_webview_impl(&app, &wv_state, &tab_id, &url)?;
+    let res = db
+        .record_tab_navigation_or_title(&tab_id, Some(&normalized), None)
+        .map_err(|e| e.to_string())?;
+    res.map(|(tab, _)| tab)
+        .ok_or_else(|| "tab not found".to_string())
+}
+
+#[tauri::command]
+async fn control_tab(app: AppHandle, tab_id: String, action: String) -> Result<(), String> {
+    control_tab_webview_impl(&app, &tab_id, &action)
+}
+
+#[tauri::command]
+async fn sync_tab_webviews(
+    app: AppHandle,
+    wv_state: State<'_, WebviewManagerState>,
+    visible: Vec<TabBoundsSpec>,
+) -> Result<(), String> {
+    sync_tab_webviews_impl(&app, &wv_state, visible)
+}
+
+#[tauri::command]
+fn set_source_in_context(
+    db: State<'_, DbState>,
+    source_id: String,
+    in_context: bool,
+) -> Result<(), String> {
+    db.set_source_in_context(&source_id, in_context)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn add_message(
     db: State<'_, DbState>,
     conversation_id: String,
-    author: String,
+    role: String,
     content: String,
-) -> Result<ThreadNote, String> {
-    db.add_thread_note(&conversation_id, &author, &content)
-        .map_err(|e| e.to_string())
+    model: Option<String>,
+    source_ids_json: Option<String>,
+) -> Result<ChatMessage, String> {
+    db.add_message(
+        &conversation_id,
+        &role,
+        &content,
+        model.as_deref(),
+        source_ids_json.as_deref(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_bookmarks(db: State<'_, DbState>) -> Result<Vec<BookmarkItem>, String> {
+    db.list_bookmarks().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn add_bookmark(
+    db: State<'_, DbState>,
+    title: String,
+    url: String,
+) -> Result<BookmarkItem, String> {
+    db.add_bookmark(&title, &url).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn remove_bookmark(db: State<'_, DbState>, bookmark_id: String) -> Result<(), String> {
+    db.remove_bookmark(&bookmark_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -85,59 +248,148 @@ fn get_db_path(db: State<'_, DbState>) -> String {
     db.db_path.to_string_lossy().to_string()
 }
 
-#[tauri::command]
-async fn sync_child_panes(
-    app: AppHandle,
-    wv_state: State<'_, WebviewManagerState>,
-    panes: Vec<PaneBoundsSpec>,
-) -> Result<(), String> {
-    sync_panes_impl(&app, &wv_state, panes)
+fn load_or_create_settings(app_data_dir: &PathBuf) -> SatzSettings {
+    let settings_path = app_data_dir.join("settings.json");
+    if let Ok(raw) = std::fs::read_to_string(&settings_path) {
+        if let Ok(parsed) = serde_json::from_str::<SatzSettings>(&raw) {
+            return parsed;
+        }
+    }
+    let default_settings = SatzSettings::default();
+    if let Ok(json_str) = serde_json::to_string_pretty(&default_settings) {
+        let _ = std::fs::write(&settings_path, json_str);
+    }
+    default_settings
 }
 
-#[tauri::command]
-async fn navigate_child_pane(
-    app: AppHandle,
-    wv_state: State<'_, WebviewManagerState>,
-    db: State<'_, DbState>,
-    conversation_id: String,
-    pane_index: usize,
-    url: String,
-    title: Option<String>,
-) -> Result<AttachedPage, String> {
-    let normalized = navigate_pane_impl(&app, &wv_state, pane_index, &url)?;
-    let page_title = title.unwrap_or_else(|| normalized.clone());
-    db.upsert_attached_page(&conversation_id, pane_index as i32, &normalized, &page_title)
-        .map_err(|e| e.to_string())
+fn resolve_repo_root() -> PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if cwd.join("sidecar").join("satz_models.py").exists() {
+        return cwd;
+    }
+    if let Some(parent) = cwd.parent() {
+        if parent.join("sidecar").join("satz_models.py").exists() {
+            return parent.to_path_buf();
+        }
+    }
+    PathBuf::from("C:\\Users\\feama\\satz-browser")
 }
 
-#[tauri::command]
-async fn control_child_pane(
-    app: AppHandle,
-    pane_index: usize,
-    action: String,
-) -> Result<(), String> {
-    control_pane_impl(&app, pane_index, &action)
+fn spawn_sidecar(settings: &SatzSettings, app_data_dir: &PathBuf) -> Option<Child> {
+    let repo_root = resolve_repo_root();
+    let script_path = repo_root.join("sidecar").join("satz_models.py");
+    if !script_path.exists() {
+        return None;
+    }
+
+    let python_candidate = repo_root.join(&settings.python);
+    let python_bin = if python_candidate.exists() {
+        python_candidate.to_string_lossy().to_string()
+    } else {
+        "python".to_string()
+    };
+
+    let sgs_candidate = repo_root.join(&settings.sgs_root);
+    let sgs_root_str = if sgs_candidate.exists() {
+        sgs_candidate.to_string_lossy().to_string()
+    } else {
+        settings.sgs_root.clone()
+    };
+
+    let store_path = app_data_dir.join("planck_store.sqlite");
+
+    let mut cmd = Command::new(python_bin);
+    cmd.arg(&script_path)
+        .arg("--sgs-root")
+        .arg(sgs_root_str)
+        .arg("--gemma-path")
+        .arg(&settings.gemma_path)
+        .arg("--port")
+        .arg(settings.port.to_string())
+        .arg("--store")
+        .arg(store_path.to_string_lossy().to_string())
+        .current_dir(&repo_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    cmd.spawn().ok()
 }
 
-#[tauri::command]
-async fn hide_all_child_panes(app: AppHandle) -> Result<(), String> {
-    hide_all_panes_impl(&app)
+fn setup_app_menu_accelerators(app: &tauri::App) -> tauri::Result<()> {
+    let shortcuts: &[(&str, &str, &str)] = &[
+        ("new_conversation", "New Conversation", "CmdOrCtrl+N"),
+        ("filter_conversations", "Filter Conversations", "CmdOrCtrl+K"),
+        ("new_tab", "New Tab", "CmdOrCtrl+T"),
+        ("close_tab", "Close Tab", "CmdOrCtrl+W"),
+        ("tab_chat", "Chat Tab", "CmdOrCtrl+1"),
+        ("tab_2", "Site Tab 1", "CmdOrCtrl+2"),
+        ("tab_3", "Site Tab 2", "CmdOrCtrl+3"),
+        ("tab_4", "Site Tab 3", "CmdOrCtrl+4"),
+        ("tab_5", "Site Tab 4", "CmdOrCtrl+5"),
+        ("tab_6", "Site Tab 5", "CmdOrCtrl+6"),
+        ("tab_7", "Site Tab 6", "CmdOrCtrl+7"),
+        ("tab_8", "Site Tab 7", "CmdOrCtrl+8"),
+        ("tab_9", "Site Tab 8", "CmdOrCtrl+9"),
+        ("focus_address", "Focus Address Bar", "CmdOrCtrl+L"),
+        ("toggle_agent_rail", "Toggle Agent Rail", "CmdOrCtrl+J"),
+        ("toggle_compare", "Compare Selected Tabs", "CmdOrCtrl+M"),
+        ("bookmark_current", "Bookmark Current Page", "CmdOrCtrl+D"),
+    ];
+
+    let mut submenu = SubmenuBuilder::new(app, "satz");
+    for (id, label, accel) in shortcuts {
+        let item = MenuItemBuilder::with_id(*id, *label)
+            .accelerator(*accel)
+            .build(app)?;
+        submenu = submenu.item(&item);
+    }
+
+    let menu = MenuBuilder::new(app).item(&submenu.build()?).build()?;
+    app.set_menu(menu)?;
+
+    app.on_menu_event(move |app_handle, event| {
+        let _ = app_handle.emit("menu-shortcut", event.id().0.as_str());
+    });
+
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .setup(|app| {
             let app_data_dir = app
                 .path()
                 .app_data_dir()
                 .unwrap_or_else(|_| std::env::temp_dir().join("satz-browser"));
+            let _ = std::fs::create_dir_all(&app_data_dir);
+
+            let settings = load_or_create_settings(&app_data_dir);
             let db_path = app_data_dir.join("satz.db");
             let db_state =
-                DbState::init(db_path).expect("Failed to initialize local SQLite database");
+                DbState::init(db_path).expect("failed to initialize local SQLite database");
+
+            let mut wv_manager = WebviewManagerState::default();
+            wv_manager.max_live_tabs = settings.max_live_tabs.max(1);
+
+            let child_proc = spawn_sidecar(&settings, &app_data_dir);
 
             app.manage(db_state);
-            app.manage(WebviewManagerState::default());
+            app.manage(wv_manager);
+            app.manage(SidecarState {
+                child: Mutex::new(child_proc),
+                settings,
+            });
+
+            let _ = setup_app_menu_accelerators(app);
 
             if let Some(main_window) = app.get_window("main") {
                 let _ = main_window.show();
@@ -148,19 +400,39 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_conversations,
+            get_conversation,
             get_conversation_bundle,
             create_conversation,
+            rename_conversation,
+            pin_conversation,
             toggle_pin_conversation,
-            update_conversation_status,
+            archive_conversation,
             delete_conversation,
-            upsert_attached_page,
-            add_thread_note,
+            open_tab,
+            close_tab,
+            reorder_tabs,
+            navigate_tab,
+            control_tab,
+            sync_tab_webviews,
+            set_source_in_context,
+            add_message,
+            list_bookmarks,
+            add_bookmark,
+            remove_bookmark,
             get_db_path,
-            sync_child_panes,
-            navigate_child_pane,
-            control_child_pane,
-            hide_all_child_panes,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Satz Browser application");
+        .build(tauri::generate_context!())
+        .expect("error while building satz application");
+
+    app.run(|app_handle, event| {
+        if let RunEvent::Exit = event {
+            if let Some(sidecar) = app_handle.try_state::<SidecarState>() {
+                if let Ok(mut guard) = sidecar.child.lock() {
+                    if let Some(mut child) = guard.take() {
+                        let _ = child.kill();
+                    }
+                }
+            }
+        }
+    });
 }

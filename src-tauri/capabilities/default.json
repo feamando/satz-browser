@@ -1,9 +1,9 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for Satz Browser Phase 0 shell",
+  "description": "Default capability for Satz Browser main UI webview only (child site webviews have no IPC)",
   "windows": ["main"],
-  "webviews": ["main", "pane-0", "pane-1", "pane-2", "pane-3"],
+  "webviews": ["main"],
   "permissions": [
     "core:default",
     "core:event:default",
