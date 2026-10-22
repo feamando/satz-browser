@@ -32,8 +32,9 @@ Owner: Nikita Gorshkov · Date: 2026-10-20 · Target: Windows 11 (4090 box) firs
   - Each site tab uses a dedicated child webview `tab-<id>` preserving scroll position, DOM state, and back/forward history across tab switches.
   - Live child webviews are capped at `max_live_tabs = 8` via `select_lru_eviction_candidates` / `enforce_lru_cap`. Least-recently-shown hidden tabs are closed when the cap is exceeded and transparently reloaded when shown again.
   - Verified by unit test `webview_manager::tests::test_lru_cap_evicts_oldest_non_visible_tabs_at_8`.
-- **Keyboard Shortcuts Inside Focused Child WebView2 (`src-tauri/src/lib.rs`):**
-  - Registered `CmdOrCtrl+N`, `CmdOrCtrl+K`, `CmdOrCtrl+T`, `CmdOrCtrl+W`, `CmdOrCtrl+L`, `CmdOrCtrl+J`, `CmdOrCtrl+M`, `CmdOrCtrl+D`, and `CmdOrCtrl+1`..`CmdOrCtrl+9` as Tauri app menu accelerators (`setup_app_menu_accelerators`), forwarding `menu-shortcut` events to the `"main"` webview so `Mod+1`..`Mod+9` work even when focus is inside a child WebView2 page.
+- **Keyboard Shortcuts Inside Focused Child WebView2 (`src-tauri/src/webview_manager.rs` & `src-tauri/src/lib.rs`):**
+  - On Windows 11, child WebView2 controllers register `ICoreWebView2Controller::add_AcceleratorKeyPressed` via `with_webview` (`attach_child_webview_accelerators`) and emit `menu-shortcut` events to the `"main"` webview for `Ctrl+N`, `Ctrl+K`, `Ctrl+T`, `Ctrl+W`, `Ctrl+L`, `Ctrl+J`, `Ctrl+M`, `Ctrl+D`, and `Ctrl+1`..`Ctrl+9` without attaching a Win32 menu bar to the multi-webview parent `HWND`. On macOS, Tauri app menu accelerators (`setup_app_menu_accelerators`) are used.
+  - Enabled `default = ["custom-protocol"]` in `src-tauri/Cargo.toml` so launching `satz-browser.exe` directly from `src-tauri/target/debug/` or `src-tauri/target/release/` serves embedded `../dist` assets without requiring a running Vite dev server.
 
 ## Milestone 4 (M4): Start Screen, Direct Browsing, Bookmarks
 

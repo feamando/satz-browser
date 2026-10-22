@@ -987,6 +987,10 @@ async function handleSendChatMessage(text: string): Promise<void> {
   }
 }
 
-window.addEventListener("DOMContentLoaded", () => {
+if (document.readyState === "loading") {
+  window.addEventListener("DOMContentLoaded", () => {
+    void initApp();
+  });
+} else {
   void initApp();
-});
+}
