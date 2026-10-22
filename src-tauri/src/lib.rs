@@ -8,10 +8,12 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+#[cfg(target_os = "macos")]
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
-    AppHandle, Emitter, Manager, RunEvent, State,
+    Emitter,
 };
+use tauri::{AppHandle, Manager, RunEvent, State};
 use webview_manager::{
     close_tab_webview, control_tab_webview_impl, navigate_tab_webview_impl,
     sync_tab_webviews_impl, TabBoundsSpec, WebviewManagerState,
@@ -263,13 +265,18 @@ fn load_or_create_settings(app_data_dir: &PathBuf) -> SatzSettings {
 }
 
 fn resolve_repo_root() -> PathBuf {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    if cwd.join("sidecar").join("satz_models.py").exists() {
-        return cwd;
+    if let Ok(exe) = std::env::current_exe() {
+        for anc in exe.ancestors() {
+            if anc.join("sidecar").join("satz_models.py").exists() {
+                return anc.to_path_buf();
+            }
+        }
     }
-    if let Some(parent) = cwd.parent() {
-        if parent.join("sidecar").join("satz_models.py").exists() {
-            return parent.to_path_buf();
+    if let Ok(cwd) = std::env::current_dir() {
+        for anc in cwd.ancestors() {
+            if anc.join("sidecar").join("satz_models.py").exists() {
+                return anc.to_path_buf();
+            }
         }
     }
     PathBuf::from("C:\\Users\\feama\\satz-browser")
@@ -323,6 +330,7 @@ fn spawn_sidecar(settings: &SatzSettings, app_data_dir: &PathBuf) -> Option<Chil
     cmd.spawn().ok()
 }
 
+#[cfg(target_os = "macos")]
 fn setup_app_menu_accelerators(app: &tauri::App) -> tauri::Result<()> {
     let shortcuts: &[(&str, &str, &str)] = &[
         ("new_conversation", "New Conversation", "CmdOrCtrl+N"),
@@ -389,7 +397,10 @@ pub fn run() {
                 settings,
             });
 
-            let _ = setup_app_menu_accelerators(app);
+            #[cfg(target_os = "macos")]
+            {
+                let _ = setup_app_menu_accelerators(app);
+            }
 
             if let Some(main_window) = app.get_window("main") {
                 let _ = main_window.show();

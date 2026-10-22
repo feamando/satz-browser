@@ -312,11 +312,79 @@ pub fn sync_tab_webviews_impl(
                 )
                 .map_err(|e| format!("failed to add child webview {}: {}", label, e))?;
 
+            #[cfg(windows)]
+            attach_child_webview_accelerators(app.clone(), &child_wv);
+
             let _ = child_wv.show();
         }
     }
 
     Ok(())
+}
+
+#[cfg(windows)]
+fn attach_child_webview_accelerators(app: AppHandle, child_wv: &tauri::Webview) {
+    let _ = child_wv.with_webview(move |platform_wv| {
+        unsafe {
+            use webview2_com::AcceleratorKeyPressedEventHandler;
+            use webview2_com::Microsoft::Web::WebView2::Win32::{
+                COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,
+                COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN,
+            };
+
+            #[link(name = "user32")]
+            extern "system" {
+                fn GetKeyState(nVirtKey: i32) -> i16;
+            }
+            const VK_CONTROL: i32 = 0x11;
+
+            let controller = platform_wv.controller();
+            let handler = AcceleratorKeyPressedEventHandler::create(Box::new(
+                move |_controller, args| {
+                    if let Some(args) = args {
+                        let mut kind = COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN;
+                        let _ = args.KeyEventKind(&mut kind);
+                        if kind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
+                            || kind == COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN
+                        {
+                            let ctrl_down = (GetKeyState(VK_CONTROL) as u16 & 0x8000) != 0;
+                            if ctrl_down {
+                                let mut key: u32 = 0;
+                                let _ = args.VirtualKey(&mut key);
+                                let cmd = match key {
+                                    0x4E => Some("new_conversation"),     // Ctrl+N
+                                    0x4B => Some("filter_conversations"), // Ctrl+K
+                                    0x54 => Some("new_tab"),              // Ctrl+T
+                                    0x57 => Some("close_tab"),            // Ctrl+W
+                                    0x4C => Some("focus_address"),        // Ctrl+L
+                                    0x4A => Some("toggle_agent_rail"),    // Ctrl+J
+                                    0x4D => Some("toggle_compare"),       // Ctrl+M
+                                    0x44 => Some("bookmark_current"),     // Ctrl+D
+                                    0x31 => Some("tab_chat"),             // Ctrl+1
+                                    0x32 => Some("tab_2"),                // Ctrl+2
+                                    0x33 => Some("tab_3"),                // Ctrl+3
+                                    0x34 => Some("tab_4"),                // Ctrl+4
+                                    0x35 => Some("tab_5"),                // Ctrl+5
+                                    0x36 => Some("tab_6"),                // Ctrl+6
+                                    0x37 => Some("tab_7"),                // Ctrl+7
+                                    0x38 => Some("tab_8"),                // Ctrl+8
+                                    0x39 => Some("tab_9"),                // Ctrl+9
+                                    _ => None, // Ctrl+F (0x46) left to WebView2 find-in-page
+                                };
+                                if let Some(action) = cmd {
+                                    let _ = args.SetHandled(true);
+                                    let _ = app.emit("menu-shortcut", action);
+                                }
+                            }
+                        }
+                    }
+                    Ok(())
+                },
+            ));
+            let mut token: i64 = 0;
+            let _ = controller.add_AcceleratorKeyPressed(&handler, &mut token);
+        }
+    });
 }
 
 pub fn navigate_tab_webview_impl(

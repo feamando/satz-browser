@@ -4,8 +4,6 @@
   "version": "0.3.0",
   "identifier": "com.satz.browser",
   "build": {
-    "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
@@ -20,7 +18,8 @@
         "minWidth": 960,
         "minHeight": 640,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "backgroundColor": "#000000"
       }
     ],
     "security": {

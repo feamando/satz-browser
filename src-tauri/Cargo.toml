@@ -5,6 +5,10 @@ description = "Satz: AI-Native Browser (v0.3 Working Browser - Conversations, Ta
 authors = ["Nikita Gorshkov"]
 edition = "2021"
 
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
 [lib]
 name = "satz_browser_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
