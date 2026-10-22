@@ -35,6 +35,7 @@ Owner: Nikita Gorshkov · Date: 2026-10-20 · Target: Windows 11 (4090 box) firs
 - **Keyboard Shortcuts Inside Focused Child WebView2 (`src-tauri/src/webview_manager.rs` & `src-tauri/src/lib.rs`):**
   - On Windows 11, child WebView2 controllers register `ICoreWebView2Controller::add_AcceleratorKeyPressed` via `with_webview` (`attach_child_webview_accelerators`) and emit `menu-shortcut` events to the `"main"` webview for `Ctrl+N`, `Ctrl+K`, `Ctrl+T`, `Ctrl+W`, `Ctrl+L`, `Ctrl+J`, `Ctrl+M`, `Ctrl+D`, and `Ctrl+1`..`Ctrl+9` without attaching a Win32 menu bar to the multi-webview parent `HWND`. On macOS, Tauri app menu accelerators (`setup_app_menu_accelerators`) are used.
   - Enabled `default = ["custom-protocol"]` in `src-tauri/Cargo.toml` so launching `satz-browser.exe` directly from `src-tauri/target/debug/` or `src-tauri/target/release/` serves embedded `../dist` assets without requiring a running Vite dev server.
+  - Added `ensure_default_desktop_on_windows` at the start of `run()` (`src-tauri/src/lib.rs`): if launched from a sandboxed non-`Default` Win32 desktop (such as `exebox-*`), `satz-browser.exe` re-spawns itself onto `WinSta0\Default` before initializing Tauri/WebView2 so `EBWebView` is never locked by a hidden desktop session.
 
 ## Milestone 4 (M4): Start Screen, Direct Browsing, Bookmarks
 
