@@ -344,7 +344,32 @@ export async function sidecarFetchKnowledge(): Promise<KnowledgeSummary | null> 
   try {
     const res = await fetch(`${SIDECAR_BASE}/knowledge`);
     if (!res.ok) return null;
-    return (await res.json()) as KnowledgeSummary;
+    const raw = (await res.json()) as Record<string, unknown>;
+    const rawDomains = (raw.top_domains ?? []) as Array<Record<string, unknown>>;
+    const rawTopics = (raw.top_topics ?? []) as Array<Record<string, unknown>>;
+    const rawPassages = (raw.passages ?? []) as Array<Record<string, unknown>>;
+
+    return {
+      pause_learning: Boolean(raw.pause_learning),
+      queue_len: Number(raw.queue_len ?? 0),
+      top_domains: rawDomains.map((d) => ({
+        domain: String(d.domain ?? ""),
+        visits: Number(d.visits ?? 0),
+        score: Number(d.score ?? d.trust ?? 0),
+      })),
+      top_topics: rawTopics.map((t) => ({
+        topic: String(t.topic ?? t.entity ?? ""),
+        weight: Number(t.weight ?? t.score ?? 0),
+      })),
+      passages: rawPassages.map((p) => ({
+        id: String(p.id ?? ""),
+        conversation_id: String(p.conversation_id ?? ""),
+        entity: String(p.entity ?? p.title ?? p.domain ?? ""),
+        url: String(p.url ?? ""),
+        text: String(p.text ?? ""),
+        added_at: String(p.added_at ?? p.ts ?? ""),
+      })),
+    };
   } catch {
     return null;
   }
