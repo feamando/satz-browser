@@ -15,7 +15,6 @@ import {
   apiPinConversation,
   apiRemoveBookmark,
   apiRenameConversation,
-  apiSetSourceInContext,
   sidecarDeletePassage,
   sidecarFetchDigest,
   sidecarFetchHealth,
@@ -29,19 +28,19 @@ import { appendStreamingDelta, renderChatPanel } from "./chat";
 import { bindKeyboardShortcuts } from "./keys";
 import { renderKnowledgeView } from "./knowledge";
 import { renderRail } from "./rail";
-import { renderSourcesPanel } from "./sources";
 import { renderStartScreen } from "./start";
 import {
   classifyStartInput,
   escapeHtml,
   extractDomain,
+  getActiveTabSources,
   MOD_LABEL,
   normalizeUrl,
   state,
 } from "./state";
 import { renderStatusLine } from "./status";
 import { renderTabStrip, scheduleWebviewLayoutSync } from "./tabs";
-import type { LocalModelId, SourceItem, TabPageEvent } from "./types";
+import type { LocalModelId, TabPageEvent } from "./types";
 
 let resizeObserver: ResizeObserver | null = null;
 
@@ -252,9 +251,22 @@ async function handleTabPageEvent(payload: TabPageEvent): Promise<void> {
       renderRailRegion();
       renderTabStripRegion();
       renderStatusLine();
+      refreshChatContextIfVisible();
     }
   } else {
     renderTabStripRegion();
+    refreshChatContextIfVisible();
+  }
+}
+
+function refreshChatContextIfVisible(): void {
+  if (state.isStreaming) return;
+  const chatEl =
+    document.getElementById("chat-main-container") ??
+    document.getElementById("site-tab-agent-rail") ??
+    document.getElementById("compare-agent-rail");
+  if (chatEl) {
+    renderChatPanel(chatEl, getChatActions());
   }
 }
 
@@ -430,16 +442,11 @@ function renderViewportRegion(): void {
     viewport.innerHTML = `
       <div class="chat-view">
         <div class="viewport-primary" id="chat-main-container"></div>
-        <aside class="right-panel" id="sources-side-container"></aside>
       </div>
     `;
     const chatEl = document.getElementById("chat-main-container");
-    const srcEl = document.getElementById("sources-side-container");
     if (chatEl) {
       renderChatPanel(chatEl, getChatActions());
-    }
-    if (srcEl) {
-      renderSourcesPanel(srcEl, getSourcesActions());
     }
     scheduleWebviewLayoutSync();
     return;
@@ -621,42 +628,16 @@ function getChatActions() {
     onOpenUrlAsTab: (url: string, title: string) => {
       void handleOpenUrlAsTab(url, title);
     },
-  };
-}
-
-function getSourcesActions() {
-  return {
-    onToggleSourceInContext: async (sourceId: string, inContext: boolean) => {
-      if (!state.activeDetail) return;
-      await apiSetSourceInContext(sourceId, inContext);
-      state.activeDetail = await apiGetConversation(
-        state.activeDetail.conversation.id
-      );
-      renderViewportRegion();
-      renderStatusLine();
+    onSelectTab: (tabId: string) => {
+      state.compareMode = false;
+      state.activeTabId = tabId;
+      renderWorkspaceRegions();
     },
-    onJumpToSource: async (src: SourceItem) => {
-      if (!state.activeDetail) return;
-      const openTab = state.activeDetail.tabs.find(
-        (t) => t.id === src.tab_id && t.is_open
-      );
-      if (openTab) {
-        state.compareMode = false;
-        state.activeTabId = openTab.id;
-        renderWorkspaceRegions();
-      } else {
-        const reopened = await apiOpenTab(
-          state.activeDetail.conversation.id,
-          src.url,
-          src.title
-        );
-        state.activeDetail = await apiGetConversation(
-          state.activeDetail.conversation.id
-        );
-        state.compareMode = false;
-        state.activeTabId = reopened.id;
-        renderAllRegions();
-      }
+    onCloseTab: (tabId: string) => {
+      void handleCloseTab(tabId);
+    },
+    onNewTab: () => {
+      void handleCreateNewTab();
     },
   };
 }
@@ -819,17 +800,28 @@ async function handleCitationClick(
   sourceId: string | null
 ): Promise<void> {
   if (!state.activeDetail) return;
-  const checkedSources = state.activeDetail.sources.filter((s) => s.in_context);
-  const targetSource =
+  const activeTabSources = getActiveTabSources(state.activeDetail);
+  const byActiveTab =
+    activeTabSources.find(
+      (item) => item.sourceId === sourceId || item.tab.id === sourceId
+    ) ?? activeTabSources[citationIndex - 1];
+
+  if (byActiveTab) {
+    state.compareMode = false;
+    state.activeTabId = byActiveTab.tab.id;
+    renderWorkspaceRegions();
+    return;
+  }
+
+  const historicalSource =
     state.activeDetail.sources.find((s) => s.id === sourceId) ??
-    checkedSources[citationIndex - 1] ??
     state.activeDetail.sources[citationIndex - 1];
-  if (!targetSource) return;
+  if (!historicalSource) return;
 
   const openTab = state.activeDetail.tabs.find(
     (t) =>
       t.is_open &&
-      (t.id === targetSource.tab_id || t.url === targetSource.url)
+      (t.id === historicalSource.tab_id || t.url === historicalSource.url)
   );
   if (openTab) {
     state.compareMode = false;
@@ -838,8 +830,8 @@ async function handleCitationClick(
   } else {
     const newTab = await apiOpenTab(
       state.activeDetail.conversation.id,
-      targetSource.url,
-      targetSource.title
+      historicalSource.url,
+      historicalSource.title
     );
     state.activeDetail = await apiGetConversation(
       state.activeDetail.conversation.id
@@ -872,11 +864,7 @@ async function handleSendChatMessage(text: string): Promise<void> {
     return;
   }
 
-  const checkedSources =
-    state.activeDetail?.sources.filter((s) => s.in_context) ?? [];
-  const openTabIds = new Set(
-    (state.activeDetail?.tabs ?? []).filter((t) => t.is_open).map((t) => t.id)
-  );
+  const activeTabSources = getActiveTabSources(state.activeDetail);
 
   try {
     if (state.selectedModel === "planck3 (web)") {
@@ -913,7 +901,11 @@ async function handleSendChatMessage(text: string): Promise<void> {
       const res = await sidecarRunRead(
         state.selectedModel,
         text,
-        checkedSources.map((s) => ({ id: s.id, url: s.url, title: s.title }))
+        activeTabSources.map((s) => ({
+          id: s.sourceId,
+          url: s.url,
+          title: s.title,
+        }))
       );
       await apiAddMessage(
         convId,
@@ -927,7 +919,7 @@ async function handleSendChatMessage(text: string): Promise<void> {
       return;
     }
 
-    // Default: gemma-4-e4b streaming
+    // Default: gemma-4-e4b streaming over open tabs in context
     state.isStreaming = true;
     state.streamingText = "";
     renderViewportRegion();
@@ -937,21 +929,15 @@ async function handleSendChatMessage(text: string): Promise<void> {
       content: m.content,
     }));
 
-    const orderedSources = [...checkedSources].sort((a, b) => {
-      const aOpen = a.tab_id && openTabIds.has(a.tab_id) ? 1 : 0;
-      const bOpen = b.tab_id && openTabIds.has(b.tab_id) ? 1 : 0;
-      return bOpen - aOpen;
-    });
-
     const streamRes = await sidecarStreamChat(
       state.selectedModel,
       historyPayload,
-      orderedSources.map((s) => ({
-        id: s.id,
+      activeTabSources.map((s) => ({
+        id: s.sourceId,
         url: s.url,
         title: s.title,
         domain: s.domain,
-        is_open_tab: Boolean(s.tab_id && openTabIds.has(s.tab_id)),
+        is_open_tab: true,
       })),
       state.webSearchEnabled,
       (delta) => {

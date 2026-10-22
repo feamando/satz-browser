@@ -437,7 +437,7 @@ impl DbState {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT c.id, c.title, c.status, c.pinned, c.origin, c.created_at, c.last_active_at,
-                    (SELECT COUNT(*) FROM sources s WHERE s.conversation_id = c.id) AS src_cnt
+                    (SELECT COUNT(*) FROM tabs t WHERE t.conversation_id = c.id AND t.is_open = 1) AS src_cnt
              FROM conversations c
              ORDER BY c.pinned DESC, c.last_active_at DESC, c.created_at DESC",
         )?;
@@ -461,7 +461,7 @@ impl DbState {
         let conn = self.conn.lock().unwrap();
         let conversation = conn.query_row(
             "SELECT c.id, c.title, c.status, c.pinned, c.origin, c.created_at, c.last_active_at,
-                    (SELECT COUNT(*) FROM sources s WHERE s.conversation_id = c.id) AS src_cnt
+                    (SELECT COUNT(*) FROM tabs t WHERE t.conversation_id = c.id AND t.is_open = 1) AS src_cnt
              FROM conversations c
              WHERE c.id = ?1",
             params![conversation_id],
@@ -806,6 +806,12 @@ impl DbState {
             conn.execute(
                 "UPDATE tabs SET url = ?2, title = ?3 WHERE id = ?1",
                 params![tab_id, final_url, final_title],
+            )?;
+
+            // Deactivate prior sources for this tab so active context remains 1:1 with open tabs
+            conn.execute(
+                "UPDATE sources SET in_context = 0 WHERE tab_id = ?1",
+                params![tab_id],
             )?;
 
             let domain = extract_domain(&final_url);

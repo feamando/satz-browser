@@ -572,6 +572,54 @@ button.inverse,
   gap: 8px;
 }
 
+.composer-context-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.composer-context-pills {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.context-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  background-color: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+  max-width: 240px;
+  white-space: nowrap;
+}
+
+.context-pill:hover {
+  background-color: var(--hover);
+  border-color: var(--fg);
+}
+
+.context-pill.active {
+  border-color: var(--fg);
+}
+
+.context-add-btn {
+  padding: 1px 6px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  background-color: var(--bg);
+}
+
 .composer-input-row {
   display: flex;
   align-items: center;
