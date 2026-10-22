@@ -370,8 +370,133 @@ fn setup_app_menu_accelerators(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn ensure_default_desktop_on_windows() {
+    #[repr(C)]
+    struct StartupInfoW {
+        cb: u32,
+        lp_reserved: *mut u16,
+        lp_desktop: *mut u16,
+        lp_title: *mut u16,
+        dw_x: u32,
+        dw_y: u32,
+        dw_x_size: u32,
+        dw_y_size: u32,
+        dw_x_count_chars: u32,
+        dw_y_count_chars: u32,
+        dw_fill_attribute: u32,
+        dw_flags: u32,
+        w_show_window: u16,
+        cb_reserved2: u16,
+        lp_reserved2: *mut u8,
+        h_std_input: isize,
+        h_std_output: isize,
+        h_std_error: isize,
+    }
+
+    #[repr(C)]
+    struct ProcessInformation {
+        h_process: isize,
+        h_thread: isize,
+        dw_process_id: u32,
+        dw_thread_id: u32,
+    }
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetThreadDesktop(dwThreadId: u32) -> isize;
+        fn GetUserObjectInformationW(
+            hObj: isize,
+            nIndex: i32,
+            pvInfo: *mut u16,
+            nLength: u32,
+            lpnLengthNeeded: *mut u32,
+        ) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentThreadId() -> u32;
+        fn WaitForSingleObject(hHandle: isize, dwMilliseconds: u32) -> u32;
+        fn CreateProcessW(
+            lpApplicationName: *const u16,
+            lpCommandLine: *mut u16,
+            lpProcessAttributes: *const std::ffi::c_void,
+            lpThreadAttributes: *const std::ffi::c_void,
+            bInheritHandles: i32,
+            dwCreationFlags: u32,
+            lpEnvironment: *const std::ffi::c_void,
+            lpCurrentDirectory: *const u16,
+            lpStartupInfo: *const StartupInfoW,
+            lpProcessInformation: *mut ProcessInformation,
+        ) -> i32;
+    }
+
+    unsafe {
+        let h_desk = GetThreadDesktop(GetCurrentThreadId());
+        let mut buf = [0u16; 256];
+        let mut needed: u32 = 0;
+        // UOI_NAME = 2
+        if GetUserObjectInformationW(
+            h_desk,
+            2,
+            buf.as_mut_ptr(),
+            (buf.len() * 2) as u32,
+            &mut needed,
+        ) != 0
+        {
+            let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+            let desk_name = String::from_utf16_lossy(&buf[..end]);
+            if !desk_name.eq_ignore_ascii_case("Default") {
+                if let Ok(exe_path) = std::env::current_exe() {
+                    let exe_wide: Vec<u16> = exe_path
+                        .to_string_lossy()
+                        .encode_utf16()
+                        .chain(std::iter::once(0))
+                        .collect();
+                    let mut desktop_wide: Vec<u16> = "WinSta0\\Default"
+                        .encode_utf16()
+                        .chain(std::iter::once(0))
+                        .collect();
+                    let repo_root = resolve_repo_root();
+                    let cwd_wide: Vec<u16> = repo_root
+                        .to_string_lossy()
+                        .encode_utf16()
+                        .chain(std::iter::once(0))
+                        .collect();
+
+                    let mut si: StartupInfoW = std::mem::zeroed();
+                    si.cb = std::mem::size_of::<StartupInfoW>() as u32;
+                    si.lp_desktop = desktop_wide.as_mut_ptr();
+                    let mut pi: ProcessInformation = std::mem::zeroed();
+
+                    let ok = CreateProcessW(
+                        exe_wide.as_ptr(),
+                        std::ptr::null_mut(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        0,
+                        0,
+                        std::ptr::null(),
+                        cwd_wide.as_ptr(),
+                        &si,
+                        &mut pi,
+                    );
+                    if ok != 0 {
+                        let _ = WaitForSingleObject(pi.h_process, 0xFFFFFFFF);
+                        std::process::exit(0);
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(windows)]
+    ensure_default_desktop_on_windows();
+
     let app = tauri::Builder::default()
         .setup(|app| {
             let app_data_dir = app
