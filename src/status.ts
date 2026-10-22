@@ -1,4 +1,4 @@
-import { escapeHtml, state } from "./state";
+import { escapeHtml, getActiveTabSources, state } from "./state";
 
 export function renderStatusLine(): void {
   const container = document.getElementById("region-status-bar");
@@ -18,8 +18,7 @@ export function renderStatusLine(): void {
           : "[ok]";
 
   const sidecarStatus = state.sidecar.online ? "[ok]" : "[offline]";
-  const sourcesInContext =
-    state.activeDetail?.sources.filter((s) => s.in_context).length ?? 0;
+  const sourcesInContext = getActiveTabSources(state.activeDetail).length;
   const queueLen = state.sidecar.ingest_queue_len;
   const learnState = state.sidecar.pause_learning ? " [paused]" : "";
 

@@ -35,7 +35,7 @@ export function renderTabStrip(actions: TabStripActions): void {
         <span>[ chat ]</span>
       </div>
       ${openTabs
-        .map((tab) => {
+        .map((tab, idx) => {
           const isActive =
             !state.compareMode && state.activeTabId === tab.id;
           const isSelectedForCompare = state.compareTabIds.includes(tab.id);
@@ -45,9 +45,10 @@ export function renderTabStrip(actions: TabStripActions): void {
             <div
               class="tab-item ${isActive ? "active" : ""} ${isSelectedForCompare ? "selected-compare" : ""}"
               data-site-tab-id="${escapeHtml(tab.id)}"
+              title="source [${idx + 1}] in chat context · ${escapeHtml(tab.title || tab.url)}"
             >
-              <span class="truncate">[ ${escapeHtml(domain)} · ${escapeHtml(shortTitle)} ]</span>
-              <button class="tab-close-btn" data-close-tab-id="${escapeHtml(tab.id)}" title="close tab">x</button>
+              <span class="truncate">[${idx + 1}] ${escapeHtml(domain)} · ${escapeHtml(shortTitle)}</span>
+              <button class="tab-close-btn" data-close-tab-id="${escapeHtml(tab.id)}" title="close tab and remove from context">x</button>
             </div>
           `;
         })

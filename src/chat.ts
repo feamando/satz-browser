@@ -1,4 +1,4 @@
-import { escapeHtml, state } from "./state";
+import { escapeHtml, getActiveTabSources, state } from "./state";
 import type { LocalModelId } from "./types";
 
 const LOCAL_MODELS: LocalModelId[] = [
@@ -14,6 +14,9 @@ export interface ChatActions {
   onToggleWeb: () => void;
   onClickCitation: (citationIndex: number, sourceId: string | null) => void;
   onOpenUrlAsTab: (url: string, title: string) => void;
+  onSelectTab?: (tabId: string) => void;
+  onCloseTab?: (tabId: string) => void;
+  onNewTab?: () => void;
 }
 
 export function renderChatPanel(
@@ -26,10 +29,61 @@ export function renderChatPanel(
     return;
   }
 
+  const existingInput = container.querySelector(
+    "#chat-composer-input"
+  ) as HTMLInputElement | null;
+  const wasFocused =
+    Boolean(existingInput) && document.activeElement === existingInput;
+  const preservedValue = existingInput?.value ?? "";
+  const preservedSelection =
+    existingInput?.selectionStart ?? preservedValue.length;
+
   const messages = detail.messages;
+  const activeTabSources = getActiveTabSources(detail);
   const offlineNotice = !state.sidecar.online
     ? "models [offline] - browser tabs work normally; start sidecar for local chat"
-    : "ask over checked sources or type a question_";
+    : activeTabSources.length > 0
+      ? `ask over ${activeTabSources.length} open tab${activeTabSources.length === 1 ? "" : "s"} in context or type a question_`
+      : "ask a question or open a tab [+] to add context_";
+
+  const contextPillsHtml =
+    activeTabSources.length === 0
+      ? `
+        <div class="composer-context-row">
+          <span class="muted">context (0 tabs):</span>
+          <div class="composer-context-pills">
+            <span class="muted">open tabs are automatically added to chat context</span>
+            <button id="chat-context-add-tab-btn" class="context-add-btn">[+ open tab]</button>
+          </div>
+        </div>
+      `
+      : `
+        <div class="composer-context-row">
+          <span class="muted">context (${activeTabSources.length}):</span>
+          <div class="composer-context-pills">
+            ${activeTabSources
+              .map(
+                (item) => `
+              <div
+                class="context-pill ${state.activeTabId === item.tab.id ? "active" : ""}"
+                data-pill-tab-id="${escapeHtml(item.tab.id)}"
+                title="${escapeHtml(item.title)} (${escapeHtml(item.url)})"
+              >
+                <span class="muted">[${item.index}]</span>
+                <span class="truncate">${escapeHtml(item.domain)} · ${escapeHtml(item.title.slice(0, 22))}</span>
+                <button
+                  class="tab-close-btn"
+                  data-pill-close-tab-id="${escapeHtml(item.tab.id)}"
+                  title="close tab and remove from context"
+                >x</button>
+              </div>
+            `
+              )
+              .join("")}
+            <button id="chat-context-add-tab-btn" class="context-add-btn" title="open a new tab to add to context">[+ tab]</button>
+          </div>
+        </div>
+      `;
 
   container.innerHTML = `
     <div class="chat-column">
@@ -55,6 +109,7 @@ export function renderChatPanel(
       </div>
 
       <div class="chat-composer">
+        ${contextPillsHtml}
         <div class="composer-input-row">
           <span class="muted">&gt;</span>
           <input
@@ -90,6 +145,19 @@ export function renderChatPanel(
   `;
 
   bindChatEvents(container, actions);
+
+  if (preservedValue || wasFocused) {
+    const nextInput = container.querySelector(
+      "#chat-composer-input"
+    ) as HTMLInputElement | null;
+    if (nextInput) {
+      nextInput.value = preservedValue;
+      if (wasFocused) {
+        nextInput.focus();
+        nextInput.setSelectionRange(preservedSelection, preservedSelection);
+      }
+    }
+  }
 }
 
 export function appendStreamingDelta(delta: string): void {
@@ -213,4 +281,33 @@ function bindChatEvents(container: HTMLElement, actions: ChatActions): void {
       if (url) actions.onOpenUrlAsTab(url, title);
     });
   });
+
+  container.querySelectorAll("[data-pill-tab-id]").forEach((pill) => {
+    pill.addEventListener("click", (e) => {
+      const target = e.target as HTMLElement;
+      if (target.closest("[data-pill-close-tab-id]")) return;
+      const tabId = (pill as HTMLElement).getAttribute("data-pill-tab-id");
+      if (tabId && actions.onSelectTab) {
+        actions.onSelectTab(tabId);
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-pill-close-tab-id]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const tabId = (btn as HTMLElement).getAttribute("data-pill-close-tab-id");
+      if (tabId && actions.onCloseTab) {
+        actions.onCloseTab(tabId);
+      }
+    });
+  });
+
+  container
+    .querySelector("#chat-context-add-tab-btn")
+    ?.addEventListener("click", () => {
+      if (actions.onNewTab) {
+        actions.onNewTab();
+      }
+    });
 }

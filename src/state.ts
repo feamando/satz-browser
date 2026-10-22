@@ -1,5 +1,6 @@
 import type {
   BookmarkItem,
+  BrowserTab,
   Conversation,
   ConversationDetail,
   DigestEntry,
@@ -179,4 +180,36 @@ export function formatRelativeTime(isoOrEpoch: string): string {
   if (diffHr < 24) return `${diffHr}h ago`;
   const diffDays = Math.floor(diffHr / 24);
   return `${diffDays}d ago`;
+}
+
+export interface ActiveTabSource {
+  index: number;
+  tab: BrowserTab;
+  sourceId: string;
+  domain: string;
+  title: string;
+  url: string;
+}
+
+export function getActiveTabSources(
+  detail: ConversationDetail | null = state.activeDetail
+): ActiveTabSource[] {
+  if (!detail) return [];
+  const openTabs = detail.tabs.filter((t) => t.is_open);
+  return openTabs.map((tab, idx) => {
+    const matchedSource =
+      detail.sources.find((s) => s.tab_id === tab.id && s.in_context) ??
+      detail.sources.find((s) => s.tab_id === tab.id && s.url === tab.url) ??
+      detail.sources.find((s) => s.tab_id === tab.id);
+    const domain = matchedSource?.domain || extractDomain(tab.url);
+    const title = tab.title || matchedSource?.title || domain;
+    return {
+      index: idx + 1,
+      tab,
+      sourceId: matchedSource?.id ?? tab.id,
+      domain,
+      title,
+      url: tab.url,
+    };
+  });
 }
