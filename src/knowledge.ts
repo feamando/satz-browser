@@ -41,7 +41,7 @@ export function renderKnowledgeView(
                   (d) => `
               <div class="rail-row">
                 <span>${escapeHtml(d.domain)}</span>
-                <span class="muted">${d.visits} visits · score ${d.score.toFixed(1)}</span>
+                <span class="muted">${d.visits} visits · trust ${Number(d.score ?? 0).toFixed(1)}</span>
               </div>
             `
                 )
@@ -61,7 +61,7 @@ export function renderKnowledgeView(
                   (t) => `
               <div class="rail-row">
                 <span>${escapeHtml(t.topic)}</span>
-                <span class="muted">weight ${t.weight.toFixed(2)}</span>
+                <span class="muted">score ${Number(t.weight ?? 0).toFixed(2)}</span>
               </div>
             `
                 )
