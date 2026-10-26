@@ -128,6 +128,50 @@ export interface BrainEntityItem {
   updated: string;
 }
 
+export interface BookmarkIndexStatus {
+  id: string;
+  url: string;
+  domain: string;
+  title: string;
+  last_indexed_at: number;
+  text_chars: number;
+  status: string;
+}
+
+export interface UserProfileItem {
+  id: string;
+  name: string;
+  created_at: string;
+  last_active_at: string;
+  credential_services_count: number;
+  is_active: boolean;
+}
+
+export interface ProfileStatusSummary {
+  profiles: UserProfileItem[];
+  active_profile_id: string | null;
+  unlocked: boolean;
+  active_profile: UserProfileItem | null;
+}
+
+export interface ProfileVaultService {
+  service: string;
+  domain: string;
+  username: string;
+  has_password: boolean;
+  has_token: boolean;
+  has_cookie: boolean;
+  keys: string[];
+}
+
+export interface ProfileVaultSummary {
+  unlocked: boolean;
+  profile_id: string | null;
+  env_path: string | null;
+  services: ProfileVaultService[];
+  raw_env: string;
+}
+
 export interface KnowledgeSummary {
   pause_learning: boolean;
   queue_len: number;
@@ -137,6 +181,9 @@ export interface KnowledgeSummary {
     entity_count: number;
     entities: BrainEntityItem[];
   };
+  bookmarks_indexed?: BookmarkIndexStatus[];
+  profile?: ProfileStatusSummary;
+  vault?: ProfileVaultSummary;
   top_domains: Array<{ domain: string; visits: number; score: number }>;
   top_topics: Array<{ topic: string; weight: number }>;
   passages: Array<{

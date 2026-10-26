@@ -35,6 +35,8 @@ export interface AppState {
   sidecar: SidecarHealth;
   digestItems: DigestEntry[];
   knowledge: KnowledgeSummary;
+  bookmarkTooltipNotice: string;
+  profileStatusMessage: string;
 }
 
 export const state: AppState = {
@@ -73,6 +75,8 @@ export const state: AppState = {
     top_topics: [],
     passages: [],
   },
+  bookmarkTooltipNotice: "",
+  profileStatusMessage: "",
 };
 
 export function escapeHtml(str: string): string {

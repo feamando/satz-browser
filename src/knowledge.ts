@@ -1,9 +1,25 @@
-import { escapeHtml, state } from "./state";
+import { escapeHtml, formatRelativeTime, state } from "./state";
 
 export interface KnowledgeActions {
   onTogglePauseLearning: (paused: boolean) => void;
   onDeletePassage: (passageId: string) => void;
   onDeleteBrainEntity?: (slug: string) => void;
+  onCreateProfile?: (name: string, pin: string) => void;
+  onUnlockProfile?: (profileId: string, pin: string) => void;
+  onLockProfile?: () => void;
+  onDeleteProfile?: (profileId: string, pin: string) => void;
+  onUpsertPassword?: (payload: {
+    service: string;
+    username: string;
+    password?: string;
+    token?: string;
+    cookie?: string;
+    url?: string;
+  }) => void;
+  onSaveRawEnv?: (rawEnv: string) => void;
+  onImportEnvFile?: (path: string) => void;
+  onDeletePassword?: (service: string) => void;
+  onAutofillActiveTab?: () => void;
   onCloseKnowledgeView: () => void;
 }
 
@@ -13,12 +29,19 @@ export function renderKnowledgeView(
 ): void {
   const kb = state.knowledge;
   const brainEntities = kb.brain?.entities ?? [];
+  const bookmarksIndexed = kb.bookmarks_indexed ?? [];
+  const profileInfo = kb.profile;
+  const profilesList = profileInfo?.profiles ?? [];
+  const isUnlocked = Boolean(profileInfo?.unlocked && profileInfo?.active_profile);
+  const activeProfile = profileInfo?.active_profile ?? null;
+  const vault = kb.vault;
+  const vaultServices = vault?.services ?? [];
 
   container.innerHTML = `
     <div class="knowledge-view">
       <div class="knowledge-section">
         <div class="panel-header">
-          <span>knowledge base (satz brain + local store)</span>
+          <span>knowledge base · user profiles (6-digit pin) · .env password vault</span>
           <div>
             <button id="kb-pause-btn" class="${kb.pause_learning ? "active" : ""}">
               [pause learning: ${kb.pause_learning ? "on" : "off"}]
@@ -27,8 +50,175 @@ export function renderKnowledgeView(
           </div>
         </div>
         <div class="muted">
-          brain entities: ${brainEntities.length} · ingest queue: ${kb.queue_len} · everything browsed and stored stays on this machine.
+          active profile: ${
+            isUnlocked && activeProfile
+              ? `${escapeHtml(activeProfile.name)} [unlocked]`
+              : "none [locked - unlock with 6-digit PIN to access profile .env passwords]"
+          } · brain entities: ${brainEntities.length} · indexed bookmarks: ${bookmarksIndexed.length} · ingest queue: ${kb.queue_len}
         </div>
+        ${
+          state.profileStatusMessage
+            ? `<div class="profile-status-banner">${escapeHtml(state.profileStatusMessage)}</div>`
+            : ""
+        }
+      </div>
+
+      <div class="knowledge-section">
+        <div class="panel-header">
+          <span>user profiles (name + 6-digit pin) (${profilesList.length})</span>
+          ${
+            isUnlocked
+              ? `<button id="kb-lock-profile-btn">[lock active profile]</button>`
+              : ""
+          }
+        </div>
+        <div class="vault-form-row">
+          <input
+            id="kb-new-profile-name"
+            class="vault-input"
+            type="text"
+            placeholder="profile name (e.g. Nikita)_"
+          />
+          <input
+            id="kb-new-profile-pin"
+            class="vault-input vault-pin-input"
+            type="password"
+            inputmode="numeric"
+            maxlength="6"
+            placeholder="6-digit PIN (e.g. 123456)_"
+          />
+          <button id="kb-create-profile-btn">[+ create profile]</button>
+        </div>
+        ${
+          profilesList.length === 0
+            ? `<div class="muted">no profiles created yet. create a profile with a name and a 6-digit PIN above.</div>`
+            : profilesList
+                .map(
+                  (p) => `
+              <div class="source-row">
+                <div class="source-row-top">
+                  <span>
+                    ${p.is_active ? "* " : ""}${escapeHtml(p.name)}
+                    <span class="muted">(id: ${escapeHtml(p.id)} · ${p.credential_services_count} .env services)</span>
+                  </span>
+                  <div class="vault-inline-controls">
+                    ${
+                      p.is_active
+                        ? `<span class="status-item">[unlocked]</span>`
+                        : `
+                      <input
+                        class="vault-input vault-pin-input"
+                        type="password"
+                        inputmode="numeric"
+                        maxlength="6"
+                        placeholder="6-digit PIN"
+                        data-profile-pin-input="${escapeHtml(p.id)}"
+                      />
+                      <button data-unlock-profile="${escapeHtml(p.id)}">[unlock]</button>
+                    `
+                    }
+                    <button class="rail-menu-btn" data-delete-profile="${escapeHtml(p.id)}" title="enter 6-digit PIN to delete profile">[delete]</button>
+                  </div>
+                </div>
+              </div>
+            `
+                )
+                .join("")
+        }
+      </div>
+
+      <div class="knowledge-section">
+        <div class="panel-header">
+          <span>profile .env password management system (${isUnlocked ? `${vaultServices.length} services` : "locked"})</span>
+          ${
+            isUnlocked && state.activeDetail?.tabs.some((t) => t.is_open)
+              ? `<button id="kb-autofill-tab-btn" title="Auto-fill & login on open tab using active profile .env credentials">[auto-fill open tab]</button>`
+              : ""
+          }
+        </div>
+        ${
+          !isUnlocked
+            ? `<div class="muted">locked: password files (.env) are strictly scoped to a profile. create or unlock a profile with your 6-digit PIN above so the agent and background bookmark indexer can use your stored credentials.</div>`
+            : `
+          <div class="muted">
+            profile .env file: ${escapeHtml(vault?.env_path ?? "")} · only accessible while profile "${escapeHtml(activeProfile?.name ?? "")}" is unlocked. used by the agent when prompted and in the background for bookmarks.
+          </div>
+
+          <div class="vault-form-row">
+            <input id="kb-cred-service" class="vault-input" type="text" placeholder="service/domain (e.g. gmail.com, zalando.de)_" />
+            <input id="kb-cred-username" class="vault-input" type="text" placeholder="username / email_" />
+            <input id="kb-cred-password" class="vault-input" type="password" placeholder="password / app-password_" />
+            <input id="kb-cred-token" class="vault-input" type="password" placeholder="token or cookie (optional)_" />
+            <button id="kb-save-cred-btn">[+ save to .env]</button>
+          </div>
+
+          <div class="vault-form-row">
+            <input id="kb-import-env-path" class="vault-input" type="text" placeholder="import external .env file path (e.g. C:\\Users\\...\\.env)_" />
+            <button id="kb-import-env-btn">[import .env file]</button>
+          </div>
+
+          ${
+            vaultServices.length === 0
+              ? `<div class="muted">no credentials in this profile's .env yet. add a service above or paste/import a .env file below.</div>`
+              : vaultServices
+                  .map(
+                    (s) => `
+                <div class="rail-row">
+                  <span>
+                    <strong>${escapeHtml(s.service)}</strong>
+                    ${s.domain ? `<span class="muted">(${escapeHtml(s.domain)})</span>` : ""}
+                    · user: ${escapeHtml(s.username || "(token/cookie)")}
+                  </span>
+                  <span>
+                    <span class="muted">
+                      ${s.has_password ? "[password] " : ""}${s.has_token ? "[token] " : ""}${s.has_cookie ? "[cookie]" : ""}
+                    </span>
+                    <button class="rail-menu-btn" data-delete-cred="${escapeHtml(s.service)}">[delete]</button>
+                  </span>
+                </div>
+              `
+                  )
+                  .join("")
+          }
+
+          <div class="vault-raw-block">
+            <div class="muted">direct .env password file editor (${escapeHtml(activeProfile?.name ?? "")}):</div>
+            <textarea id="kb-raw-env-textarea" class="vault-textarea" rows="6" spellcheck="false">${escapeHtml(vault?.raw_env ?? "")}</textarea>
+            <div>
+              <button id="kb-save-raw-env-btn">[save .env file]</button>
+            </div>
+          </div>
+        `
+        }
+      </div>
+
+      <div class="knowledge-section">
+        <div class="panel-header">
+          <span>continuously indexed bookmarks (${bookmarksIndexed.length})</span>
+        </div>
+        <div class="muted">
+          bookmarked sources are continuously fetched, authenticated (via unlocked profile .env when applicable), and indexed in the background.
+        </div>
+        ${
+          bookmarksIndexed.length === 0
+            ? `<div class="muted">no bookmarks hooked up yet. click [+ bookmark current] in the left rail to continuously index a source.</div>`
+            : bookmarksIndexed
+                .map(
+                  (bm) => `
+              <div class="rail-row">
+                <span>${escapeHtml(bm.title || bm.domain)} <span class="muted">(${escapeHtml(bm.url)})</span></span>
+                <span class="muted">
+                  [${escapeHtml(bm.status)}] · ${bm.text_chars} chars · ${
+                    bm.last_indexed_at > 0
+                      ? `updated ${escapeHtml(formatRelativeTime(String(Math.floor(bm.last_indexed_at))))}`
+                      : "indexing..."
+                  }
+                </span>
+              </div>
+            `
+                )
+                .join("")
+        }
       </div>
 
       <div class="knowledge-section">
@@ -131,6 +321,92 @@ export function renderKnowledgeView(
 
   container.querySelector("#kb-close-btn")?.addEventListener("click", () => {
     actions.onCloseKnowledgeView();
+  });
+
+  container.querySelector("#kb-create-profile-btn")?.addEventListener("click", () => {
+    const nameEl = container.querySelector("#kb-new-profile-name") as HTMLInputElement | null;
+    const pinEl = container.querySelector("#kb-new-profile-pin") as HTMLInputElement | null;
+    const name = nameEl?.value.trim() ?? "";
+    const pin = pinEl?.value.trim() ?? "";
+    if (actions.onCreateProfile) {
+      actions.onCreateProfile(name, pin);
+    }
+  });
+
+  container.querySelector("#kb-lock-profile-btn")?.addEventListener("click", () => {
+    if (actions.onLockProfile) {
+      actions.onLockProfile();
+    }
+  });
+
+  container.querySelectorAll("[data-unlock-profile]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const pid = (btn as HTMLElement).getAttribute("data-unlock-profile");
+      if (!pid || !actions.onUnlockProfile) return;
+      const pinInput = container.querySelector(
+        `[data-profile-pin-input="${pid}"]`
+      ) as HTMLInputElement | null;
+      const pin = pinInput?.value.trim() ?? "";
+      actions.onUnlockProfile(pid, pin);
+    });
+  });
+
+  container.querySelectorAll("[data-delete-profile]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const pid = (btn as HTMLElement).getAttribute("data-delete-profile");
+      if (!pid || !actions.onDeleteProfile) return;
+      const pinInput = container.querySelector(
+        `[data-profile-pin-input="${pid}"]`
+      ) as HTMLInputElement | null;
+      const newPinInput = container.querySelector(
+        "#kb-new-profile-pin"
+      ) as HTMLInputElement | null;
+      const pin = pinInput?.value.trim() || newPinInput?.value.trim() || "";
+      actions.onDeleteProfile(pid, pin);
+    });
+  });
+
+  container.querySelector("#kb-save-cred-btn")?.addEventListener("click", () => {
+    if (!actions.onUpsertPassword) return;
+    const srv = (container.querySelector("#kb-cred-service") as HTMLInputElement | null)?.value.trim() ?? "";
+    const usr = (container.querySelector("#kb-cred-username") as HTMLInputElement | null)?.value.trim() ?? "";
+    const pwd = (container.querySelector("#kb-cred-password") as HTMLInputElement | null)?.value.trim() ?? "";
+    const tok = (container.querySelector("#kb-cred-token") as HTMLInputElement | null)?.value.trim() ?? "";
+    if (!srv) return;
+    actions.onUpsertPassword({
+      service: srv,
+      username: usr,
+      password: pwd,
+      token: tok,
+      url: srv,
+    });
+  });
+
+  container.querySelector("#kb-import-env-btn")?.addEventListener("click", () => {
+    if (!actions.onImportEnvFile) return;
+    const p = (container.querySelector("#kb-import-env-path") as HTMLInputElement | null)?.value.trim() ?? "";
+    if (p) actions.onImportEnvFile(p);
+  });
+
+  container.querySelector("#kb-save-raw-env-btn")?.addEventListener("click", () => {
+    if (!actions.onSaveRawEnv) return;
+    const raw = (container.querySelector("#kb-raw-env-textarea") as HTMLTextAreaElement | null)?.value ?? "";
+    actions.onSaveRawEnv(raw);
+  });
+
+  container.querySelector("#kb-autofill-tab-btn")?.addEventListener("click", () => {
+    if (actions.onAutofillActiveTab) {
+      actions.onAutofillActiveTab();
+    }
+  });
+
+  container.querySelectorAll("[data-delete-cred]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const srv = (btn as HTMLElement).getAttribute("data-delete-cred");
+      if (srv && actions.onDeletePassword) {
+        actions.onDeletePassword(srv);
+      }
+    });
   });
 
   container.querySelectorAll("[data-delete-passage]").forEach((btn) => {

@@ -91,6 +91,7 @@ class SatzSidecarRuntime:
             sys.path.insert(0, str(self.sgs_root))
 
         from satz_brain import SatzBrain
+        from satz_passwords import ProfilePasswordManager
 
         # Import SGS modules after adding sgs_root to sys.path
         from src.planck3.store import Store
@@ -108,7 +109,8 @@ class SatzSidecarRuntime:
         self.model_lock = threading.RLock()
 
         self.store = Store(self.store_path)
-        self.brain = SatzBrain(self.store_path.parent / "brain")
+        self.passwords = ProfilePasswordManager(self.store_path.parent)
+        self.brain = SatzBrain(self.passwords.get_profile_brain_dir())
         self._init_satz_tables()
 
         sgs_cache_dir = self.sgs_root / "data" / "planck3_cache"
@@ -130,11 +132,20 @@ class SatzSidecarRuntime:
         self.readers: dict[str, Any] = {}
         self.reader_loading: dict[str, bool] = {"hertz (reader)": False, "planck (reader)": False}
 
-        # Background ingest worker
+        # Background ingest worker & continuous bookmark indexer
         self.ingest_queue: queue.Queue[dict[str, Any]] = queue.Queue()
         self.pause_learning = self._load_pause_learning()
+        self.bookmark_wake_event = threading.Event()
+        self.bookmark_Refresh_interval_secs = 180.0
         self.worker_thread = threading.Thread(target=self._ingest_worker_loop, daemon=True)
         self.worker_thread.start()
+        self.bookmark_thread = threading.Thread(target=self._bookmark_indexer_loop, daemon=True)
+        self.bookmark_thread.start()
+
+    def _refresh_active_profile_brain(self) -> None:
+        from satz_brain import SatzBrain
+
+        self.brain = SatzBrain(self.passwords.get_profile_brain_dir())
 
     def _init_satz_tables(self):
         with self.store_lock:
@@ -166,6 +177,16 @@ class SatzSidecarRuntime:
                     visits INTEGER NOT NULL DEFAULT 0,
                     dwell_seconds REAL NOT NULL DEFAULT 0.0,
                     last_visited REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS satz_bookmarks (
+                    bookmark_id TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    domain TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    last_indexed_at REAL NOT NULL DEFAULT 0.0,
+                    text_chars INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'pending'
                 );
 
                 CREATE TABLE IF NOT EXISTS satz_meta (
@@ -544,6 +565,151 @@ class SatzSidecarRuntime:
             finally:
                 self.ingest_queue.task_done()
 
+    # ── Continuous Background Bookmark Indexer ───────────────────────────
+    def sync_bookmarks(self, bookmarks: list[dict[str, Any]]) -> dict[str, Any]:
+        """
+        Syncs the active bookmark list into `satz_bookmarks` and wakes the background
+        bookmark indexer so bookmarked sources are continuously indexed and updated.
+        """
+        from src.planck3.web import domain_of
+
+        incoming_ids: set[str] = set()
+        with self.store_lock:
+            for b in bookmarks or []:
+                bid = str(b.get("id") or "").strip()
+                url = str(b.get("url") or "").strip()
+                title = str(b.get("title") or url).strip()
+                if not bid or not url:
+                    continue
+                if not url.startswith(("http://", "https://")):
+                    url = f"https://{url}"
+                incoming_ids.add(bid)
+                dom = domain_of(url) or url
+                self.store.db.execute(
+                    """
+                    INSERT INTO satz_bookmarks (bookmark_id, url, domain, title, last_indexed_at, text_chars, status)
+                    VALUES (?, ?, ?, ?, 0.0, 0, 'queued')
+                    ON CONFLICT(bookmark_id) DO UPDATE SET
+                        url = excluded.url,
+                        domain = excluded.domain,
+                        title = excluded.title
+                    """,
+                    (bid, url, dom, title),
+                )
+            if incoming_ids:
+                placeholders = ",".join("?" for _ in incoming_ids)
+                self.store.db.execute(
+                    f"DELETE FROM satz_bookmarks WHERE bookmark_id NOT IN ({placeholders})",
+                    tuple(incoming_ids),
+                )
+            else:
+                self.store.db.execute("DELETE FROM satz_bookmarks")
+            self.store.db.commit()
+
+        self.bookmark_wake_event.set()
+        return {"ok": True, "bookmarks_count": len(incoming_ids)}
+
+    def get_bookmarks_status(self) -> list[dict[str, Any]]:
+        with self.store_lock:
+            rows = self.store.db.execute(
+                "SELECT bookmark_id, url, domain, title, last_indexed_at, text_chars, status FROM satz_bookmarks ORDER BY last_indexed_at DESC"
+            ).fetchall()
+            return [
+                {
+                    "id": r["bookmark_id"],
+                    "url": r["url"],
+                    "domain": r["domain"],
+                    "title": r["title"],
+                    "last_indexed_at": float(r["last_indexed_at"] or 0.0),
+                    "text_chars": int(r["text_chars"] or 0),
+                    "status": r["status"],
+                }
+                for r in rows
+            ]
+
+    def _bookmark_indexer_loop(self):
+        from src.planck3.web import domain_of, extract_main_text
+
+        while True:
+            self.bookmark_wake_event.wait(timeout=30.0)
+            self.bookmark_wake_event.clear()
+            if self.pause_learning:
+                continue
+
+            try:
+                now = time.time()
+                with self.store_lock:
+                    rows = self.store.db.execute(
+                        "SELECT bookmark_id, url, domain, title, last_indexed_at FROM satz_bookmarks"
+                    ).fetchall()
+
+                for r in rows:
+                    if self.pause_learning:
+                        break
+                    bid = r["bookmark_id"]
+                    url = r["url"]
+                    dom = r["domain"] or domain_of(url)
+                    title = r["title"] or dom or url
+                    last_ts = float(r["last_indexed_at"] or 0.0)
+
+                    # Re-index immediately if never indexed (last_ts == 0) or older than refresh interval
+                    if last_ts > 0 and (now - last_ts) < self.bookmark_Refresh_interval_secs:
+                        continue
+
+                    extracted_text = ""
+                    extracted_html = None
+
+                    # 1. If the active profile is unlocked and has .env credentials for this bookmark, use them!
+                    try:
+                        auth_res = self.passwords.extract_with_profile_credentials(url)
+                        if auth_res:
+                            if auth_res.get("text"):
+                                extracted_text = str(auth_res["text"])
+                            if auth_res.get("html"):
+                                extracted_html = str(auth_res["html"])
+                                main_t = extract_main_text(extracted_html, url)
+                                if main_t:
+                                    extracted_text = f"{extracted_text}\n\n{main_t}".strip() if extracted_text else main_t
+                    except Exception as ae:
+                        print(f"[satz-sidecar] bookmark auth extract note for {url}: {ae}", flush=True)
+
+                    # 2. Check if there is fresh DOM text captured from a live tab for this URL
+                    if not extracted_text:
+                        with self.store_lock:
+                            src_row = self.store.db.execute(
+                                "SELECT text FROM satz_sources WHERE url = ? AND capture_mode = 'dom' ORDER BY updated_at DESC LIMIT 1",
+                                (url,),
+                            ).fetchone()
+                            if src_row and src_row["text"]:
+                                extracted_text = src_row["text"]
+
+                    # 3. Otherwise fetch the live page in the background
+                    if not extracted_text and url.startswith(("http://", "https://")):
+                        page = self.web.fetch(url)
+                        if page.get("html"):
+                            extracted_html = page["html"]
+                            extracted_text = extract_main_text(extracted_html, url) or ""
+
+                    res = self.ingest_page(
+                        conversation_id="bookmarks",
+                        source_id=f"bookmark:{bid}",
+                        url=url,
+                        title=f"[Bookmark] {title}",
+                        html=extracted_html,
+                        visible_text=extracted_text or None,
+                    )
+                    chars = int(res.get("text_chars") or len(extracted_text))
+                    status_str = "indexed" if chars > 0 else "empty"
+
+                    with self.store_lock:
+                        self.store.db.execute(
+                            "UPDATE satz_bookmarks SET last_indexed_at = ?, text_chars = ?, status = ? WHERE bookmark_id = ?",
+                            (time.time(), chars, status_str, bid),
+                        )
+                        self.store.db.commit()
+            except Exception as e:
+                print(f"[satz-sidecar] bookmark indexer error: {e}", flush=True)
+
     def get_source_text(self, source_id: str, url: str, title: str = "") -> tuple[str, list[str]]:
         with self.store_lock:
             row = None
@@ -794,21 +960,57 @@ class SatzSidecarRuntime:
             blocks.append(block)
             total_chars += len(block)
 
-        # Also pull relevant passages from persistent SQLite knowledge store if not already in open tabs
-        if question and total_chars < self.total_context_char_budget - 1000:
-            with self.store_lock:
-                stored_hits = self.store.local_passages(question, limit=4)
-            kb_lines: list[str] = []
-            for hp in stored_hits:
-                hurl = str(hp.get("url") or "")
-                htext = str(hp.get("text") or "").strip()
-                if not htext or (hurl and hurl in seen_urls):
+        # 2. If active profile is unlocked, check if stored .env credentials can extract live data for the query or open tabs
+        if question and self.passwords.unlocked:
+            targets_to_check = [question] + [str(s.get("url") or "") for s in sources if s.get("url")]
+            checked_services: set[str] = set()
+            for tgt in targets_to_check:
+                if not tgt:
                     continue
-                hdom = str(hp.get("domain") or domain_of(hurl) or "local")
-                htitle = str(hp.get("title") or hurl)
-                kb_lines.append(f"- ({hdom} · {htitle}): {htext}")
+                creds = self.passwords.find_credentials_for_target(tgt)
+                if not creds or creds["service"] in checked_services:
+                    continue
+                checked_services.add(creds["service"])
+                try:
+                    auth_data = self.passwords.extract_with_profile_credentials(tgt)
+                    if auth_data and auth_data.get("text"):
+                        blocks.append(
+                            f"[PROFILE .ENV CREDENTIAL EXTRACTION - {auth_data['service']} ({auth_data.get('username', '')})]\n"
+                            f"{str(auth_data['text'])[:4000]}"
+                        )
+                except Exception as pe:
+                    print(f"[satz-sidecar] profile credential extraction note: {pe}", flush=True)
+
+        # 3. Also pull relevant passages from persistent SQLite knowledge store & continuously-indexed bookmarks
+        if question and total_chars < self.total_context_char_budget - 1000:
+            kb_lines: list[str] = []
+            try:
+                with self.store_lock:
+                    stored_hits = self.store.local_passages(question, k=4)
+                    bm_rows = self.store.db.execute(
+                        "SELECT url, domain, title, text FROM satz_sources WHERE source_id LIKE 'bookmark:%' ORDER BY updated_at DESC LIMIT 12"
+                    ).fetchall()
+                for hp in stored_hits:
+                    hurl = str(hp.get("url") or "")
+                    htext = str(hp.get("text") or "").strip()
+                    if not htext or (hurl and hurl in seen_urls):
+                        continue
+                    hdom = str(hp.get("domain") or domain_of(hurl) or "local")
+                    htitle = str(hp.get("title") or hurl)
+                    kb_lines.append(f"- ({hdom} · {htitle}): {htext}")
+                for bmr in bm_rows:
+                    burl = str(bmr["url"] or "")
+                    btext = str(bmr["text"] or "").strip()
+                    if not btext or (burl and burl in seen_urls):
+                        continue
+                    bdom = str(bmr["domain"] or domain_of(burl) or "bookmark")
+                    btitle = str(bmr["title"] or burl)
+                    if any(k in norm_text(f"{btitle} {bdom} {btext[:600]}") for k in keys) or bdom.lower() in question.lower():
+                        kb_lines.append(f"- (BOOKMARK INDEXED: {bdom} · {btitle} - {burl}): {btext[:600]}")
+            except Exception as kbe:
+                print(f"[satz-sidecar] local_passages lookup note: {kbe}", flush=True)
             if kb_lines:
-                blocks.append("STORED PASSAGES FROM PAST BROWSING:\n" + "\n".join(kb_lines))
+                blocks.append("STORED PASSAGES & CONTINUOUSLY INDEXED BOOKMARKS:\n" + "\n".join(kb_lines[:6]))
 
         return "\n\n".join(blocks), used_source_ids, hydrated_sources
 
@@ -820,6 +1022,7 @@ class SatzSidecarRuntime:
     ):
         """Generator yielding SSE dicts: {'delta': ...} then {'done': True, 'source_ids': [...], 'ms': ...}."""
         from src.planck3.candidates import main_entity
+        from src.planck3.web import domain_of
 
         t0 = time.perf_counter()
         user_msg = ""
@@ -847,9 +1050,27 @@ class SatzSidecarRuntime:
             )
         )
 
-        if web_enabled and user_msg and not (is_personal_or_tab_query and len(combined_sources) > 0):
+        # Detect when the user is asking to find/search items on a site (e.g. "find me some hats on zalando")
+        is_site_discovery_query = bool(
+            re.search(
+                r"\b(find\s+(?:me\s+)?|search\s+(?:for\s+)?|look\s+for\s+|show\s+me\s+some\s+)",
+                user_msg,
+                re.IGNORECASE,
+            )
+        )
+
+        should_run_web = (web_enabled and not (is_personal_or_tab_query and len(combined_sources) > 0)) or (
+            is_site_discovery_query and not is_personal_or_tab_query
+        )
+
+        if should_run_web and user_msg:
             try:
-                ans = self.run_answer(user_msg, session_id="chat-web")
+                search_q = user_msg
+                if is_site_discovery_query and combined_sources:
+                    open_dom = str(combined_sources[0].get("domain") or domain_of(str(combined_sources[0].get("url") or "")) or "")
+                    if open_dom and open_dom.split(".")[0].lower() not in user_msg.lower():
+                        search_q = f"{open_dom} {user_msg}"
+                ans = self.run_answer(search_q, session_id="chat-web")
                 existing_urls = {s.get("url") for s in combined_sources}
                 for ws in ans.get("sources", [])[:3]:
                     wurl = ws.get("url")
@@ -1083,6 +1304,9 @@ class SatzSidecarRuntime:
                 "pause_learning": self.pause_learning,
                 "queue_len": self.ingest_queue.qsize(),
                 "brain": self.brain.get_brain_summary(),
+                "bookmarks_indexed": self.get_bookmarks_status(),
+                "profile": self.passwords.list_profiles(),
+                "vault": self.passwords.get_active_vault_summary(include_raw_env=True),
                 "top_domains": top_domains,
                 "top_topics": top_topics,
                 "passages": passages,
@@ -1167,6 +1391,10 @@ def make_sidecar_server(runtime: SatzSidecarRuntime, host: str = "127.0.0.1", po
                 return self._json(runtime.get_digest())
             if self.path == "/knowledge":
                 return self._json(runtime.get_knowledge_summary())
+            if self.path == "/profile/status":
+                return self._json(runtime.passwords.list_profiles())
+            if self.path == "/passwords":
+                return self._json(runtime.passwords.get_active_vault_summary(include_raw_env=True))
             return self._json({"error": "not found"}, 404)
 
         def do_POST(self):
@@ -1240,6 +1468,92 @@ def make_sidecar_server(runtime: SatzSidecarRuntime, host: str = "127.0.0.1", po
             if self.path == "/forget":
                 cid = str(data.get("conversation_id") or "")
                 return self._json(runtime.forget_conversation(cid))
+
+            if self.path == "/bookmarks/sync":
+                bookmarks = data.get("bookmarks") or []
+                return self._json(runtime.sync_bookmarks(bookmarks))
+
+            if self.path == "/profile/create":
+                try:
+                    res = runtime.passwords.create_profile(
+                        name=str(data.get("name") or ""),
+                        pin=str(data.get("pin") or ""),
+                    )
+                    runtime._refresh_active_profile_brain()
+                    return self._json({"ok": True, **res})
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/profile/unlock":
+                try:
+                    res = runtime.passwords.unlock_profile(
+                        profile_id=str(data.get("profile_id") or ""),
+                        pin=str(data.get("pin") or ""),
+                    )
+                    runtime._refresh_active_profile_brain()
+                    runtime.bookmark_wake_event.set()
+                    return self._json({"ok": True, **res})
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/profile/lock":
+                res = runtime.passwords.lock_profile()
+                runtime._refresh_active_profile_brain()
+                return self._json({"ok": True, **res})
+
+            if self.path == "/profile/delete":
+                try:
+                    res = runtime.passwords.delete_profile(
+                        profile_id=str(data.get("profile_id") or ""),
+                        pin=str(data.get("pin") or ""),
+                    )
+                    runtime._refresh_active_profile_brain()
+                    return self._json({"ok": True, **res})
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/passwords/upsert":
+                try:
+                    vault = runtime.passwords.upsert_service_credential(
+                        service_or_domain=str(data.get("service") or ""),
+                        username=str(data.get("username") or ""),
+                        password=str(data.get("password") or ""),
+                        token=str(data.get("token") or ""),
+                        cookie=str(data.get("cookie") or ""),
+                        url=str(data.get("url") or ""),
+                    )
+                    runtime.bookmark_wake_event.set()
+                    return self._json({"ok": True, "vault": vault})
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/passwords/save_env":
+                try:
+                    vault = runtime.passwords.save_raw_env(str(data.get("raw_env") or ""))
+                    runtime.bookmark_wake_event.set()
+                    return self._json({"ok": True, "vault": vault})
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/passwords/import_env":
+                try:
+                    vault = runtime.passwords.import_env_file(str(data.get("path") or ""))
+                    runtime.bookmark_wake_event.set()
+                    return self._json({"ok": True, "vault": vault})
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/passwords/delete":
+                try:
+                    vault = runtime.passwords.delete_service_credential(str(data.get("service") or ""))
+                    return self._json({"ok": True, "vault": vault})
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/passwords/match":
+                target = str(data.get("target") or "")
+                creds = runtime.passwords.find_credentials_for_target(target)
+                return self._json({"ok": True, "credentials": creds})
 
             if self.path == "/chat":
                 messages = data.get("messages") or []

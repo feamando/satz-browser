@@ -108,34 +108,59 @@ export function renderRail(actions: RailActions): void {
       </div>
 
       <div class="rail-group">
-        <div class="rail-group-label">
-          <span>bookmarks</span>
+        <div class="rail-group-label" title="Bookmarked sources are continuously indexed and updated in the background">
+          <span>bookmarks [auto-indexed]</span>
           <span>${state.bookmarks.length}</span>
         </div>
         ${
           state.bookmarks.length === 0
             ? `<div class="muted">  (none)</div>`
             : state.bookmarks
-                .map(
-                  (b) => `
-              <div class="rail-row" data-bookmark-url="${escapeHtml(b.url)}">
+                .map((b) => {
+                  const idxEntry = state.knowledge.bookmarks_indexed?.find(
+                    (bi) => bi.id === b.id || bi.url === b.url
+                  );
+                  const syncBadge =
+                    idxEntry && idxEntry.status === "indexed"
+                      ? "sync"
+                      : "idx";
+                  return `
+              <div
+                class="rail-row"
+                data-bookmark-url="${escapeHtml(b.url)}"
+                title="${escapeHtml(b.url)} — Continuously indexed and updated in the background into your Satz Brain"
+              >
                 <span class="rail-row-title">${escapeHtml(b.title || extractDomain(b.url))}</span>
-                <button class="rail-menu-btn" data-remove-bookmark="${escapeHtml(b.id)}" title="remove bookmark">x</button>
+                <span class="rail-row-meta">[${syncBadge}]</span>
+                <button class="rail-menu-btn" data-remove-bookmark="${escapeHtml(b.id)}" title="remove bookmark and stop background indexing">x</button>
               </div>
-            `
-                )
+            `;
+                })
                 .join("")
         }
-        <button id="rail-bookmark-current-btn" class="rail-btn-full">
-          <span>[+ bookmark current]</span>
-          <span class="muted">[${MOD_LABEL}+d]</span>
-        </button>
+        <div class="bookmark-btn-wrap">
+          <button
+            id="rail-bookmark-current-btn"
+            class="rail-btn-full"
+            title="This will hook up the source to be indexed continuously in the background"
+          >
+            <span>[+ bookmark current]</span>
+            <span class="muted">[${MOD_LABEL}+d]</span>
+          </button>
+          <div class="bookmark-tooltip-hint">
+            ${escapeHtml(state.bookmarkTooltipNotice || "hooks up this source to be indexed continuously in the background")}
+          </div>
+        </div>
       </div>
     </div>
 
     <div class="rail-footer">
-      <button id="rail-open-knowledge-btn" class="${state.showKnowledgeView ? "active" : ""}">
-        [knowledge]
+      <button
+        id="rail-open-knowledge-btn"
+        class="${state.showKnowledgeView ? "active" : ""}"
+        title="Open Satz Brain Knowledge Base, User Profiles (6-digit PIN), and .env Password Vault"
+      >
+        [${state.knowledge.profile?.unlocked && state.knowledge.profile?.active_profile ? `profile: ${escapeHtml(state.knowledge.profile.active_profile.name)} · kb` : "knowledge · profile"}]
       </button>
       <span>v0.3</span>
     </div>

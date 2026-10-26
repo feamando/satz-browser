@@ -528,7 +528,116 @@ fn trigger_dom_capture_and_ingest<R: tauri::Runtime>(
     tab_id: String,
     fallback_url: String,
 ) {
+    let wv_for_auth = webview.clone();
+    let url_for_auth = fallback_url.clone();
+    std::thread::spawn(move || {
+        let _ = try_autofill_profile_credentials_on_webview(&wv_for_auth, &url_for_auth, false);
+    });
     trigger_dom_capture_with_completion(app, webview, tab_id, fallback_url, None);
+}
+
+pub fn autofill_tab_credentials_impl(
+    app: &AppHandle,
+    tab_id: &str,
+    auto_submit: bool,
+) -> Result<bool, String> {
+    let label = tab_webview_label(tab_id);
+    let Some(wv) = app.get_webview(&label) else {
+        return Ok(false);
+    };
+    let url_str = wv.url().ok().map(|u| u.to_string()).unwrap_or_default();
+    Ok(try_autofill_profile_credentials_on_webview(
+        &wv,
+        &url_str,
+        auto_submit,
+    ))
+}
+
+fn try_autofill_profile_credentials_on_webview<R: tauri::Runtime>(
+    webview: &tauri::Webview<R>,
+    url: &str,
+    auto_submit: bool,
+) -> bool {
+    if url.is_empty() {
+        return false;
+    }
+    let req_body = serde_json::json!({ "target": url }).to_string();
+    let Ok(mut stream) = TcpStream::connect_timeout(
+        &"127.0.0.1:8020".parse().unwrap(),
+        Duration::from_millis(400),
+    ) else {
+        return false;
+    };
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(800)));
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(800)));
+    let req = format!(
+        "POST /passwords/match HTTP/1.1\r\nHost: 127.0.0.1:8020\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        req_body.len(),
+        req_body
+    );
+    if stream.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
+    let mut resp = Vec::new();
+    let _ = stream.read_to_end(&mut resp);
+    let resp_str = String::from_utf8_lossy(&resp);
+    let Some(body_idx) = resp_str.find("\r\n\r\n") else {
+        return false;
+    };
+    let json_part = &resp_str[body_idx + 4..];
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_part) else {
+        return false;
+    };
+    let Some(creds) = parsed.get("credentials").and_then(|c| c.as_object()) else {
+        return false;
+    };
+    let username = creds
+        .get("username")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let password = creds
+        .get("password")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if username.is_empty() && password.is_empty() {
+        return false;
+    }
+
+    let u_json = serde_json::to_string(username).unwrap_or_else(|_| "\"\"".to_string());
+    let p_json = serde_json::to_string(password).unwrap_or_else(|_| "\"\"".to_string());
+    let submit_lit = if auto_submit { "true" } else { "false" };
+
+    let js = format!(
+        r#"(() => {{
+            try {{
+                const uVal = {u_json};
+                const pVal = {p_json};
+                const doSubmit = {submit_lit};
+                const setNativeValue = (el, val) => {{
+                    const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+                    if (desc && desc.set) {{ desc.set.call(el, val); }} else {{ el.value = val; }}
+                    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                }};
+                const passInputs = Array.from(document.querySelectorAll('input[type="password"]')).filter(el => el.offsetParent !== null);
+                const userInputs = Array.from(document.querySelectorAll('input[type="email"], input[name*="user" i], input[name*="email" i], input[name*="login" i], input[autocomplete="username"], input[type="text"]')).filter(el => el.offsetParent !== null);
+                let filled = false;
+                if (uVal && userInputs.length > 0) {{
+                    const uEl = userInputs[0];
+                    if (!uEl.value || doSubmit) {{ setNativeValue(uEl, uVal); filled = true; }}
+                }}
+                if (pVal && passInputs.length > 0) {{
+                    const pEl = passInputs[0];
+                    if (!pEl.value || doSubmit) {{ setNativeValue(pEl, pVal); filled = true; }}
+                    if (doSubmit && pEl.form) {{ pEl.form.requestSubmit ? pEl.form.requestSubmit() : pEl.form.submit(); }}
+                }}
+                return filled;
+            }} catch (e) {{ return false; }}
+        }})()"#
+    );
+
+    let _ = webview.eval(&js);
+    true
 }
 
 fn trigger_dom_capture_with_completion<R: tauri::Runtime>(

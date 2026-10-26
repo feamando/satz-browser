@@ -15,8 +15,9 @@ use tauri::{
 };
 use tauri::{AppHandle, Manager, RunEvent, State};
 use webview_manager::{
-    capture_open_tabs_for_conversation, close_tab_webview, control_tab_webview_impl,
-    navigate_tab_webview_impl, sync_tab_webviews_impl, TabBoundsSpec, WebviewManagerState,
+    autofill_tab_credentials_impl, capture_open_tabs_for_conversation, close_tab_webview,
+    control_tab_webview_impl, navigate_tab_webview_impl, sync_tab_webviews_impl, TabBoundsSpec,
+    WebviewManagerState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,6 +205,15 @@ async fn capture_open_tabs(
     conversation_id: String,
 ) -> Result<usize, String> {
     capture_open_tabs_for_conversation(&app, &db, &conversation_id)
+}
+
+#[tauri::command]
+async fn autofill_tab_credentials(
+    app: AppHandle,
+    tab_id: String,
+    auto_submit: bool,
+) -> Result<bool, String> {
+    autofill_tab_credentials_impl(&app, &tab_id, auto_submit)
 }
 
 #[tauri::command]
@@ -560,6 +570,7 @@ pub fn run() {
             control_tab,
             sync_tab_webviews,
             capture_open_tabs,
+            autofill_tab_credentials,
             set_source_in_context,
             add_message,
             list_bookmarks,

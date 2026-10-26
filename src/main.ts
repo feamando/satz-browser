@@ -3,6 +3,7 @@ import {
   apiAddBookmark,
   apiAddMessage,
   apiArchiveConversation,
+  apiAutofillTabCredentials,
   apiCaptureOpenTabs,
   apiCloseTab,
   apiControlTab,
@@ -16,15 +17,24 @@ import {
   apiPinConversation,
   apiRemoveBookmark,
   apiRenameConversation,
+  sidecarCreateProfile,
   sidecarDeleteBrainEntity,
   sidecarDeletePassage,
+  sidecarDeletePassword,
+  sidecarDeleteProfile,
   sidecarFetchDigest,
   sidecarFetchHealth,
   sidecarFetchKnowledge,
+  sidecarImportEnvFile,
+  sidecarLockProfile,
   sidecarRunAnswer,
   sidecarRunRead,
+  sidecarSaveRawEnv,
   sidecarSetPauseLearning,
   sidecarStreamChat,
+  sidecarSyncBookmarks,
+  sidecarUnlockProfile,
+  sidecarUpsertPassword,
 } from "./api";
 import { appendStreamingDelta, renderChatPanel } from "./chat";
 import { bindKeyboardShortcuts } from "./keys";
@@ -190,10 +200,20 @@ function handleMenuShortcut(cmd: string): void {
 
 async function pollSidecarState(): Promise<void> {
   state.sidecar = await sidecarFetchHealth();
-  if (state.sidecar.online && !state.activeDetail && state.digestItems.length === 0) {
-    state.digestItems = await sidecarFetchDigest();
-    if (!state.activeDetail && !state.showKnowledgeView) {
-      renderViewportRegion();
+  if (state.sidecar.online) {
+    void sidecarSyncBookmarks(state.bookmarks);
+    if (!state.knowledge.profile) {
+      const kb = await sidecarFetchKnowledge();
+      if (kb) {
+        state.knowledge = kb;
+        renderRailRegion();
+      }
+    }
+    if (!state.activeDetail && state.digestItems.length === 0) {
+      state.digestItems = await sidecarFetchDigest();
+      if (!state.activeDetail && !state.showKnowledgeView) {
+        renderViewportRegion();
+      }
     }
   }
   renderStatusLine();
@@ -223,6 +243,9 @@ async function refreshLists(): Promise<void> {
   ]);
   state.conversations = convs;
   state.bookmarks = bookmarks;
+  if (state.sidecar.online) {
+    void sidecarSyncBookmarks(bookmarks);
+  }
 }
 
 async function handleTabPageEvent(payload: TabPageEvent): Promise<void> {
@@ -406,6 +429,84 @@ function renderViewportRegion(): void {
         if (kb) state.knowledge = kb;
         renderViewportRegion();
       },
+      onCreateProfile: async (name, pin) => {
+        const res = await sidecarCreateProfile(name, pin);
+        state.profileStatusMessage = res.ok
+          ? `profile "${name}" created and unlocked.`
+          : `error: ${res.error ?? "failed to create profile (ensure PIN is 6 digits)"}`;
+        const kb = await sidecarFetchKnowledge();
+        if (kb) state.knowledge = kb;
+        renderAllRegions();
+      },
+      onUnlockProfile: async (profileId, pin) => {
+        const res = await sidecarUnlockProfile(profileId, pin);
+        state.profileStatusMessage = res.ok
+          ? `profile "${profileId}" unlocked.`
+          : `error: ${res.error ?? "invalid 6-digit PIN"}`;
+        const kb = await sidecarFetchKnowledge();
+        if (kb) state.knowledge = kb;
+        renderAllRegions();
+      },
+      onLockProfile: async () => {
+        await sidecarLockProfile();
+        state.profileStatusMessage = "profile locked. .env password vault unloaded.";
+        const kb = await sidecarFetchKnowledge();
+        if (kb) state.knowledge = kb;
+        renderAllRegions();
+      },
+      onDeleteProfile: async (profileId, pin) => {
+        const res = await sidecarDeleteProfile(profileId, pin);
+        state.profileStatusMessage = res.ok
+          ? `profile "${profileId}" deleted.`
+          : `error: ${res.error ?? "enter the profile's 6-digit PIN to delete"}`;
+        const kb = await sidecarFetchKnowledge();
+        if (kb) state.knowledge = kb;
+        renderAllRegions();
+      },
+      onUpsertPassword: async (payload) => {
+        const res = await sidecarUpsertPassword(payload);
+        state.profileStatusMessage = res.ok
+          ? `saved ${payload.service} credentials to active profile .env.`
+          : `error: ${res.error ?? "failed to save credential"}`;
+        const kb = await sidecarFetchKnowledge();
+        if (kb) state.knowledge = kb;
+        renderViewportRegion();
+      },
+      onSaveRawEnv: async (rawEnv) => {
+        const res = await sidecarSaveRawEnv(rawEnv);
+        state.profileStatusMessage = res.ok
+          ? "saved profile .env password file."
+          : `error: ${res.error ?? "failed to save .env"}`;
+        const kb = await sidecarFetchKnowledge();
+        if (kb) state.knowledge = kb;
+        renderViewportRegion();
+      },
+      onImportEnvFile: async (path) => {
+        const res = await sidecarImportEnvFile(path);
+        state.profileStatusMessage = res.ok
+          ? `imported credentials from ${path} into profile .env.`
+          : `error: ${res.error ?? "failed to import .env file"}`;
+        const kb = await sidecarFetchKnowledge();
+        if (kb) state.knowledge = kb;
+        renderViewportRegion();
+      },
+      onDeletePassword: async (service) => {
+        await sidecarDeletePassword(service);
+        state.profileStatusMessage = `deleted ${service} from profile .env.`;
+        const kb = await sidecarFetchKnowledge();
+        if (kb) state.knowledge = kb;
+        renderViewportRegion();
+      },
+      onAutofillActiveTab: async () => {
+        const openTab = state.activeDetail?.tabs.find((t) => t.is_open);
+        if (openTab) {
+          const ok = await apiAutofillTabCredentials(openTab.id, true);
+          state.profileStatusMessage = ok
+            ? `dispatched .env auto-fill to open tab (${extractDomain(openTab.url)}).`
+            : `no matching .env credentials found for ${extractDomain(openTab.url)}.`;
+          renderViewportRegion();
+        }
+      },
       onCloseKnowledgeView: () => {
         state.showKnowledgeView = false;
         renderAllRegions();
@@ -488,6 +589,12 @@ function renderSiteTabViewport(viewport: HTMLElement): void {
             type="text"
             value="${escapeHtml(tab.url)}"
           />
+          <button
+            data-autofill-tab="${escapeHtml(tab.id)}"
+            title="Auto-fill & login on this tab using active profile .env credentials"
+          >
+            [.env login]
+          </button>
           <button id="toggle-agent-rail-btn" class="${state.agentRailOpen ? "active" : ""}">
             [chat rail ${MOD_LABEL}+j]
           </button>
@@ -608,6 +715,15 @@ function bindToolbarEvents(viewport: HTMLElement): void {
       state.agentRailOpen = !state.agentRailOpen;
       renderViewportRegion();
     });
+
+  viewport.querySelectorAll("[data-autofill-tab]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tabId = (btn as HTMLElement).getAttribute("data-autofill-tab");
+      if (tabId) {
+        void apiAutofillTabCredentials(tabId, true);
+      }
+    });
+  });
 
   if (resizeObserver) {
     viewport.querySelectorAll(".webview-slot").forEach((slot) => {
@@ -782,9 +898,17 @@ async function handleBookmarkCurrentPage(): Promise<void> {
   const url = activeTab?.url ?? fallbackSource?.url;
   const title = activeTab?.title ?? fallbackSource?.title ?? "";
   if (!url) return;
-  await apiAddBookmark(title || extractDomain(url), url);
+  const dom = extractDomain(url);
+  await apiAddBookmark(title || dom, url);
+  state.bookmarkTooltipNotice = `hooked up: ${dom} will be indexed continuously in the background`;
   await refreshLists();
   renderRailRegion();
+  setTimeout(() => {
+    if (state.bookmarkTooltipNotice.includes(dom)) {
+      state.bookmarkTooltipNotice = "";
+      renderRailRegion();
+    }
+  }, 5000);
 }
 
 async function handleOpenUrlAsTab(url: string, title: string): Promise<void> {
