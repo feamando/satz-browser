@@ -548,6 +548,48 @@ button.inverse,
   word-break: break-word;
 }
 
+.msg-streaming-block {
+  border-color: var(--fg);
+}
+
+.streaming-status-box {
+  border: 1px dashed var(--border);
+  background-color: var(--bg);
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+}
+
+.streaming-status-current {
+  color: var(--fg);
+  font-weight: 700;
+}
+
+.streaming-steps-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--muted);
+}
+
+.streaming-step-line {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.msg-error-block {
+  border-color: var(--fg);
+  background-color: var(--bg);
+}
+
+.msg-error-badge {
+  color: var(--fg);
+  font-weight: 700;
+}
+
 .citation-link {
   padding: 0 3px;
   border: 1px solid var(--border);

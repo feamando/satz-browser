@@ -195,6 +195,10 @@ class SatzSidecarRuntime:
                 );
                 """
             )
+            # Purge any historical source rows where unclosed <style> blocks polluted trafilatura fallback with raw CSS
+            self.store.db.execute(
+                "DELETE FROM satz_sources WHERE text LIKE '%.J-J5-Ji{%' OR text LIKE '%{position:relative;display:%'"
+            )
             self.store.db.commit()
 
     def _load_pause_learning(self) -> bool:
@@ -403,16 +407,24 @@ class SatzSidecarRuntime:
 
         trafilatura_text = ""
         if html and html.strip():
-            trafilatura_text = extract_main_text(html, url) or ""
+            raw_traf = extract_main_text(html, url) or ""
+            # Guard against unclosed <style> blocks in truncated SPA outerHTML producing raw CSS
+            if raw_traf.count("{") > 25 and raw_traf.count("}") > 25 and (
+                len(raw_traf) / max(1, raw_traf.count("{")) < 180
+            ):
+                trafilatura_text = ""
+            else:
+                trafilatura_text = raw_traf
             extra_lines = extract_jsonld(html)
 
-        # Authenticated web apps (e.g. mail.google.com, dashboards, SPAs) often have their UI/lists
-        # stripped by trafilatura. Prefer or combine clean_visible so live tab content is never lost.
+        # Authenticated web apps (e.g. mail.google.com, dashboards, SPAs) always have their live
+        # visible text captured directly from the WebView2 DOM (`clean_visible`). Always place
+        # `clean_visible` first so CSS or boilerplate from `html` never pushes live tab rows out.
         if clean_visible and trafilatura_text:
-            if len(trafilatura_text) < 400 or len(clean_visible) > len(trafilatura_text) * 1.4:
+            if len(clean_visible) >= 200:
                 text = f"{clean_visible}\n\n{trafilatura_text}"[:120000]
             else:
-                text = f"{trafilatura_text}\n\n{clean_visible[:40000]}"[:120000]
+                text = f"{clean_visible}\n\n{trafilatura_text}"[:120000]
         elif clean_visible:
             text = clean_visible
         elif trafilatura_text:
@@ -1038,11 +1050,21 @@ class SatzSidecarRuntime:
         combined_sources = list(sources)
         cited_web_sources: list[dict[str, str]] = []
 
-        # Avoid running a generic public web search when the user is clearly asking about
-        # their own open tab / email / account or asking to store something from the current page.
+        # Avoid running a generic public web search when the user is asking about
+        # their open tab / email / account / inbox / page or asking to summarize / store something.
+        has_mail_or_app_tab = any(
+            any(
+                tok in str(s.get("url") or "").lower() or tok in str(s.get("domain") or "").lower()
+                for tok in ("mail.google.com", "gmail", "outlook", "proton.me", "calendar.google.com")
+            )
+            for s in combined_sources
+        )
         is_personal_or_tab_query = bool(
-            re.search(
+            has_mail_or_app_tab
+            or re.search(
                 r"\b(my\s+(?:latest\s+)?(?:email|inbox|mail|account|calendar|messages|address|tab|page)|"
+                r"(?:latest|newest|recent|unread|first|last)\s+(?:email|emails|mail|mails|message|messages|thread)|"
+                r"(?:summarize|summary|read|check|get\s+me)\s+(?:my\s+|the\s+)?(?:latest\s+|recent\s+)?(?:email|emails|mail|inbox|page|tab|article|thread)|"
                 r"this\s+(?:email|page|tab|article|site|screen|message|thread)|"
                 r"store\s+the|save\s+the|in\s+the\s+knowledge\s*base|in\s+my\s+brain)\b",
                 user_msg,
@@ -1063,6 +1085,11 @@ class SatzSidecarRuntime:
             is_site_discovery_query and not is_personal_or_tab_query
         )
 
+        yield {
+            "status": f"reading {len(combined_sources)} open tab source(s) & local brain...",
+            "phase": "context",
+        }
+
         if should_run_web and user_msg:
             try:
                 search_q = user_msg
@@ -1070,6 +1097,10 @@ class SatzSidecarRuntime:
                     open_dom = str(combined_sources[0].get("domain") or domain_of(str(combined_sources[0].get("url") or "")) or "")
                     if open_dom and open_dom.split(".")[0].lower() not in user_msg.lower():
                         search_q = f"{open_dom} {user_msg}"
+                yield {
+                    "status": f"searching web sources for '{search_q[:48]}'...",
+                    "phase": "web_search",
+                }
                 ans = self.run_answer(search_q, session_id="chat-web")
                 existing_urls = {s.get("url") for s in combined_sources}
                 for ws in ans.get("sources", [])[:3]:
@@ -1088,9 +1119,18 @@ class SatzSidecarRuntime:
                         cited_web_sources.append({"url": wurl, "title": ws.get("title") or wurl})
             except Exception as e:
                 print(f"[satz-sidecar] web pre-search failed: {e}", flush=True)
+                yield {
+                    "status": f"web search warning: {e} (continuing with local tabs)",
+                    "phase": "warning",
+                }
 
         context_str, used_source_ids, hydrated_sources = self.assemble_chat_context(user_msg, combined_sources)
         brain_context = self.brain.build_model_context(user_msg, hydrated_sources or combined_sources)
+
+        yield {
+            "status": f"assembled {len(used_source_ids)} source(s) ({len(context_str):,} chars) + brain index",
+            "phase": "context_ready",
+        }
 
         system_prompt = (
             "You are the local AI assistant inside the Satz browser, connected directly to:\n"
@@ -1121,9 +1161,19 @@ class SatzSidecarRuntime:
             chat_msgs.append({"role": pm["role"], "content": str(pm.get("content") or "")})
         chat_msgs.append({"role": "user", "content": user_prompt})
 
+        if self.gemma_model is None:
+            yield {
+                "status": "loading gemma-4-e4b into GPU memory...",
+                "phase": "model_load",
+            }
         tok, model = self.ensure_gemma()
         import torch
         from transformers import TextIteratorStreamer
+
+        yield {
+            "status": f"running gemma-4-e4b prefill over {len(used_source_ids)} source(s) ({len(context_str):,} chars)...",
+            "phase": "generating",
+        }
 
         inputs = tok.apply_chat_template(
             chat_msgs,
@@ -1140,9 +1190,18 @@ class SatzSidecarRuntime:
             do_sample=False,
         )
 
+        gen_errors: list[str] = []
+
         def _generate():
-            with torch.no_grad():
-                model.generate(**gen_kwargs)
+            try:
+                with torch.no_grad():
+                    model.generate(**gen_kwargs)
+            except Exception as exc:
+                gen_errors.append(str(exc))
+                try:
+                    streamer.end()
+                except Exception:
+                    pass
 
         gen_thread = threading.Thread(target=_generate, daemon=True)
         gen_thread.start()
@@ -1150,10 +1209,17 @@ class SatzSidecarRuntime:
         full_raw = ""
         emitted_len = 0
         in_brain_tag = False
+        first_token_seen = False
 
         for chunk in streamer:
             if not chunk:
                 continue
+            if not first_token_seen:
+                first_token_seen = True
+                yield {
+                    "status": "streaming response tokens...",
+                    "phase": "streaming",
+                }
             cleaned = chunk.replace("\u2014", "-")
             full_raw += cleaned
 
@@ -1176,6 +1242,8 @@ class SatzSidecarRuntime:
                             yield {"delta": delta_out}
 
         gen_thread.join(timeout=5.0)
+        if gen_errors:
+            raise RuntimeError(gen_errors[0])
 
         # Flush any remaining text and execute any <brain_store> directives
         primary_url = str(hydrated_sources[0].get("url") or "") if hydrated_sources else ""
@@ -1573,7 +1641,13 @@ def make_sidecar_server(runtime: SatzSidecarRuntime, host: str = "127.0.0.1", po
                         self.wfile.write(line.encode("utf-8"))
                         self.wfile.flush()
                 except Exception as e:
-                    err_line = f"data: {json.dumps({'delta': f'[error: {e}]', 'done': True, 'source_ids': []})}\n\n"
+                    err_payload = {
+                        "error": str(e),
+                        "delta": f"[error: {e}]",
+                        "done": True,
+                        "source_ids": [],
+                    }
+                    err_line = f"data: {json.dumps(err_payload, ensure_ascii=False)}\n\n"
                     self.wfile.write(err_line.encode("utf-8"))
                     self.wfile.flush()
                 return

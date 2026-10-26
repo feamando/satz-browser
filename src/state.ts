@@ -32,6 +32,11 @@ export interface AppState {
   webSearchEnabled: boolean;
   isStreaming: boolean;
   streamingText: string;
+  streamingStatus: string;
+  streamingPhase: string;
+  streamingStartedAt: number;
+  streamingSteps: string[];
+  lastUserPrompt: string;
   sidecar: SidecarHealth;
   digestItems: DigestEntry[];
   knowledge: KnowledgeSummary;
@@ -56,6 +61,11 @@ export const state: AppState = {
   webSearchEnabled: false,
   isStreaming: false,
   streamingText: "",
+  streamingStatus: "",
+  streamingPhase: "",
+  streamingStartedAt: 0,
+  streamingSteps: [],
+  lastUserPrompt: "",
   sidecar: {
     online: false,
     models: [

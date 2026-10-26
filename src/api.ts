@@ -718,15 +718,21 @@ export async function sidecarStreamChat(
   messages: Array<{ role: string; content: string }>,
   sources: Array<{ id: string; url: string; title: string; domain: string; is_open_tab: boolean }>,
   web: boolean,
-  onDelta: (delta: string) => void
-): Promise<{ source_ids: string[]; cited_sources?: Array<{ url: string; title: string }> }> {
+  onDelta: (delta: string) => void,
+  onStatus?: (status: string, phase?: string) => void,
+  onError?: (err: string) => void
+): Promise<{
+  source_ids: string[];
+  cited_sources?: Array<{ url: string; title: string }>;
+  error?: string;
+}> {
   const res = await fetch(`${SIDECAR_BASE}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model, messages, sources, web }),
   });
   if (!res.ok || !res.body) {
-    throw new Error(`/chat returned ${res.status}`);
+    throw new Error(`/chat returned HTTP ${res.status}`);
   }
 
   const reader = res.body.getReader();
@@ -734,6 +740,7 @@ export async function sidecarStreamChat(
   let buffer = "";
   let finalSourceIds: string[] = [];
   let citedSources: Array<{ url: string; title: string }> | undefined;
+  let streamError: string | undefined;
 
   while (true) {
     const { value, done } = await reader.read();
@@ -749,10 +756,20 @@ export async function sidecarStreamChat(
       try {
         const payload = JSON.parse(jsonStr) as {
           delta?: string;
+          status?: string;
+          phase?: string;
+          error?: string;
           done?: boolean;
           source_ids?: string[];
           cited_sources?: Array<{ url: string; title: string }>;
         };
+        if (payload.status && onStatus) {
+          onStatus(payload.status, payload.phase);
+        }
+        if (payload.error) {
+          streamError = payload.error;
+          if (onError) onError(payload.error);
+        }
         if (payload.delta) {
           onDelta(payload.delta);
         }
@@ -765,5 +782,9 @@ export async function sidecarStreamChat(
       }
     }
   }
-  return { source_ids: finalSourceIds, cited_sources: citedSources };
+  return {
+    source_ids: finalSourceIds,
+    cited_sources: citedSources,
+    error: streamError,
+  };
 }
