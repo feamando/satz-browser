@@ -36,7 +36,12 @@ import {
   sidecarUnlockProfile,
   sidecarUpsertPassword,
 } from "./api";
-import { appendStreamingDelta, renderChatPanel } from "./chat";
+import {
+  appendStreamingDelta,
+  renderChatPanel,
+  tickStreamingElapsed,
+  updateStreamingStatus,
+} from "./chat";
 import { bindKeyboardShortcuts } from "./keys";
 import { renderKnowledgeView } from "./knowledge";
 import { renderRail } from "./rail";
@@ -55,6 +60,35 @@ import { renderTabStrip, scheduleWebviewLayoutSync } from "./tabs";
 import type { LocalModelId, TabPageEvent } from "./types";
 
 let resizeObserver: ResizeObserver | null = null;
+let streamingTimerId: number | null = null;
+
+function startStreamingProgress(initialStatus: string, phase: string): void {
+  state.isStreaming = true;
+  state.streamingText = "";
+  state.streamingStatus = initialStatus;
+  state.streamingPhase = phase;
+  state.streamingStartedAt = Date.now();
+  state.streamingSteps = [initialStatus];
+  if (streamingTimerId !== null) {
+    window.clearInterval(streamingTimerId);
+  }
+  streamingTimerId = window.setInterval(() => {
+    tickStreamingElapsed();
+  }, 200);
+}
+
+function stopStreamingProgress(): void {
+  if (streamingTimerId !== null) {
+    window.clearInterval(streamingTimerId);
+    streamingTimerId = null;
+  }
+  state.isStreaming = false;
+  state.streamingText = "";
+  state.streamingStatus = "";
+  state.streamingPhase = "";
+  state.streamingStartedAt = 0;
+  state.streamingSteps = [];
+}
 
 async function initApp(): Promise<void> {
   mountShellSkeleton();
@@ -976,12 +1010,12 @@ async function handleCitationClick(
 }
 
 async function handleSendChatMessage(text: string): Promise<void> {
-  if (!state.activeDetail) return;
+  if (!state.activeDetail || state.isStreaming) return;
   const convId = state.activeDetail.conversation.id;
+  state.lastUserPrompt = text;
 
   await apiAddMessage(convId, "user", text, null, null);
   state.activeDetail = await apiGetConversation(convId);
-  renderViewportRegion();
 
   if (!state.sidecar.online) {
     await apiAddMessage(
@@ -996,19 +1030,22 @@ async function handleSendChatMessage(text: string): Promise<void> {
     return;
   }
 
-  // Capture live rendered DOM + visible_text from all open WebView2 tabs right before querying models
-  await apiCaptureOpenTabs(convId);
-  state.activeDetail = await apiGetConversation(convId);
-  const activeTabSources = getActiveTabSources(state.activeDetail);
+  startStreamingProgress("capturing live open tab DOM...", "capturing");
+  renderViewportRegion();
 
   try {
+    // Capture live rendered DOM + visible_text from all open WebView2 tabs right before querying models
+    await apiCaptureOpenTabs(convId);
+    state.activeDetail = await apiGetConversation(convId);
+    const activeTabSources = getActiveTabSources(state.activeDetail);
+
     if (state.selectedModel === "planck3 (web)") {
-      state.isStreaming = true;
-      state.streamingText = "searching and weighing sources...";
-      renderViewportRegion();
+      updateStreamingStatus(
+        "searching and weighing web sources via planck3...",
+        "web_search"
+      );
       const result = await sidecarRunAnswer(text, convId);
-      state.isStreaming = false;
-      state.streamingText = "";
+      stopStreamingProgress();
       const savedMsg = await apiAddMessage(
         convId,
         "assistant",
@@ -1033,6 +1070,10 @@ async function handleSendChatMessage(text: string): Promise<void> {
       state.selectedModel === "hertz (reader)" ||
       state.selectedModel === "planck (reader)"
     ) {
+      updateStreamingStatus(
+        `reading ${activeTabSources.length} open tab source(s) with ${state.selectedModel}...`,
+        "reading"
+      );
       const res = await sidecarRunRead(
         state.selectedModel,
         text,
@@ -1042,6 +1083,7 @@ async function handleSendChatMessage(text: string): Promise<void> {
           title: s.title,
         }))
       );
+      stopStreamingProgress();
       await apiAddMessage(
         convId,
         "assistant",
@@ -1055,9 +1097,10 @@ async function handleSendChatMessage(text: string): Promise<void> {
     }
 
     // Default: gemma-4-e4b streaming over open tabs in context
-    state.isStreaming = true;
-    state.streamingText = "";
-    renderViewportRegion();
+    updateStreamingStatus(
+      `sending ${activeTabSources.length} open tab source(s) to ${state.selectedModel}...`,
+      "connecting"
+    );
 
     const historyPayload = (state.activeDetail?.messages ?? []).map((m) => ({
       role: m.role,
@@ -1077,12 +1120,19 @@ async function handleSendChatMessage(text: string): Promise<void> {
       state.webSearchEnabled,
       (delta) => {
         appendStreamingDelta(delta);
+      },
+      (status, phase) => {
+        updateStreamingStatus(status, phase);
+      },
+      (errText) => {
+        updateStreamingStatus(`error: ${errText}`, "error");
       }
     );
 
-    const finalContent = state.streamingText || "(no response)";
-    state.isStreaming = false;
-    state.streamingText = "";
+    const finalContent =
+      state.streamingText ||
+      (streamRes.error ? `[err] ${streamRes.error}` : "(no response)");
+    stopStreamingProgress();
 
     await apiAddMessage(
       convId,
@@ -1094,8 +1144,7 @@ async function handleSendChatMessage(text: string): Promise<void> {
     state.activeDetail = await apiGetConversation(convId);
     renderViewportRegion();
   } catch (err) {
-    state.isStreaming = false;
-    state.streamingText = "";
+    stopStreamingProgress();
     await apiAddMessage(
       convId,
       "assistant",

@@ -40,11 +40,21 @@ export function renderChatPanel(
 
   const messages = detail.messages;
   const activeTabSources = getActiveTabSources(detail);
+  const elapsedSec =
+    state.isStreaming && state.streamingStartedAt > 0
+      ? ((Date.now() - state.streamingStartedAt) / 1000).toFixed(1)
+      : "0.0";
+  const phaseLabel = state.streamingPhase || "processing";
+  const statusLineText =
+    state.streamingStatus || "request in progress...";
+
   const offlineNotice = !state.sidecar.online
     ? "models [offline] - browser tabs work normally; start sidecar for local chat"
-    : activeTabSources.length > 0
-      ? `ask over ${activeTabSources.length} open tab${activeTabSources.length === 1 ? "" : "s"} in context or type a question_`
-      : "ask a question or open a tab [+] to add context_";
+    : state.isStreaming
+      ? `[in progress: ${statusLineText}]`
+      : activeTabSources.length > 0
+        ? `ask over ${activeTabSources.length} open tab${activeTabSources.length === 1 ? "" : "s"} in context or type a question_`
+        : "ask a question or open a tab [+] to add context_";
 
   const contextPillsHtml =
     activeTabSources.length === 0
@@ -85,21 +95,42 @@ export function renderChatPanel(
         </div>
       `;
 
+  const stepsHtml = state.streamingSteps
+    .map(
+      (step, idx) =>
+        `<div class="streaming-step-line">${idx === state.streamingSteps.length - 1 ? "&gt;" : "ok"} ${escapeHtml(step)}</div>`
+    )
+    .join("");
+
   container.innerHTML = `
     <div class="chat-column">
       <div class="chat-messages" id="chat-messages-list">
         ${
-          messages.length === 0
+          messages.length === 0 && !state.isStreaming
             ? `<div class="muted">no messages in this conversation yet.</div>`
-            : messages.map((m) => renderMessageBlock(m.role, m.content, m.model, m.source_ids_json, m.cited_sources)).join("")
+            : messages
+                .map((m) =>
+                  renderMessageBlock(
+                    m.role,
+                    m.content,
+                    m.model,
+                    m.source_ids_json,
+                    m.cited_sources
+                  )
+                )
+                .join("")
         }
         ${
           state.isStreaming
             ? `
-          <div class="msg-block" id="streaming-msg-block">
+          <div class="msg-block msg-streaming-block" id="streaming-msg-block">
             <div class="msg-header">
               <span>assistant</span>
-              <span>${escapeHtml(state.selectedModel)} [streaming]</span>
+              <span>${escapeHtml(state.selectedModel)} [<span id="streaming-phase-badge">${escapeHtml(phaseLabel)}</span> · <span id="streaming-elapsed-timer">${elapsedSec}s</span>]</span>
+            </div>
+            <div class="streaming-status-box" id="streaming-status-box">
+              <div class="streaming-status-current" id="streaming-status-current">&gt; status: ${escapeHtml(statusLineText)}</div>
+              <div class="streaming-steps-list" id="streaming-steps-list">${stepsHtml}</div>
             </div>
             <div class="msg-body"><span id="streaming-msg-text">${escapeHtml(state.streamingText)}</span><span class="caret-blink">▌</span></div>
           </div>
@@ -117,9 +148,10 @@ export function renderChatPanel(
             class="composer-input"
             type="text"
             placeholder="${escapeHtml(offlineNotice)}"
+            ${state.isStreaming ? "disabled" : ""}
           />
           <span class="caret-blink">▌</span>
-          <button id="chat-send-btn">[send]</button>
+          <button id="chat-send-btn" ${state.isStreaming ? "disabled" : ""}>${state.isStreaming ? "[in progress...]" : "[send]"}</button>
         </div>
 
         <div class="composer-meta-row">
@@ -172,6 +204,58 @@ export function appendStreamingDelta(delta: string): void {
   }
 }
 
+export function updateStreamingStatus(status: string, phase?: string): void {
+  state.streamingStatus = status;
+  if (phase) {
+    state.streamingPhase = phase;
+  }
+  if (
+    status &&
+    state.streamingSteps[state.streamingSteps.length - 1] !== status
+  ) {
+    state.streamingSteps = [...state.streamingSteps.slice(-4), status];
+  }
+
+  const phaseEl = document.getElementById("streaming-phase-badge");
+  if (phaseEl && state.streamingPhase) {
+    phaseEl.textContent = state.streamingPhase;
+  }
+  const curEl = document.getElementById("streaming-status-current");
+  if (curEl) {
+    curEl.textContent = `> status: ${status}`;
+  }
+  const stepsEl = document.getElementById("streaming-steps-list");
+  if (stepsEl) {
+    stepsEl.innerHTML = state.streamingSteps
+      .map(
+        (step, idx) =>
+          `<div class="streaming-step-line">${idx === state.streamingSteps.length - 1 ? "&gt;" : "ok"} ${escapeHtml(step)}</div>`
+      )
+      .join("");
+  }
+  const inputEl = document.getElementById(
+    "chat-composer-input"
+  ) as HTMLInputElement | null;
+  if (inputEl && state.isStreaming) {
+    inputEl.placeholder = `[in progress: ${status}]`;
+  }
+  const list = document.getElementById("chat-messages-list");
+  if (list) {
+    list.scrollTop = list.scrollHeight;
+  }
+}
+
+export function tickStreamingElapsed(): void {
+  if (!state.isStreaming || state.streamingStartedAt <= 0) return;
+  const elapsedSec = ((Date.now() - state.streamingStartedAt) / 1000).toFixed(
+    1
+  );
+  const timerEl = document.getElementById("streaming-elapsed-timer");
+  if (timerEl) {
+    timerEl.textContent = `${elapsedSec}s`;
+  }
+}
+
 function renderMessageBlock(
   role: string,
   content: string,
@@ -188,10 +272,29 @@ function renderMessageBlock(
     }
   }
 
+  const trimmed = content.trim();
+  const isErrorMsg =
+    role === "assistant" &&
+    (trimmed.startsWith("[err]") ||
+      trimmed.startsWith("[error:") ||
+      trimmed.startsWith("models [offline]"));
+
   const formattedBody = formatCitationsInText(content, sourceIds);
   const modelLabel = model ? `model: ${escapeHtml(model)}` : "";
   const srcCountLabel =
     sourceIds.length > 0 ? ` · ${sourceIds.length} src` : "";
+  const statusBadge = isErrorMsg
+    ? ` <span class="msg-error-badge">[error]</span>`
+    : "";
+
+  const retryButtonHtml =
+    isErrorMsg && state.lastUserPrompt
+      ? `
+      <div class="composer-controls">
+        <button class="citation-link" data-retry-prompt="${escapeHtml(state.lastUserPrompt)}">[retry request]</button>
+      </div>
+    `
+      : "";
 
   const openAsTabButtons =
     citedSources && citedSources.length > 0
@@ -211,12 +314,13 @@ function renderMessageBlock(
       : "";
 
   return `
-    <div class="msg-block">
+    <div class="msg-block ${isErrorMsg ? "msg-error-block" : ""}">
       <div class="msg-header">
-        <span>${escapeHtml(role)}</span>
+        <span>${escapeHtml(role)}${statusBadge}</span>
         <span>${modelLabel}${srcCountLabel}</span>
       </div>
       <div class="msg-body">${formattedBody}</div>
+      ${retryButtonHtml}
       ${openAsTabButtons}
     </div>
   `;
@@ -279,6 +383,14 @@ function bindChatEvents(container: HTMLElement, actions: ChatActions): void {
       const url = el.getAttribute("data-open-tab-url");
       const title = el.getAttribute("data-open-tab-title") ?? "";
       if (url) actions.onOpenUrlAsTab(url, title);
+    });
+  });
+
+  container.querySelectorAll("[data-retry-prompt]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (state.isStreaming) return;
+      const prompt = (btn as HTMLElement).getAttribute("data-retry-prompt");
+      if (prompt) actions.onSendMessage(prompt);
     });
   });
 

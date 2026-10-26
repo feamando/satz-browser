@@ -663,12 +663,13 @@ fn trigger_dom_capture_with_completion<R: tauri::Runtime>(
                 let mut js: Vec<u16> = DOM_CAPTURE_JS.encode_utf16().collect();
                 js.push(0);
 
+                let tx_for_handler = done_tx.clone();
                 let handler = ExecuteScriptCompletedHandler::create(Box::new(
                     move |_err_code, result_str: String| {
                         let app_bg = app_clone.clone();
                         let tid_bg = tid_clone.clone();
                         let url_bg = url_clone.clone();
-                        let tx_bg = done_tx.clone();
+                        let tx_bg = tx_for_handler.clone();
                         std::thread::spawn(move || {
                             handle_captured_dom_json(&app_bg, &tid_bg, &url_bg, &result_str);
                             if let Some(tx) = tx_bg {
@@ -678,7 +679,11 @@ fn trigger_dom_capture_with_completion<R: tauri::Runtime>(
                         Ok(())
                     },
                 ));
-                let _ = core_wv.ExecuteScript(PCWSTR(js.as_ptr()), &handler);
+                if core_wv.ExecuteScript(PCWSTR(js.as_ptr()), &handler).is_err() {
+                    if let Some(tx) = done_tx {
+                        let _ = tx.send(());
+                    }
+                }
             } else if let Some(tx) = done_tx {
                 let _ = tx.send(());
             }
