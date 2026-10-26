@@ -3,6 +3,7 @@ import {
   apiAddBookmark,
   apiAddMessage,
   apiArchiveConversation,
+  apiCaptureOpenTabs,
   apiCloseTab,
   apiControlTab,
   apiCreateConversation,
@@ -15,6 +16,7 @@ import {
   apiPinConversation,
   apiRemoveBookmark,
   apiRenameConversation,
+  sidecarDeleteBrainEntity,
   sidecarDeletePassage,
   sidecarFetchDigest,
   sidecarFetchHealth,
@@ -394,6 +396,12 @@ function renderViewportRegion(): void {
       },
       onDeletePassage: async (passageId) => {
         await sidecarDeletePassage(passageId);
+        const kb = await sidecarFetchKnowledge();
+        if (kb) state.knowledge = kb;
+        renderViewportRegion();
+      },
+      onDeleteBrainEntity: async (slug) => {
+        await sidecarDeleteBrainEntity(slug);
         const kb = await sidecarFetchKnowledge();
         if (kb) state.knowledge = kb;
         renderViewportRegion();
@@ -864,6 +872,9 @@ async function handleSendChatMessage(text: string): Promise<void> {
     return;
   }
 
+  // Capture live rendered DOM + visible_text from all open WebView2 tabs right before querying models
+  await apiCaptureOpenTabs(convId);
+  state.activeDetail = await apiGetConversation(convId);
   const activeTabSources = getActiveTabSources(state.activeDetail);
 
   try {

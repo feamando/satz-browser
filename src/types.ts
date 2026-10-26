@@ -117,9 +117,26 @@ export interface DigestEntry {
   kind: string;
 }
 
+export interface BrainEntityItem {
+  slug: string;
+  type: string;
+  name: string;
+  tier: number;
+  summary: string;
+  path: string;
+  attributes: Record<string, unknown>;
+  updated: string;
+}
+
 export interface KnowledgeSummary {
   pause_learning: boolean;
   queue_len: number;
+  brain?: {
+    brain_dir: string;
+    brain_md: string;
+    entity_count: number;
+    entities: BrainEntityItem[];
+  };
   top_domains: Array<{ domain: string; visits: number; score: number }>;
   top_topics: Array<{ topic: string; weight: number }>;
   passages: Array<{

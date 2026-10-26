@@ -75,8 +75,8 @@ class SatzSidecarRuntime:
         sgs_root: Path,
         store_path: Path,
         gemma_rel_path: str = "models/gemma-4-e4b-it",
-        open_tab_char_budget: int = 6000,
-        total_context_char_budget: int = 24000,
+        open_tab_char_budget: int = 14000,
+        total_context_char_budget: int = 32000,
     ):
         self.sgs_root = sgs_root.resolve()
         self.store_path = store_path.resolve()
@@ -84,8 +84,13 @@ class SatzSidecarRuntime:
         self.open_tab_char_budget = open_tab_char_budget
         self.total_context_char_budget = total_context_char_budget
 
+        sidecar_dir = str(Path(__file__).resolve().parent)
+        if sidecar_dir not in sys.path:
+            sys.path.insert(0, sidecar_dir)
         if str(self.sgs_root) not in sys.path:
             sys.path.insert(0, str(self.sgs_root))
+
+        from satz_brain import SatzBrain
 
         # Import SGS modules after adding sgs_root to sys.path
         from src.planck3.store import Store
@@ -103,6 +108,7 @@ class SatzSidecarRuntime:
         self.model_lock = threading.RLock()
 
         self.store = Store(self.store_path)
+        self.brain = SatzBrain(self.store_path.parent / "brain")
         self._init_satz_tables()
 
         sgs_cache_dir = self.sgs_root / "data" / "planck3_cache"
@@ -358,6 +364,7 @@ class SatzSidecarRuntime:
         title: str,
         html: str | None,
         dwell_seconds: float = 0.0,
+        visible_text: str | None = None,
     ) -> dict[str, Any]:
         from src.planck3.web import domain_of, extract_jsonld, extract_main_text
 
@@ -366,10 +373,32 @@ class SatzSidecarRuntime:
         text = ""
         extra_lines: list[str] = []
 
+        clean_visible = ""
+        if visible_text and visible_text.strip():
+            # Preserve line structure for web apps / email clients / tables while collapsing blank runs
+            lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in visible_text.splitlines()]
+            non_empty = [ln for ln in lines if ln]
+            clean_visible = "\n".join(non_empty)[:120000]
+
+        trafilatura_text = ""
         if html and html.strip():
-            text = extract_main_text(html, url)
+            trafilatura_text = extract_main_text(html, url) or ""
             extra_lines = extract_jsonld(html)
-        if not text and url and url.startswith(("http://", "https://")):
+
+        # Authenticated web apps (e.g. mail.google.com, dashboards, SPAs) often have their UI/lists
+        # stripped by trafilatura. Prefer or combine clean_visible so live tab content is never lost.
+        if clean_visible and trafilatura_text:
+            if len(trafilatura_text) < 400 or len(clean_visible) > len(trafilatura_text) * 1.4:
+                text = f"{clean_visible}\n\n{trafilatura_text}"[:120000]
+            else:
+                text = f"{trafilatura_text}\n\n{clean_visible[:40000]}"[:120000]
+        elif clean_visible:
+            text = clean_visible
+        elif trafilatura_text:
+            text = trafilatura_text
+
+        # Only fall back to unauthenticated python web.fetch if no DOM html or visible_text was provided
+        if not text and not html and not clean_visible and url and url.startswith(("http://", "https://")):
             capture_mode = "fetch"
             page = self.web.fetch(url)
             if page.get("html"):
@@ -381,6 +410,15 @@ class SatzSidecarRuntime:
 
         with self.store_lock:
             if source_id:
+                # Never overwrite non-empty authenticated DOM text with an empty capture
+                if not text:
+                    existing = self.store.db.execute(
+                        "SELECT text FROM satz_sources WHERE source_id = ?",
+                        (source_id,),
+                    ).fetchone()
+                    if existing and existing["text"]:
+                        text = existing["text"]
+
                 self.store.db.execute(
                     """
                     INSERT OR REPLACE INTO satz_sources
@@ -414,7 +452,7 @@ class SatzSidecarRuntime:
             self.store.db.commit()
 
         queued = False
-        if not self.pause_learning and text and len(text) >= 40:
+        if not self.pause_learning and text and len(text) >= 20:
             self.ingest_queue.put(
                 {
                     "conversation_id": conversation_id or "default",
@@ -451,6 +489,18 @@ class SatzSidecarRuntime:
                 text = item["text"]
                 conv_id = item["conversation_id"]
 
+                # 1. Enrich the Satz Brain knowledge graph (accounts, entities, domains)
+                try:
+                    self.brain.enrich_from_page(
+                        url=url,
+                        domain=domain,
+                        title=title,
+                        text=text,
+                        conversation_id=conv_id,
+                    )
+                except Exception as be:
+                    print(f"[satz-sidecar] brain enrich error: {be}", flush=True)
+
                 entity = main_entity(title) or title[:60]
                 query_str = f"{title} {domain}".strip()
 
@@ -468,7 +518,7 @@ class SatzSidecarRuntime:
                         # Keep lead sentences if rank_passages found no high-IDF query match
                         from src.planck3.candidates import split_sentences
 
-                        sents = [s for s in split_sentences(text) if len(s) >= 30][:4]
+                        sents = [s for s in split_sentences(text) if len(s) >= 25][:6]
                         passages = [
                             {
                                 "text": s[:420],
@@ -666,13 +716,13 @@ class SatzSidecarRuntime:
         self,
         question: str,
         sources: list[dict[str, Any]],
-    ) -> tuple[str, list[str]]:
+    ) -> tuple[str, list[str], list[dict[str, Any]]]:
         """
-        Section 4.4:
-        - Order: sources in open tabs first, then other checked sources.
-        - Budget: active tab pages in full up to 6,000 chars each.
-          Other checked sources contribute best 3 passages each (lexical overlap with
-          message via web.query_keys / rank_passages) until 24,000 chars total.
+        Assembles context from:
+        1. Open authenticated browser tabs in full (up to open_tab_char_budget each)
+        2. Additional web/checked sources (best 3 passages each)
+        3. Relevant historical passages from the local Planck SQLite store
+        Returns (context_str, used_source_ids, hydrated_sources).
         """
         from src.planck3.candidates import rank_passages, split_sentences
         from src.planck3.util import norm_text
@@ -682,6 +732,8 @@ class SatzSidecarRuntime:
         total_chars = 0
         blocks: list[str] = []
         used_source_ids: list[str] = []
+        hydrated_sources: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
 
         for src in sources:
             if total_chars >= self.total_context_char_budget:
@@ -698,11 +750,13 @@ class SatzSidecarRuntime:
             if not text:
                 continue
 
+            if url:
+                seen_urls.add(url)
+
             remaining = self.total_context_char_budget - total_chars
             if is_open_tab:
                 snippet = text[: min(self.open_tab_char_budget, remaining)]
             else:
-                # Best 3 passages using query_keys lexical overlap
                 doc = {"url": url, "domain": domain, "title": title, "trust": 0.7, "text": text}
                 ranked = rank_passages(question, [doc], k=3, per_source=3, min_score=0.05)
                 if ranked:
@@ -725,11 +779,38 @@ class SatzSidecarRuntime:
 
             cite_num = len(used_source_ids) + 1
             used_source_ids.append(sid)
-            block = f"[{cite_num}] {domain} ({title}) - {url}\n{snippet}"
+            hydrated_sources.append(
+                {
+                    "id": sid,
+                    "url": url,
+                    "title": title,
+                    "domain": domain,
+                    "text": snippet,
+                    "is_open_tab": is_open_tab,
+                }
+            )
+            tab_tag = "LIVE OPEN BROWSER TAB" if is_open_tab else "WEB SOURCE"
+            block = f"[{cite_num}] ({tab_tag}) {domain} ({title}) - {url}\n{snippet}"
             blocks.append(block)
             total_chars += len(block)
 
-        return "\n\n".join(blocks), used_source_ids
+        # Also pull relevant passages from persistent SQLite knowledge store if not already in open tabs
+        if question and total_chars < self.total_context_char_budget - 1000:
+            with self.store_lock:
+                stored_hits = self.store.local_passages(question, limit=4)
+            kb_lines: list[str] = []
+            for hp in stored_hits:
+                hurl = str(hp.get("url") or "")
+                htext = str(hp.get("text") or "").strip()
+                if not htext or (hurl and hurl in seen_urls):
+                    continue
+                hdom = str(hp.get("domain") or domain_of(hurl) or "local")
+                htitle = str(hp.get("title") or hurl)
+                kb_lines.append(f"- ({hdom} · {htitle}): {htext}")
+            if kb_lines:
+                blocks.append("STORED PASSAGES FROM PAST BROWSING:\n" + "\n".join(kb_lines))
+
+        return "\n\n".join(blocks), used_source_ids, hydrated_sources
 
     def stream_chat(
         self,
@@ -754,7 +835,19 @@ class SatzSidecarRuntime:
         combined_sources = list(sources)
         cited_web_sources: list[dict[str, str]] = []
 
-        if web_enabled and user_msg:
+        # Avoid running a generic public web search when the user is clearly asking about
+        # their own open tab / email / account or asking to store something from the current page.
+        is_personal_or_tab_query = bool(
+            re.search(
+                r"\b(my\s+(?:latest\s+)?(?:email|inbox|mail|account|calendar|messages|address|tab|page)|"
+                r"this\s+(?:email|page|tab|article|site|screen|message|thread)|"
+                r"store\s+the|save\s+the|in\s+the\s+knowledge\s*base|in\s+my\s+brain)\b",
+                user_msg,
+                re.IGNORECASE,
+            )
+        )
+
+        if web_enabled and user_msg and not (is_personal_or_tab_query and len(combined_sources) > 0):
             try:
                 ans = self.run_answer(user_msg, session_id="chat-web")
                 existing_urls = {s.get("url") for s in combined_sources}
@@ -775,22 +868,31 @@ class SatzSidecarRuntime:
             except Exception as e:
                 print(f"[satz-sidecar] web pre-search failed: {e}", flush=True)
 
-        context_str, used_source_ids = self.assemble_chat_context(user_msg, combined_sources)
+        context_str, used_source_ids, hydrated_sources = self.assemble_chat_context(user_msg, combined_sources)
+        brain_context = self.brain.build_model_context(user_msg, hydrated_sources or combined_sources)
 
         system_prompt = (
-            "You are the local assistant inside the Satz browser. "
-            "Answer from the numbered SOURCES when they are relevant. "
-            "Every time you use a fact or claim from a source, cite it inline as [1], [2], [3], etc. "
-            "using the exact source numbers provided. "
-            "When asked what sources disagree on or how they compare, cite each source explicitly with [1], [2], [3]. "
-            "Say plainly when the sources do not contain the answer. "
-            "Keep answers concise and never use em dashes."
+            "You are the local AI assistant inside the Satz browser, connected directly to:\n"
+            "1. The user's LIVE OPEN BROWSER TABS (numbered [1], [2], ... in SOURCES), including their authenticated accounts, webmail (e.g. Gmail), and active pages.\n"
+            "2. The user's persistent local SATZ BRAIN KNOWLEDGE BASE (BRAIN.md index + entity files on disk).\n\n"
+            "CRITICAL RULES:\n"
+            "- You HAVE full access to the live content of the user's open tabs in SOURCES and full read/write access to the local Satz Brain knowledge base.\n"
+            "- NEVER say 'I am a language model and cannot store information' or 'I do not have a personal knowledge base'.\n"
+            "- When the user asks about their emails, inbox, account, or open page (e.g. 'give me my latest email'), read the LIVE OPEN BROWSER TAB in SOURCES [1] directly and give the exact sender, subject, time/snippet, or content shown on the page.\n"
+            "- When the user asks to store, save, or remember any information (such as an address on an email, a contact, a person, an account, a project, or a note) into the knowledge base / Brain, confirm clearly what you are storing AND output a <brain_store> JSON block at the very end of your response in this exact format:\n"
+            '<brain_store>{"type": "place", "name": "Short Entity Name", "summary": "One-line summary", "attributes": {"address": "...", "email": "..."}, "content": "Full details"}</brain_store>\n'
+            "  Valid types: 'place', 'person', 'account', 'organization', 'project', 'note', 'decision'.\n"
+            "- Every time you use a fact from a numbered source, cite it inline as [1], [2], etc.\n"
+            "- Keep answers concise and never use em dashes."
         )
 
+        prompt_sections: list[str] = []
+        if brain_context:
+            prompt_sections.append(f"SATZ BRAIN KNOWLEDGE BASE:\n{brain_context}")
         if context_str:
-            user_prompt = f"SOURCES:\n{context_str}\n\nQUESTION: {user_msg}"
-        else:
-            user_prompt = user_msg
+            prompt_sections.append(f"SOURCES (OPEN TABS & RETRIEVED CONTEXT):\n{context_str}")
+        prompt_sections.append(f"USER REQUEST: {user_msg}")
+        user_prompt = "\n\n".join(prompt_sections)
 
         chat_msgs: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
         prior = [m for m in messages[:-1] if m.get("role") in ("user", "assistant")][-6:]
@@ -824,12 +926,64 @@ class SatzSidecarRuntime:
         gen_thread = threading.Thread(target=_generate, daemon=True)
         gen_thread.start()
 
+        full_raw = ""
+        emitted_len = 0
+        in_brain_tag = False
+
         for chunk in streamer:
-            if chunk:
-                cleaned = chunk.replace("\u2014", "-")
-                yield {"delta": cleaned}
+            if not chunk:
+                continue
+            cleaned = chunk.replace("\u2014", "-")
+            full_raw += cleaned
+
+            if not in_brain_tag:
+                tag_pos = full_raw.find("<brain_store")
+                if tag_pos != -1:
+                    in_brain_tag = True
+                    if tag_pos > emitted_len:
+                        delta_out = full_raw[emitted_len:tag_pos]
+                        emitted_len = tag_pos
+                        if delta_out:
+                            yield {"delta": delta_out}
+                else:
+                    # Hold back a small tail in case '<brain_store' is being split across tokens
+                    safe_end = max(emitted_len, len(full_raw) - 14)
+                    if safe_end > emitted_len:
+                        delta_out = full_raw[emitted_len:safe_end]
+                        emitted_len = safe_end
+                        if delta_out:
+                            yield {"delta": delta_out}
 
         gen_thread.join(timeout=5.0)
+
+        # Flush any remaining text and execute any <brain_store> directives
+        primary_url = str(hydrated_sources[0].get("url") or "") if hydrated_sources else ""
+        cleaned_final, stored_entities = self.brain.extract_and_execute_brain_directives(
+            full_raw,
+            source_url=primary_url,
+        )
+
+        if not in_brain_tag and len(full_raw) > emitted_len:
+            tail = full_raw[emitted_len:]
+            if tail:
+                yield {"delta": tail}
+
+        # Guarantee fulfillment if user explicitly asked to store/save/remember something
+        if not self.pause_learning:
+            stored_entities = self.brain.ensure_explicit_store_fulfilled(
+                user_msg=user_msg,
+                assistant_msg=cleaned_final,
+                sources=hydrated_sources,
+                already_stored=stored_entities,
+            )
+
+        if stored_entities:
+            confirm_lines = [
+                f"\n\n[brain: stored {e['type']} '{e['name']}' -> {e['path']}]"
+                for e in stored_entities
+            ]
+            yield {"delta": "".join(confirm_lines)}
+
         ms = int((time.perf_counter() - t0) * 1000)
         done_payload: dict[str, Any] = {
             "done": True,
@@ -838,6 +992,8 @@ class SatzSidecarRuntime:
         }
         if cited_web_sources:
             done_payload["cited_sources"] = cited_web_sources
+        if stored_entities:
+            done_payload["stored_entities"] = stored_entities
         yield done_payload
 
     # ── /digest, /knowledge, /forget ─────────────────────────────────────
@@ -926,6 +1082,7 @@ class SatzSidecarRuntime:
             return {
                 "pause_learning": self.pause_learning,
                 "queue_len": self.ingest_queue.qsize(),
+                "brain": self.brain.get_brain_summary(),
                 "top_domains": top_domains,
                 "top_topics": top_topics,
                 "passages": passages,
@@ -938,6 +1095,10 @@ class SatzSidecarRuntime:
             self.store.db.commit()
             after = self.store.db.execute("SELECT COUNT(*) FROM passages").fetchone()[0]
             return {"ok": True, "before": before, "after": after}
+
+    def delete_brain_entity(self, slug: str) -> dict[str, Any]:
+        deleted = self.brain.delete_entity(slug)
+        return {"ok": deleted, "slug": slug}
 
     def forget_conversation(self, conversation_id: str) -> dict[str, Any]:
         with self.store_lock:
@@ -1024,6 +1185,7 @@ def make_sidecar_server(runtime: SatzSidecarRuntime, host: str = "127.0.0.1", po
                     title=str(data.get("title") or ""),
                     html=data.get("html"),
                     dwell_seconds=float(data.get("dwell_seconds") or 0.0),
+                    visible_text=data.get("visible_text"),
                 )
                 return self._json(res)
 
@@ -1055,6 +1217,25 @@ def make_sidecar_server(runtime: SatzSidecarRuntime, host: str = "127.0.0.1", po
             if self.path == "/knowledge/delete_passage":
                 pid = str(data.get("passage_id") or "")
                 return self._json(runtime.delete_passage(pid))
+
+            if self.path == "/knowledge/delete_entity":
+                slug = str(data.get("slug") or "")
+                return self._json(runtime.delete_brain_entity(slug))
+
+            if self.path == "/knowledge/upsert_entity":
+                ent = runtime.brain.upsert_entity(
+                    entity_type=str(data.get("type") or "note"),
+                    name=str(data.get("name") or "Note"),
+                    summary=str(data.get("summary") or ""),
+                    attributes=data.get("attributes") if isinstance(data.get("attributes"), dict) else {},
+                    content=str(data.get("content") or ""),
+                    relationships=data.get("relationships"),
+                    aliases=data.get("aliases") if isinstance(data.get("aliases"), list) else [],
+                    source_url=str(data.get("source_url") or ""),
+                    tier=int(data.get("tier") or 1),
+                    actor=str(data.get("actor") or "api/manual"),
+                )
+                return self._json({"ok": True, "entity": ent})
 
             if self.path == "/forget":
                 cid = str(data.get("conversation_id") or "")
