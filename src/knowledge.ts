@@ -3,6 +3,7 @@ import { escapeHtml, state } from "./state";
 export interface KnowledgeActions {
   onTogglePauseLearning: (paused: boolean) => void;
   onDeletePassage: (passageId: string) => void;
+  onDeleteBrainEntity?: (slug: string) => void;
   onCloseKnowledgeView: () => void;
 }
 
@@ -11,12 +12,13 @@ export function renderKnowledgeView(
   actions: KnowledgeActions
 ): void {
   const kb = state.knowledge;
+  const brainEntities = kb.brain?.entities ?? [];
 
   container.innerHTML = `
     <div class="knowledge-view">
       <div class="knowledge-section">
         <div class="panel-header">
-          <span>knowledge base (local store)</span>
+          <span>knowledge base (satz brain + local store)</span>
           <div>
             <button id="kb-pause-btn" class="${kb.pause_learning ? "active" : ""}">
               [pause learning: ${kb.pause_learning ? "on" : "off"}]
@@ -25,8 +27,36 @@ export function renderKnowledgeView(
           </div>
         </div>
         <div class="muted">
-          ingest queue: ${kb.queue_len} · everything browsed and asked stays on this machine. deleting a conversation deletes its passages.
+          brain entities: ${brainEntities.length} · ingest queue: ${kb.queue_len} · everything browsed and stored stays on this machine.
         </div>
+      </div>
+
+      <div class="knowledge-section">
+        <div class="panel-header">
+          <span>satz brain entities (${brainEntities.length})</span>
+        </div>
+        ${
+          brainEntities.length === 0
+            ? `<div class="muted">no brain entities stored yet. browse authenticated tabs or ask chat to store addresses, contacts, accounts, or notes.</div>`
+            : brainEntities
+                .map((e) => {
+                  const attrEntries = Object.entries(e.attributes ?? {})
+                    .filter(([k]) => k !== "source_url")
+                    .map(([k, v]) => `${k}: ${String(v)}`)
+                    .join(" · ");
+                  return `
+              <div class="source-row">
+                <div class="source-row-top">
+                  <span>[${escapeHtml(e.type)}] ${escapeHtml(e.name)} <span class="muted">(tier ${e.tier} · ${escapeHtml(e.path)})</span></span>
+                  <button class="rail-menu-btn" data-delete-brain-entity="${escapeHtml(e.slug)}">[delete]</button>
+                </div>
+                <div>${escapeHtml(e.summary)}</div>
+                ${attrEntries ? `<div class="muted">${escapeHtml(attrEntries)}</div>` : ""}
+              </div>
+            `;
+                })
+                .join("")
+        }
       </div>
 
       <div class="knowledge-section">
@@ -107,6 +137,15 @@ export function renderKnowledgeView(
     btn.addEventListener("click", () => {
       const id = (btn as HTMLElement).getAttribute("data-delete-passage");
       if (id) actions.onDeletePassage(id);
+    });
+  });
+
+  container.querySelectorAll("[data-delete-brain-entity]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const slug = (btn as HTMLElement).getAttribute("data-delete-brain-entity");
+      if (slug && actions.onDeleteBrainEntity) {
+        actions.onDeleteBrainEntity(slug);
+      }
     });
   });
 }

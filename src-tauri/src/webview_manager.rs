@@ -271,7 +271,26 @@ pub fn sync_tab_webviews_impl(
                                 None,
                             );
                         }
-                        trigger_dom_capture_and_ingest(app_load.clone(), wv, tid_load.clone(), url_str.clone());
+                        trigger_dom_capture_and_ingest(
+                            app_load.clone(),
+                            wv.clone(),
+                            tid_load.clone(),
+                            url_str.clone(),
+                        );
+                        // Second delayed capture for SPAs (e.g. Gmail, Notion, dashboards) that render asynchronously after load
+                        let app_delayed = app_load.clone();
+                        let wv_delayed = wv.clone();
+                        let tid_delayed = tid_load.clone();
+                        let url_delayed = url_str.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_millis(1800));
+                            trigger_dom_capture_and_ingest(
+                                app_delayed,
+                                wv_delayed,
+                                tid_delayed,
+                                url_delayed,
+                            );
+                        });
                     }
 
                     let _ = app_load.emit(
@@ -293,6 +312,13 @@ pub fn sync_tab_webviews_impl(
                             Some(&title),
                         );
                     }
+                    // SPAs (like Gmail opening an email or finishing inbox load) update document.title on in-page navigation
+                    trigger_dom_capture_and_ingest(
+                        app_title.clone(),
+                        wv.clone(),
+                        tid_title.clone(),
+                        current_url.clone().unwrap_or_default(),
+                    );
                     let _ = app_title.emit(
                         "tab-page-event",
                         TabPageEventPayload {
@@ -430,20 +456,94 @@ pub fn control_tab_webview_impl(
     Ok(())
 }
 
-/// Captures the rendered DOM on Windows via WebView2 `ExecuteScript` (without exposing Tauri IPC to the web page)
-/// and posts `{conversation_id, source_id, url, title, html}` to the local sidecar `POST /ingest`.
+const DOM_CAPTURE_JS: &str = r#"(() => {
+  try {
+    const parts = [];
+    const sel = window.getSelection ? String(window.getSelection()).trim() : '';
+    if (sel) {
+      parts.push('[SELECTED TEXT]\n' + sel);
+    }
+    const acctEl = document.querySelector('[aria-label*="@"][aria-label*="Google"], [aria-label*="Account"], [data-email]');
+    if (acctEl) {
+      const label = acctEl.getAttribute('aria-label') || acctEl.getAttribute('data-email') || '';
+      if (label) parts.push('[AUTHENTICATED ACCOUNT] ' + label);
+    }
+    const emailRows = document.querySelectorAll('tr.zA, [role="row"]');
+    if (emailRows && emailRows.length > 0) {
+      const rowLines = [];
+      for (let i = 0; i < Math.min(emailRows.length, 25); i++) {
+        const r = emailRows[i];
+        const txt = (r.innerText || '').replace(/\s+/g, ' ').trim();
+        if (txt.length > 8) {
+          rowLines.push('[' + (i + 1) + '] ' + txt);
+        }
+      }
+      if (rowLines.length > 0) {
+        parts.push('[VISIBLE LIST / INBOX ROWS (TOP = LATEST)]\n' + rowLines.join('\n'));
+      }
+    }
+    const mainEl = document.querySelector('[role="main"], main, article');
+    if (mainEl && mainEl.innerText) {
+      const mainTxt = mainEl.innerText.trim();
+      if (mainTxt.length > 20) {
+        parts.push('[MAIN VIEWPORT CONTENT]\n' + mainTxt.slice(0, 60000));
+      }
+    }
+    const bodyTxt = document.body && document.body.innerText ? document.body.innerText.trim() : '';
+    if (bodyTxt) {
+      parts.push('[FULL PAGE VISIBLE TEXT]\n' + bodyTxt.slice(0, 80000));
+    }
+    return JSON.stringify({
+      url: location.href,
+      title: document.title,
+      visible_text: parts.join('\n\n').slice(0, 120000),
+      html: document.documentElement ? document.documentElement.outerHTML.slice(0, 1500000) : ''
+    });
+  } catch (e) {
+    return JSON.stringify({
+      url: location.href,
+      title: document.title,
+      visible_text: document.body ? (document.body.innerText || '').slice(0, 100000) : '',
+      html: ''
+    });
+  }
+})()"#;
+
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Captures the rendered DOM + visible text on Windows via WebView2 `ExecuteScript`
+/// and posts `{conversation_id, source_id, url, title, visible_text, html}` to `POST /ingest`.
 fn trigger_dom_capture_and_ingest<R: tauri::Runtime>(
     app: AppHandle<R>,
     webview: tauri::Webview<R>,
     tab_id: String,
     fallback_url: String,
 ) {
+    trigger_dom_capture_with_completion(app, webview, tab_id, fallback_url, None);
+}
+
+fn trigger_dom_capture_with_completion<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    webview: tauri::Webview<R>,
+    tab_id: String,
+    fallback_url: String,
+    done_tx: Option<std::sync::mpsc::Sender<()>>,
+) {
     #[cfg(windows)]
     {
         let app_clone = app.clone();
         let tid_clone = tab_id.clone();
         let url_clone = fallback_url.clone();
-        let _ = webview.with_webview(move |platform_wv| unsafe {
+        let res = webview.with_webview(move |platform_wv| unsafe {
             use webview2_com::ExecuteScriptCompletedHandler;
             use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2;
             use windows::core::PCWSTR;
@@ -451,33 +551,82 @@ fn trigger_dom_capture_and_ingest<R: tauri::Runtime>(
             let controller = platform_wv.controller();
             if let Ok(core_wv) = controller.CoreWebView2() {
                 let core_wv: ICoreWebView2 = core_wv;
-                let js: Vec<u16> = "JSON.stringify({url: location.href, title: document.title, html: document.documentElement ? document.documentElement.outerHTML.slice(0, 2000000) : ''})\0"
-                    .encode_utf16()
-                    .collect();
+                let mut js: Vec<u16> = DOM_CAPTURE_JS.encode_utf16().collect();
+                js.push(0);
 
                 let handler = ExecuteScriptCompletedHandler::create(Box::new(
                     move |_err_code, result_str: String| {
                         let app_bg = app_clone.clone();
                         let tid_bg = tid_clone.clone();
                         let url_bg = url_clone.clone();
+                        let tx_bg = done_tx.clone();
                         std::thread::spawn(move || {
                             handle_captured_dom_json(&app_bg, &tid_bg, &url_bg, &result_str);
+                            if let Some(tx) = tx_bg {
+                                let _ = tx.send(());
+                            }
                         });
                         Ok(())
                     },
                 ));
                 let _ = core_wv.ExecuteScript(PCWSTR(js.as_ptr()), &handler);
+            } else if let Some(tx) = done_tx {
+                let _ = tx.send(());
             }
         });
+        if res.is_err() {
+            // Do nothing if webview closed
+        }
     }
 
     #[cfg(not(windows))]
     {
         let _ = webview;
         std::thread::spawn(move || {
-            post_ingest_to_sidecar(&app, &tab_id, &fallback_url, "", None);
+            post_ingest_to_sidecar(&app, &tab_id, &fallback_url, "", None, None);
+            if let Some(tx) = done_tx {
+                let _ = tx.send(());
+            }
         });
     }
+}
+
+/// Synchronously captures all currently open live WebView2 tabs for `conversation_id`
+/// right before a chat or reader request so SPA state, opened emails, and selections are fresh.
+pub fn capture_open_tabs_for_conversation(
+    app: &AppHandle,
+    db: &DbState,
+    conversation_id: &str,
+) -> Result<usize, String> {
+    let detail = db
+        .get_conversation(conversation_id)
+        .map_err(|e| e.to_string())?;
+    let open_tabs: Vec<_> = detail.tabs.into_iter().filter(|t| t.is_open).collect();
+    if open_tabs.is_empty() {
+        return Ok(0);
+    }
+
+    let mut receivers = Vec::new();
+    for tab in open_tabs {
+        let label = tab_webview_label(&tab.id);
+        if let Some(wv) = app.get_webview(&label) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            trigger_dom_capture_with_completion(
+                app.clone(),
+                wv,
+                tab.id.clone(),
+                tab.url.clone(),
+                Some(tx),
+            );
+            receivers.push(rx);
+        }
+    }
+
+    let count = receivers.len();
+    for rx in receivers {
+        let _ = rx.recv_timeout(Duration::from_millis(1200));
+    }
+    Ok(count)
 }
 
 fn handle_captured_dom_json<R: tauri::Runtime>(
@@ -495,12 +644,22 @@ fn handle_captured_dom_json<R: tauri::Runtime>(
                 .and_then(|v| v.as_str())
                 .unwrap_or(fallback_url);
             let title = parsed.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            let visible_text = parsed.get("visible_text").and_then(|v| v.as_str());
             let html = parsed.get("html").and_then(|v| v.as_str());
-            post_ingest_to_sidecar(app, tab_id, url, title, html);
+
+            if let Some(db) = app.try_state::<DbState>() {
+                let url_opt = if url.is_empty() { None } else { Some(url) };
+                let title_opt = if title.is_empty() { None } else { Some(title) };
+                if url_opt.is_some() || title_opt.is_some() {
+                    let _ = db.record_tab_navigation_or_title(tab_id, url_opt, title_opt);
+                }
+            }
+
+            post_ingest_to_sidecar(app, tab_id, url, title, visible_text, html);
             return;
         }
     }
-    post_ingest_to_sidecar(app, tab_id, fallback_url, "", None);
+    post_ingest_to_sidecar(app, tab_id, fallback_url, "", None, None);
 }
 
 fn post_ingest_to_sidecar<R: tauri::Runtime>(
@@ -508,6 +667,7 @@ fn post_ingest_to_sidecar<R: tauri::Runtime>(
     tab_id: &str,
     url: &str,
     title: &str,
+    visible_text: Option<&str>,
     html: Option<&str>,
 ) {
     let source = if let Some(db) = app.try_state::<DbState>() {
@@ -520,17 +680,17 @@ fn post_ingest_to_sidecar<R: tauri::Runtime>(
         return;
     };
 
-    let capped_html = html.map(|h| {
-        if h.len() > 2_000_000 {
-            &h[..2_000_000]
-        } else {
-            h
-        }
-    });
+    let capped_html = html.map(|h| truncate_utf8(h, 1_500_000));
+    let capped_visible = visible_text.map(|v| truncate_utf8(v, 120_000));
 
-    if let Some(h) = capped_html {
+    let captured_len = capped_visible
+        .map(|v| v.len())
+        .or_else(|| capped_html.map(|h| h.len()))
+        .unwrap_or(0);
+
+    if captured_len > 0 {
         if let Some(db) = app.try_state::<DbState>() {
-            let _ = db.mark_source_captured(&src.id, h.len());
+            let _ = db.mark_source_captured(&src.id, captured_len);
         }
     }
 
@@ -539,6 +699,7 @@ fn post_ingest_to_sidecar<R: tauri::Runtime>(
         "source_id": src.id,
         "url": if url.is_empty() { &src.url } else { url },
         "title": if title.is_empty() { &src.title } else { title },
+        "visible_text": capped_visible,
         "html": capped_html,
     });
 
@@ -547,8 +708,8 @@ fn post_ingest_to_sidecar<R: tauri::Runtime>(
         &"127.0.0.1:8020".parse().unwrap(),
         Duration::from_millis(800),
     ) {
-        let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
         let req = format!(
             "POST /ingest HTTP/1.1\r\nHost: 127.0.0.1:8020\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body_bytes.len()

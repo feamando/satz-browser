@@ -266,6 +266,16 @@ export async function apiSyncTabWebviews(
   }
 }
 
+export async function apiCaptureOpenTabs(
+  conversationId: string
+): Promise<number> {
+  try {
+    return await invoke<number>("capture_open_tabs", { conversationId });
+  } catch {
+    return 0;
+  }
+}
+
 export async function apiSetSourceInContext(
   sourceId: string,
   inContext: boolean
@@ -348,10 +358,29 @@ export async function sidecarFetchKnowledge(): Promise<KnowledgeSummary | null> 
     const rawDomains = (raw.top_domains ?? []) as Array<Record<string, unknown>>;
     const rawTopics = (raw.top_topics ?? []) as Array<Record<string, unknown>>;
     const rawPassages = (raw.passages ?? []) as Array<Record<string, unknown>>;
+    const rawBrain = (raw.brain ?? null) as Record<string, unknown> | null;
+    const rawEntities = (rawBrain?.entities ?? []) as Array<Record<string, unknown>>;
 
     return {
       pause_learning: Boolean(raw.pause_learning),
       queue_len: Number(raw.queue_len ?? 0),
+      brain: rawBrain
+        ? {
+            brain_dir: String(rawBrain.brain_dir ?? ""),
+            brain_md: String(rawBrain.brain_md ?? ""),
+            entity_count: Number(rawBrain.entity_count ?? rawEntities.length),
+            entities: rawEntities.map((e) => ({
+              slug: String(e.slug ?? ""),
+              type: String(e.type ?? "note"),
+              name: String(e.name ?? ""),
+              tier: Number(e.tier ?? 2),
+              summary: String(e.summary ?? ""),
+              path: String(e.path ?? ""),
+              attributes: (e.attributes ?? {}) as Record<string, unknown>,
+              updated: String(e.updated ?? ""),
+            })),
+          }
+        : undefined,
       top_domains: rawDomains.map((d) => ({
         domain: String(d.domain ?? ""),
         visits: Number(d.visits ?? 0),
@@ -396,6 +425,18 @@ export async function sidecarDeletePassage(passageId: string): Promise<void> {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ passage_id: passageId }),
+    });
+  } catch {
+    // Ignore when offline
+  }
+}
+
+export async function sidecarDeleteBrainEntity(slug: string): Promise<void> {
+  try {
+    await fetch(`${SIDECAR_BASE}/knowledge/delete_entity`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slug }),
     });
   } catch {
     // Ignore when offline
