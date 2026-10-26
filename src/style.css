@@ -795,6 +795,80 @@ button.inverse,
   gap: 8px;
 }
 
+.bookmark-btn-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bookmark-tooltip-hint {
+  font-size: 10px;
+  color: var(--muted);
+  border: 1px dashed var(--border);
+  padding: 3px 6px;
+  background-color: var(--bg);
+}
+
+.bookmark-btn-wrap:hover .bookmark-tooltip-hint {
+  color: var(--fg);
+  border-color: var(--fg);
+}
+
+.profile-status-banner {
+  border: 1px solid var(--fg);
+  background-color: var(--bg);
+  color: var(--fg);
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.vault-form-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.vault-input {
+  flex: 1;
+  min-width: 140px;
+  border: 1px solid var(--border);
+  background-color: var(--bg);
+  color: var(--fg);
+  padding: 3px 6px;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.vault-pin-input {
+  max-width: 145px;
+  flex: 0 0 145px;
+}
+
+.vault-inline-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.vault-raw-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.vault-textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  background-color: var(--bg);
+  color: var(--fg);
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  resize: vertical;
+}
+
 /* Status Line (Bottom Terminal Bar) */
 .status-line {
   height: 24px;

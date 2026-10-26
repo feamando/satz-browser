@@ -276,6 +276,20 @@ export async function apiCaptureOpenTabs(
   }
 }
 
+export async function apiAutofillTabCredentials(
+  tabId: string,
+  autoSubmit = true
+): Promise<boolean> {
+  try {
+    return await invoke<boolean>("autofill_tab_credentials", {
+      tabId,
+      autoSubmit,
+    });
+  } catch {
+    return false;
+  }
+}
+
 export async function apiSetSourceInContext(
   sourceId: string,
   inContext: boolean
@@ -360,6 +374,9 @@ export async function sidecarFetchKnowledge(): Promise<KnowledgeSummary | null> 
     const rawPassages = (raw.passages ?? []) as Array<Record<string, unknown>>;
     const rawBrain = (raw.brain ?? null) as Record<string, unknown> | null;
     const rawEntities = (rawBrain?.entities ?? []) as Array<Record<string, unknown>>;
+    const rawBookmarks = (raw.bookmarks_indexed ?? []) as Array<Record<string, unknown>>;
+    const rawProfile = (raw.profile ?? null) as Record<string, unknown> | null;
+    const rawVault = (raw.vault ?? null) as Record<string, unknown> | null;
 
     return {
       pause_learning: Boolean(raw.pause_learning),
@@ -379,6 +396,67 @@ export async function sidecarFetchKnowledge(): Promise<KnowledgeSummary | null> 
               attributes: (e.attributes ?? {}) as Record<string, unknown>,
               updated: String(e.updated ?? ""),
             })),
+          }
+        : undefined,
+      bookmarks_indexed: rawBookmarks.map((b) => ({
+        id: String(b.id ?? ""),
+        url: String(b.url ?? ""),
+        domain: String(b.domain ?? ""),
+        title: String(b.title ?? ""),
+        last_indexed_at: Number(b.last_indexed_at ?? 0),
+        text_chars: Number(b.text_chars ?? 0),
+        status: String(b.status ?? "pending"),
+      })),
+      profile: rawProfile
+        ? {
+            profiles: ((rawProfile.profiles ?? []) as Array<Record<string, unknown>>).map(
+              (p) => ({
+                id: String(p.id ?? ""),
+                name: String(p.name ?? ""),
+                created_at: String(p.created_at ?? ""),
+                last_active_at: String(p.last_active_at ?? ""),
+                credential_services_count: Number(p.credential_services_count ?? 0),
+                is_active: Boolean(p.is_active),
+              })
+            ),
+            active_profile_id: rawProfile.active_profile_id
+              ? String(rawProfile.active_profile_id)
+              : null,
+            unlocked: Boolean(rawProfile.unlocked),
+            active_profile: rawProfile.active_profile
+              ? {
+                  id: String((rawProfile.active_profile as Record<string, unknown>).id ?? ""),
+                  name: String((rawProfile.active_profile as Record<string, unknown>).name ?? ""),
+                  created_at: String(
+                    (rawProfile.active_profile as Record<string, unknown>).created_at ?? ""
+                  ),
+                  last_active_at: String(
+                    (rawProfile.active_profile as Record<string, unknown>).last_active_at ?? ""
+                  ),
+                  credential_services_count: Number(
+                    (rawProfile.active_profile as Record<string, unknown>)
+                      .credential_services_count ?? 0
+                  ),
+                  is_active: true,
+                }
+              : null,
+          }
+        : undefined,
+      vault: rawVault
+        ? {
+            unlocked: Boolean(rawVault.unlocked),
+            profile_id: rawVault.profile_id ? String(rawVault.profile_id) : null,
+            env_path: rawVault.env_path ? String(rawVault.env_path) : null,
+            services: ((rawVault.services ?? []) as Array<Record<string, unknown>>).map((s) => ({
+              service: String(s.service ?? ""),
+              domain: String(s.domain ?? ""),
+              username: String(s.username ?? ""),
+              has_password: Boolean(s.has_password),
+              has_token: Boolean(s.has_token),
+              has_cookie: Boolean(s.has_cookie),
+              keys: ((s.keys ?? []) as unknown[]).map((k) => String(k)),
+            })),
+            raw_env: String(rawVault.raw_env ?? ""),
           }
         : undefined,
       top_domains: rawDomains.map((d) => ({
@@ -440,6 +518,158 @@ export async function sidecarDeleteBrainEntity(slug: string): Promise<void> {
     });
   } catch {
     // Ignore when offline
+  }
+}
+
+export async function sidecarSyncBookmarks(
+  bookmarks: BookmarkItem[]
+): Promise<void> {
+  try {
+    await fetch(`${SIDECAR_BASE}/bookmarks/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        bookmarks: bookmarks.map((b) => ({
+          id: b.id,
+          title: b.title,
+          url: b.url,
+        })),
+      }),
+    });
+  } catch {
+    // Ignore when offline
+  }
+}
+
+export async function sidecarCreateProfile(
+  name: string,
+  pin: string
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(`${SIDECAR_BASE}/profile/create`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, pin }),
+    });
+    const data = (await res.json()) as { ok?: boolean; error?: string };
+    return { ok: Boolean(res.ok && data.ok), error: data.error };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarUnlockProfile(
+  profileId: string,
+  pin: string
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(`${SIDECAR_BASE}/profile/unlock`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile_id: profileId, pin }),
+    });
+    const data = (await res.json()) as { ok?: boolean; error?: string };
+    return { ok: Boolean(res.ok && data.ok), error: data.error };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarLockProfile(): Promise<void> {
+  try {
+    await fetch(`${SIDECAR_BASE}/profile/lock`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+  } catch {
+    // Ignore
+  }
+}
+
+export async function sidecarDeleteProfile(
+  profileId: string,
+  pin: string
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(`${SIDECAR_BASE}/profile/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile_id: profileId, pin }),
+    });
+    const data = (await res.json()) as { ok?: boolean; error?: string };
+    return { ok: Boolean(res.ok && data.ok), error: data.error };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarUpsertPassword(payload: {
+  service: string;
+  username: string;
+  password?: string;
+  token?: string;
+  cookie?: string;
+  url?: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(`${SIDECAR_BASE}/passwords/upsert`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = (await res.json()) as { ok?: boolean; error?: string };
+    return { ok: Boolean(res.ok && data.ok), error: data.error };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarSaveRawEnv(
+  rawEnv: string
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(`${SIDECAR_BASE}/passwords/save_env`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ raw_env: rawEnv }),
+    });
+    const data = (await res.json()) as { ok?: boolean; error?: string };
+    return { ok: Boolean(res.ok && data.ok), error: data.error };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarImportEnvFile(
+  path: string
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(`${SIDECAR_BASE}/passwords/import_env`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    const data = (await res.json()) as { ok?: boolean; error?: string };
+    return { ok: Boolean(res.ok && data.ok), error: data.error };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarDeletePassword(
+  service: string
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(`${SIDECAR_BASE}/passwords/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ service }),
+    });
+    const data = (await res.json()) as { ok?: boolean; error?: string };
+    return { ok: Boolean(res.ok && data.ok), error: data.error };
+  } catch (e) {
+    return { ok: false, error: String(e) };
   }
 }
 
