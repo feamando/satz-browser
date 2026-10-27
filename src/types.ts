@@ -37,6 +37,27 @@ export interface SourceItem {
   text_chars: number | null;
 }
 
+export interface CitationCheckEntry {
+  n: number;
+  sentence_idx: number;
+  ok: boolean;
+  out_of_range?: boolean;
+  missing: string[];
+}
+
+export interface SourceStatEntry {
+  id: string;
+  chars_captured: number;
+  chars_sent: number;
+  was_cut: boolean;
+}
+
+export interface SidecarErrorEntry {
+  ts: number;
+  scope: string;
+  message: string;
+}
+
 export interface ChatMessage {
   id: string;
   conversation_id: string;
@@ -45,6 +66,10 @@ export interface ChatMessage {
   model: string | null;
   source_ids_json: string | null;
   created_at: string;
+  citations_ok?: number | null;
+  citations_flagged?: number | null;
+  citation_check_json?: string | null;
+  citation_check?: CitationCheckEntry[];
   cited_sources?: Array<{ url: string; title: string; domain?: string }>;
   proposals?: BrainProposalItem[];
 }
@@ -121,6 +146,7 @@ export interface SidecarHealth {
   models: ModelHealthEntry[];
   ingest_queue_len: number;
   pause_learning: boolean;
+  errors?: SidecarErrorEntry[];
 }
 
 export interface DigestEntry {
@@ -200,8 +226,19 @@ export interface KnowledgeSummary {
   bookmarks_indexed?: BookmarkIndexStatus[];
   profile?: ProfileStatusSummary;
   vault?: ProfileVaultSummary;
-  top_domains: Array<{ domain: string; visits: number; score: number }>;
-  top_topics: Array<{ topic: string; weight: number }>;
+  top_domains: Array<{
+    domain: string;
+    visits: number;
+    trust: number;
+    score?: number;
+    dwell_seconds?: number;
+  }>;
+  top_topics: Array<{
+    entity: string;
+    score: number;
+    topic?: string;
+    weight?: number;
+  }>;
   passages: Array<{
     id: string;
     conversation_id: string;

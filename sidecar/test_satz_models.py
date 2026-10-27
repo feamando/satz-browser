@@ -456,6 +456,183 @@ class TestSatzSidecar(unittest.TestCase):
         self.assertNotIn("sess-0", self.runtime.answer_sessions)
         self.assertIn("sess-44", self.runtime.answer_sessions)
 
+    def test_m10_citation_check_bookmark_dedupe_backoff_and_error_ring_buffer(self):
+        from satz_models import check_citations
+
+        # 1. Citation check: [7] with 3 sources -> [unsourced]; missing number -> flagged [n?]; valid -> ok
+        sources = [
+            {
+                "id": "src-1",
+                "url": "https://dw.com/arctic",
+                "title": "Nuuk Port Report",
+                "domain": "dw.com",
+                "full_text": "Nuuk Port tariff revenue reached 4,750,000 kroner on 14 October 2026 under Henrik Lindqvist.",
+            },
+            {
+                "id": "src-2",
+                "url": "https://bbc.com/climate",
+                "title": "BBC Climate",
+                "domain": "bbc.com",
+                "full_text": "Ice sheet monitoring stations recorded 18 sensors active in Greenland.",
+            },
+            {
+                "id": "src-3",
+                "url": "https://reuters.com/shipping",
+                "title": "Reuters Shipping",
+                "domain": "reuters.com",
+                "full_text": "Vessel traffic rose by 12% across North Atlantic lanes.",
+            },
+        ]
+        answer = (
+            "Nuuk Port tariff revenue reached 4750000 kroner on 14 October 2026 under Henrik Lindqvist [1]. "
+            "Greenland deployed 999 sensors across the coast [2]. "
+            "Future projections were also cited [7]."
+        )
+        res = check_citations(answer, sources)
+        self.assertEqual(res["citations_ok"], 1)
+        self.assertEqual(res["citations_flagged"], 2)
+        self.assertIn("[unsourced]", res["annotated_text"])
+        self.assertNotIn("[7]", res["annotated_text"])
+
+        by_n = {entry["n"]: entry for entry in res["citation_check"]}
+        self.assertTrue(by_n[1]["ok"])
+        self.assertEqual(by_n[1]["missing"], [])
+        self.assertFalse(by_n[2]["ok"])
+        self.assertIn("999", by_n[2]["missing"])
+        self.assertFalse(by_n[7]["ok"])
+        self.assertTrue(by_n[7].get("out_of_range"))
+
+        # 2. Bookmark change detection, 30-min interval, If-None-Match/If-Modified-Since, hash dedupe, 2-hour simulation
+        self.runtime.sync_bookmarks(
+            [
+                {"id": "bm-dw", "title": "DW World", "url": "https://www.dw.com/en"},
+                {"id": "bm-bbc", "title": "BBC News", "url": "https://www.bbc.com/news"},
+            ],
+            wake=False,
+        )
+
+        seen_headers: list[dict[str, Any]] = []
+        fetch_state = {
+            "https://www.dw.com/en": {
+                "etag": '"etag-dw-v1"',
+                "last_modified": "Tue, 27 Oct 2026 10:00:00 GMT",
+                "html": "<html><body><article><p>DW World headline story version one with detailed reporting on European energy markets.</p></article></body></html>",
+                "return_304": False,
+                "fail": False,
+            },
+            "https://www.bbc.com/news": {
+                "etag": '"etag-bbc-v1"',
+                "last_modified": "Tue, 27 Oct 2026 10:00:00 GMT",
+                "html": "<html><body><article><p>BBC News top story version one covering global science and technology developments.</p></article></body></html>",
+                "return_304": False,
+                "fail": False,
+            },
+        }
+
+        def fake_fetch_bookmark(url: str, etag: str | None = None, last_modified: str | None = None):
+            seen_headers.append({"url": url, "etag": etag, "last_modified": last_modified})
+            st = fetch_state[url]
+            if st["fail"]:
+                raise RuntimeError("simulated upstream 503 error")
+            if st["return_304"] and etag == st["etag"]:
+                return {
+                    "status": 304,
+                    "not_modified": True,
+                    "etag": etag,
+                    "last_modified": last_modified,
+                    "html": "",
+                }
+            return {
+                "status": 200,
+                "not_modified": False,
+                "etag": st["etag"],
+                "last_modified": st["last_modified"],
+                "html": st["html"],
+            }
+
+        orig_fetch_bm = self.runtime._fetch_bookmark_url
+        self.runtime._fetch_bookmark_url = fake_fetch_bookmark
+        try:
+            self.runtime.bookmark_stats = {
+                "indexed": 0,
+                "skipped_interval": 0,
+                "skipped_304": 0,
+                "skipped_hash": 0,
+                "skipped_backoff": 0,
+                "errors": 0,
+            }
+            base_t = 1_760_000_000.0
+            # t = 0m: initial index of both bookmarks
+            self.runtime.run_bookmark_index_pass(now=base_t)
+            self.assertEqual(self.runtime.bookmark_stats["indexed"], 2)
+
+            # t = 10m and t = 20m: skipped due to 30m minimum interval
+            self.runtime.run_bookmark_index_pass(now=base_t + 600)
+            self.runtime.run_bookmark_index_pass(now=base_t + 1200)
+            self.assertEqual(self.runtime.bookmark_stats["indexed"], 2)
+            self.assertEqual(self.runtime.bookmark_stats["skipped_interval"], 4)
+
+            # t = 30m: DW returns 304 Not Modified, BBC returns 200 with identical HTML (hash match)
+            fetch_state["https://www.dw.com/en"]["return_304"] = True
+            self.runtime.run_bookmark_index_pass(now=base_t + 1805)
+            self.assertEqual(self.runtime.bookmark_stats["indexed"], 2)
+            self.assertEqual(self.runtime.bookmark_stats["skipped_304"], 1)
+            self.assertEqual(self.runtime.bookmark_stats["skipped_hash"], 1)
+            # Verify If-None-Match and If-Modified-Since were sent
+            self.assertEqual(seen_headers[-2]["etag"], '"etag-dw-v1"')
+            self.assertEqual(seen_headers[-2]["last_modified"], "Tue, 27 Oct 2026 10:00:00 GMT")
+
+            # t = 60m and t = 90m: still unchanged -> 0 re-ingestions
+            self.runtime.run_bookmark_index_pass(now=base_t + 3610)
+            self.runtime.run_bookmark_index_pass(now=base_t + 5415)
+            self.assertEqual(self.runtime.bookmark_stats["indexed"], 2)
+            self.assertEqual(self.runtime.bookmark_stats["skipped_304"], 3)
+            self.assertEqual(self.runtime.bookmark_stats["skipped_hash"], 3)
+
+            # t = 120m: DW content changes -> re-indexed and changed_at set -> appears in /digest
+            fetch_state["https://www.dw.com/en"]["return_304"] = False
+            fetch_state["https://www.dw.com/en"]["etag"] = '"etag-dw-v2"'
+            fetch_state["https://www.dw.com/en"]["html"] = (
+                "<html><body><article><p>DW World breaking news version two with updated summit agreement details.</p></article></body></html>"
+            )
+            self.runtime.run_bookmark_index_pass(now=base_t + 7220)
+            self.assertEqual(self.runtime.bookmark_stats["indexed"], 3)
+
+            digest_res = self.runtime.get_digest()
+            titles = [it["title"] for it in digest_res["items"]]
+            self.assertIn("changed: DW World", titles)
+
+            # 3. Per-domain exponential backoff on errors + 50-entry error ring buffer
+            fetch_state["https://www.bbc.com/news"]["fail"] = True
+            self.runtime.run_bookmark_index_pass(now=base_t + 9100)
+            self.assertEqual(self.runtime.bookmark_stats["errors"], 1)
+            bbc_backoff = self.runtime.domain_backoff["bbc.com"]
+            self.assertEqual(bbc_backoff["errors"], 1.0)
+            self.assertEqual(bbc_backoff["backoff_until"], base_t + 9100 + 60.0)
+
+            # Second error after first backoff expires doubles to 120s
+            self.runtime.run_bookmark_index_pass(now=base_t + 11000)
+            bbc_backoff_2 = self.runtime.domain_backoff["bbc.com"]
+            self.assertEqual(bbc_backoff_2["errors"], 2.0)
+            self.assertEqual(bbc_backoff_2["backoff_until"], base_t + 11000 + 120.0)
+        finally:
+            self.runtime._fetch_bookmark_url = orig_fetch_bm
+
+        # 4. Ring buffer caps at 50 errors and is returned by authenticated /health
+        for i in range(60):
+            self.runtime.record_error("test_scope", f"err-{i}")
+        health = self.runtime.get_health()
+        self.assertEqual(len(health["errors"]), 50)
+        self.assertEqual(health["errors"][-1]["message"], "err-59")
+        self.assertEqual(health["errors"][0]["message"], "err-10")
+
+        # 5. Knowledge summary returns trust on top_domains and score on top_topics
+        kb = self.runtime.get_knowledge_summary()
+        self.assertTrue(len(kb["top_domains"]) >= 1)
+        self.assertIn("trust", kb["top_domains"][0])
+        if kb["top_topics"]:
+            self.assertIn("score", kb["top_topics"][0])
+
 
 if __name__ == "__main__":
     unittest.main()

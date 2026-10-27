@@ -74,3 +74,38 @@ Owner: Nikita Gorshkov · Date: 2026-10-27 · Target: Windows 11 (4090 box) firs
   - Added `conversations.summary` column migration (`db::tests::test_conversations_summary_column_migration_and_update`) and background `POST /chat/summarize` after every 6th assistant turn (capped at `600` chars).
   - Capped `answer_sessions` at `32` entries via `OrderedDict` LRU eviction.
 
+---
+
+## 4. Milestone 10 (M10): Quality
+
+- **Post-Stream Citation Check (`sidecar/satz_models.py`, `src-tauri/src/db.rs`, `src/chat.ts`):**
+  - Implemented `check_citations(answer_text, hydrated_sources)` using `src.planck3.candidates.split_sentences`, `RE_DATE`, `RE_NUMBER`, and `_entities`.
+  - For each sentence containing `[n]`:
+    - If `n` is outside `1..len(sources)`, replaces `[n]` with `[unsourced]` in `annotated_text` and flags the citation (`out_of_range: true`).
+    - Otherwise checks that every number (normalized without commas/spaces), date, and capitalized name in the sentence appears in source `n`'s full text (case-insensitive). Missing tokens mark the citation `[n?]` with a tooltip listing `not found in source [n]: <missing>`.
+  - Final SSE event returns `citation_check`, `citations_ok`, `citations_flagged`, `annotated_text`, and `source_stats`.
+  - Added `citations_ok`, `citations_flagged`, and `citation_check_json` columns to `messages` (`db::tests::test_messages_citation_columns_migration_and_persistence`).
+- **Sources Panel Numbers (`src/sources.ts`, `src/chat.ts`, `sidecar/satz_models.py`):**
+  - Sources panel (`#chat-sources-rail`) and composer context pills display `chars_sent / chars_captured` (e.g. `1,500/42,100c`), a `cut` badge when ranked passages were used, and `captured hh:mm`.
+- **Bookmark Change Detection, 30-Minute Minimum Interval, Per-Domain Backoff & `changed:` Digest Items (`sidecar/satz_models.py`):**
+  - Bookmark refresh interval set to `30` minutes (`bookmark_interval_minutes` in `SatzSettings`).
+  - `_fetch_bookmark_url` sends `If-None-Match` and `If-Modified-Since` headers; skips unchanged bookmarks on HTTP `304 Not Modified` or matching SHA-256 `content_hash`.
+  - Per-domain exponential backoff on fetch errors: starts at `60s`, doubling per consecutive failure (`60s -> 120s -> 240s ...`) up to a maximum of `6 hours` (`21,600s`).
+  - When a bookmarked page's content hash changes from its previous version, stores `changed_at` and surfaces `changed: <bookmark title>` at the top of `/digest` (`For you`).
+  - **2-Hour Bookmark Indexer Verification Count (2 bookmarked sources, 30-min interval):**
+
+| Time Point | Event | `indexed` | `skipped_interval` | `skipped_304` | `skipped_hash` | Redundant Re-Ingestions |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `t = 0m` | Initial index of 2 bookmarks (`DW World`, `BBC News`) | `2` | `0` | `0` | `0` | `0` |
+| `t = 10m, 20m` | Early wake checks (`< 30m` interval) | `2` | `4` | `0` | `0` | `0` |
+| `t = 30m` | `DW` returns `304`, `BBC` returns `200` (same SHA-256) | `2` | `4` | `1` | `1` | `0` |
+| `t = 60m` | Unchanged (`304` + SHA-256 match) | `2` | `4` | `2` | `2` | `0` |
+| `t = 90m` | Unchanged (`304` + SHA-256 match) | `2` | `4` | `3` | `3` | `0` |
+| `t = 120m` | `DW World` updates headline (`200` + new SHA-256) | `3` | `4` | `3` | `4` | `0` (`changed: DW World` in `/digest`) |
+
+- **Bug Fixes & 50-Entry Error Ring Buffer (`src/knowledge.ts`, `src-tauri/src/lib.rs`, `sidecar/satz_models.py`, `src/status.ts`):**
+  - Fixed knowledge view domain table and topic table field names (`d.trust` and `t.score`).
+  - Removed hardcoded repo path fallback in `src-tauri/src/lib.rs`; `resolve_repo_root` resolves strictly from settings or executable/working ancestors.
+  - Replaced silent `except Exception` blocks in fetch and indexer loops with `self.record_error(scope, err)` into a 50-entry ring buffer (`collections.deque(maxlen=50)`). Authenticated `GET /health` returns `"errors"`, and the status bar renders `[N errors]` with click-to-view overlay and `[clear]`.
+
+

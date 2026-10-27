@@ -5,6 +5,7 @@ import type {
   BrainProposalItem,
   BrowserTab,
   ChatMessage,
+  CitationCheckEntry,
   Conversation,
   ConversationDetail,
   ConversationOrigin,
@@ -14,6 +15,7 @@ import type {
   LocalModelId,
   SidecarHealth,
   SourceItem,
+  SourceStatEntry,
   TabBoundsSpec,
 } from "./types";
 
@@ -155,15 +157,34 @@ function normalizeConversationDetail(
   const rawMsgs = (raw.messages ?? raw.notes ?? []) as Array<
     Record<string, unknown>
   >;
-  const messages: ChatMessage[] = rawMsgs.map((m) => ({
-    id: String(m.id ?? ""),
-    conversation_id: conv.id,
-    role: (m.role ?? m.author ?? "user") as "user" | "assistant" | "system",
-    content: String(m.content ?? ""),
-    model: m.model ? String(m.model) : null,
-    source_ids_json: m.source_ids_json ? String(m.source_ids_json) : null,
-    created_at: String(m.created_at ?? ""),
-  }));
+  const messages: ChatMessage[] = rawMsgs.map((m) => {
+    let parsedCheck: CitationCheckEntry[] | undefined;
+    if (typeof m.citation_check_json === "string" && m.citation_check_json) {
+      try {
+        parsedCheck = JSON.parse(m.citation_check_json) as CitationCheckEntry[];
+      } catch {
+        parsedCheck = undefined;
+      }
+    }
+    return {
+      id: String(m.id ?? ""),
+      conversation_id: conv.id,
+      role: (m.role ?? m.author ?? "user") as "user" | "assistant" | "system",
+      content: String(m.content ?? ""),
+      model: m.model ? String(m.model) : null,
+      source_ids_json: m.source_ids_json ? String(m.source_ids_json) : null,
+      created_at: String(m.created_at ?? ""),
+      citations_ok:
+        typeof m.citations_ok === "number" ? m.citations_ok : null,
+      citations_flagged:
+        typeof m.citations_flagged === "number" ? m.citations_flagged : null,
+      citation_check_json:
+        typeof m.citation_check_json === "string"
+          ? m.citation_check_json
+          : null,
+      citation_check: parsedCheck,
+    };
+  });
 
   const rawHist = (raw.history ?? []) as Array<Record<string, unknown>>;
   const history = rawHist.map((h) => ({
@@ -353,7 +374,10 @@ export async function apiAddMessage(
   role: "user" | "assistant" | "system",
   content: string,
   model: string | null = null,
-  sourceIdsJson: string | null = null
+  sourceIdsJson: string | null = null,
+  citationsOk: number | null = null,
+  citationsFlagged: number | null = null,
+  citationCheckJson: string | null = null
 ): Promise<ChatMessage> {
   return await invoke<ChatMessage>("add_message", {
     conversationId,
@@ -361,6 +385,9 @@ export async function apiAddMessage(
     content,
     model,
     sourceIdsJson,
+    citationsOk,
+    citationsFlagged,
+    citationCheckJson,
   });
 }
 
@@ -398,6 +425,7 @@ export async function sidecarFetchHealth(): Promise<SidecarHealth> {
       ],
       ingest_queue_len: data.ingest_queue_len ?? 0,
       pause_learning: Boolean(data.pause_learning),
+      errors: Array.isArray(data.errors) ? data.errors : [],
     };
   } catch {
     return {
@@ -410,7 +438,20 @@ export async function sidecarFetchHealth(): Promise<SidecarHealth> {
       ],
       ingest_queue_len: 0,
       pause_learning: false,
+      errors: [],
     };
+  }
+}
+
+export async function sidecarClearErrors(): Promise<void> {
+  try {
+    await sidecarFetch("/errors/clear", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+  } catch {
+    // Ignore when offline
   }
 }
 
@@ -522,15 +563,26 @@ export async function sidecarFetchKnowledge(): Promise<KnowledgeSummary | null> 
           raw_env: "",
         }
       : undefined,
-    top_domains: rawDomains.map((d) => ({
-      domain: String(d.domain ?? ""),
-      visits: Number(d.visits ?? 0),
-      score: Number(d.score ?? d.trust ?? 0),
-    })),
-    top_topics: rawTopics.map((t) => ({
-      topic: String(t.topic ?? t.entity ?? ""),
-      weight: Number(t.weight ?? t.score ?? 0),
-    })),
+    top_domains: rawDomains.map((d) => {
+      const trustVal = Number(d.trust ?? d.score ?? 0);
+      return {
+        domain: String(d.domain ?? ""),
+        visits: Number(d.visits ?? 0),
+        dwell_seconds: Number(d.dwell_seconds ?? 0),
+        trust: trustVal,
+        score: trustVal,
+      };
+    }),
+    top_topics: rawTopics.map((t) => {
+      const entName = String(t.entity ?? t.topic ?? "");
+      const scoreVal = Number(t.score ?? t.weight ?? 0);
+      return {
+        entity: entName,
+        score: scoreVal,
+        topic: entName,
+        weight: scoreVal,
+      };
+    }),
     passages: rawPassages.map((p) => ({
       id: String(p.id ?? ""),
       conversation_id: String(p.conversation_id ?? ""),
@@ -877,11 +929,17 @@ export async function sidecarStreamChat(
   onDelta: (delta: string) => void,
   onStatus?: (status: string, phase?: string) => void,
   onError?: (err: string) => void,
-  summary?: string
+  summary?: string,
+  onSourceStats?: (stats: SourceStatEntry[]) => void
 ): Promise<{
   source_ids: string[];
   cited_sources?: Array<{ url: string; title: string }>;
   proposals?: BrainProposalItem[];
+  citation_check?: CitationCheckEntry[];
+  citations_ok?: number;
+  citations_flagged?: number;
+  annotated_text?: string;
+  source_stats?: SourceStatEntry[];
   error?: string;
 }> {
   const res = await sidecarFetch("/chat", {
@@ -899,6 +957,11 @@ export async function sidecarStreamChat(
   let finalSourceIds: string[] = [];
   let citedSources: Array<{ url: string; title: string }> | undefined;
   let proposals: BrainProposalItem[] | undefined;
+  let citationCheck: CitationCheckEntry[] | undefined;
+  let citationsOk: number | undefined;
+  let citationsFlagged: number | undefined;
+  let annotatedText: string | undefined;
+  let sourceStats: SourceStatEntry[] | undefined;
   let streamError: string | undefined;
 
   while (true) {
@@ -922,7 +985,16 @@ export async function sidecarStreamChat(
           source_ids?: string[];
           cited_sources?: Array<{ url: string; title: string }>;
           proposals?: BrainProposalItem[];
+          citation_check?: CitationCheckEntry[];
+          citations_ok?: number;
+          citations_flagged?: number;
+          annotated_text?: string;
+          source_stats?: SourceStatEntry[];
         };
+        if (payload.source_stats && Array.isArray(payload.source_stats)) {
+          sourceStats = payload.source_stats;
+          if (onSourceStats) onSourceStats(payload.source_stats);
+        }
         if (payload.status && onStatus) {
           onStatus(payload.status, payload.phase);
         }
@@ -937,6 +1009,13 @@ export async function sidecarStreamChat(
           finalSourceIds = payload.source_ids ?? [];
           citedSources = payload.cited_sources;
           proposals = payload.proposals;
+          citationCheck = payload.citation_check;
+          citationsOk = payload.citations_ok;
+          citationsFlagged = payload.citations_flagged;
+          annotatedText = payload.annotated_text;
+          if (payload.source_stats) {
+            sourceStats = payload.source_stats;
+          }
         }
       } catch {
         // Ignore malformed SSE line
@@ -947,6 +1026,11 @@ export async function sidecarStreamChat(
     source_ids: finalSourceIds,
     cited_sources: citedSources,
     proposals,
+    citation_check: citationCheck,
+    citations_ok: citationsOk,
+    citations_flagged: citationsFlagged,
+    annotated_text: annotatedText,
+    source_stats: sourceStats,
     error: streamError,
   };
 }

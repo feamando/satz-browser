@@ -29,12 +29,18 @@ pub struct SatzSettings {
     pub max_live_tabs: usize,
     #[serde(default = "default_true")]
     pub preload_gemma: bool,
+    #[serde(default = "default_bookmark_interval_minutes")]
+    pub bookmark_interval_minutes: u64,
     #[serde(default)]
     pub repo_root: Option<String>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_bookmark_interval_minutes() -> u64 {
+    30
 }
 
 impl Default for SatzSettings {
@@ -46,6 +52,7 @@ impl Default for SatzSettings {
             port: 8020,
             max_live_tabs: 8,
             preload_gemma: true,
+            bookmark_interval_minutes: 30,
             repo_root: None,
         }
     }
@@ -271,13 +278,19 @@ fn add_message(
     content: String,
     model: Option<String>,
     source_ids_json: Option<String>,
+    citations_ok: Option<i64>,
+    citations_flagged: Option<i64>,
+    citation_check_json: Option<String>,
 ) -> Result<ChatMessage, String> {
-    db.add_message(
+    db.add_message_with_citations(
         &conversation_id,
         &role,
         &content,
         model.as_deref(),
         source_ids_json.as_deref(),
+        citations_ok,
+        citations_flagged,
+        citation_check_json.as_deref(),
     )
     .map_err(|e| e.to_string())
 }
@@ -423,7 +436,9 @@ fn spawn_sidecar(settings: &SatzSettings, app_data_dir: &PathBuf, token: &str) -
         .arg("--port")
         .arg(settings.port.to_string())
         .arg("--store")
-        .arg(store_path.to_string_lossy().to_string());
+        .arg(store_path.to_string_lossy().to_string())
+        .arg("--bookmark-interval-minutes")
+        .arg(settings.bookmark_interval_minutes.to_string());
     if settings.preload_gemma {
         cmd.arg("--preload-gemma");
     }

@@ -1,5 +1,5 @@
 import { escapeHtml, getActiveTabSources, state } from "./state";
-import type { BrainProposalItem, LocalModelId } from "./types";
+import type { BrainProposalItem, CitationCheckEntry, LocalModelId } from "./types";
 
 const LOCAL_MODELS: LocalModelId[] = [
   "gemma-4-e4b",
@@ -74,23 +74,27 @@ export function renderChatPanel(
           <span class="muted">context (${activeTabSources.length}):</span>
           <div class="composer-context-pills">
             ${activeTabSources
-              .map(
-                (item) => `
+              .map((item) => {
+                const stat = state.sourceStats[item.sourceId];
+                const statLabel = stat
+                  ? ` · ${stat.chars_sent}/${stat.chars_captured}c${stat.was_cut ? " [cut]" : ""}`
+                  : "";
+                return `
               <div
                 class="context-pill ${state.activeTabId === item.tab.id ? "active" : ""}"
                 data-pill-tab-id="${escapeHtml(item.tab.id)}"
-                title="${escapeHtml(item.title)} (${escapeHtml(item.url)})"
+                title="${escapeHtml(item.title)} (${escapeHtml(item.url)})${stat ? ` - ${stat.chars_sent.toLocaleString()} / ${stat.chars_captured.toLocaleString()} chars${stat.was_cut ? " [cut]" : ""}` : ""}"
               >
                 <span class="muted">[${item.index}]</span>
-                <span class="truncate">${escapeHtml(item.domain)} · ${escapeHtml(item.title.slice(0, 22))}</span>
+                <span class="truncate">${escapeHtml(item.domain)} · ${escapeHtml(item.title.slice(0, 22))}${escapeHtml(statLabel)}</span>
                 <button
                   class="tab-close-btn"
                   data-pill-close-tab-id="${escapeHtml(item.tab.id)}"
                   title="close tab and remove from context"
                 >x</button>
               </div>
-            `
-              )
+            `;
+              })
               .join("")}
             <button id="chat-context-add-tab-btn" class="context-add-btn" title="open a new tab to add to context">[+ tab]</button>
           </div>
@@ -119,7 +123,10 @@ export function renderChatPanel(
                     m.model,
                     m.source_ids_json,
                     m.cited_sources,
-                    m.proposals ?? state.messageProposals[m.id]
+                    m.proposals ?? state.messageProposals[m.id],
+                    m.citation_check,
+                    m.citations_ok,
+                    m.citations_flagged
                   )
                 )
                 .join("")
@@ -267,7 +274,10 @@ function renderMessageBlock(
   model: string | null,
   sourceIdsJson: string | null,
   citedSources?: Array<{ url: string; title: string }>,
-  proposals?: BrainProposalItem[]
+  proposals?: BrainProposalItem[],
+  citationCheck?: CitationCheckEntry[],
+  citationsOk?: number | null,
+  citationsFlagged?: number | null
 ): string {
   let sourceIds: string[] = [];
   if (sourceIdsJson) {
@@ -285,10 +295,18 @@ function renderMessageBlock(
       trimmed.startsWith("[error:") ||
       trimmed.startsWith("models [offline]"));
 
-  const formattedBody = formatCitationsInText(content, sourceIds);
+  const formattedBody = formatCitationsInText(content, sourceIds, citationCheck);
   const modelLabel = model ? `model: ${escapeHtml(model)}` : "";
   const srcCountLabel =
     sourceIds.length > 0 ? ` · ${sourceIds.length} src` : "";
+  const citeStatsLabel =
+    typeof citationsOk === "number" || typeof citationsFlagged === "number"
+      ? (citationsFlagged ?? 0) > 0
+        ? ` · cites: ${citationsOk ?? 0} ok, ${citationsFlagged ?? 0} flagged`
+        : (citationsOk ?? 0) > 0
+          ? ` · cites: ${citationsOk} ok`
+          : ""
+      : "";
   const statusBadge = isErrorMsg
     ? ` <span class="msg-error-badge">[error]</span>`
     : "";
@@ -352,7 +370,7 @@ function renderMessageBlock(
     <div class="msg-block ${isErrorMsg ? "msg-error-block" : ""}">
       <div class="msg-header">
         <span>${escapeHtml(role)}${statusBadge}</span>
-        <span>${modelLabel}${srcCountLabel}</span>
+        <span>${modelLabel}${srcCountLabel}${escapeHtml(citeStatsLabel)}</span>
       </div>
       <div class="msg-body">${formattedBody}</div>
       ${proposalsHtml}
@@ -362,11 +380,38 @@ function renderMessageBlock(
   `;
 }
 
-function formatCitationsInText(text: string, sourceIds: string[]): string {
-  const escaped = escapeHtml(text);
+export function formatCitationsInText(
+  text: string,
+  sourceIds: string[],
+  citationCheck?: CitationCheckEntry[]
+): string {
+  const escaped = escapeHtml(text).replace(
+    /\[unsourced\]/g,
+    `<span class="msg-error-badge" title="citation index outside source list">[unsourced]</span>`
+  );
   return escaped.replace(/\[(\d+)\]/g, (_match, digits) => {
     const idx = Number(digits);
+    const outOfRangeCheck = citationCheck?.find(
+      (c) => c.n === idx && c.out_of_range
+    );
+    if (
+      idx < 1 ||
+      (sourceIds.length > 0 && idx > sourceIds.length) ||
+      outOfRangeCheck
+    ) {
+      return `<span class="msg-error-badge" title="citation [${idx}] outside ${sourceIds.length} source(s)">[unsourced]</span>`;
+    }
     const sourceId = sourceIds[idx - 1] ?? "";
+    const flaggedEntries = (citationCheck ?? []).filter(
+      (c) => c.n === idx && !c.ok
+    );
+    if (flaggedEntries.length > 0) {
+      const missingItems = Array.from(
+        new Set(flaggedEntries.flatMap((e) => e.missing ?? []))
+      );
+      const tooltip = `not found in source [${idx}]: ${missingItems.join(", ")}`;
+      return `<button class="citation-link msg-error-badge" data-citation-idx="${idx}" data-citation-src="${escapeHtml(sourceId)}" title="${escapeHtml(tooltip)}">[${idx}?]</button>`;
+    }
     return `<button class="citation-link" data-citation-idx="${idx}" data-citation-src="${escapeHtml(sourceId)}">[${idx}]</button>`;
   });
 }
