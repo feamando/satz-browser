@@ -7,6 +7,7 @@ export interface ShortcutHandlers {
   onCloseTab: () => void;
   onSelectTabByNumber: (num: number) => void;
   onFocusAddressBar: () => void;
+  onFillLogin?: () => void;
   onToggleAgentRail: () => void;
   onToggleCompare: () => void;
   onBookmarkCurrentPage: () => void;
@@ -28,6 +29,12 @@ export function bindKeyboardShortcuts(handlers: ShortcutHandlers): void {
     }
 
     if (!mod || e.altKey) return;
+
+    if (e.shiftKey && key === "l") {
+      e.preventDefault();
+      handlers.onFillLogin?.();
+      return;
+    }
 
     // Leave Mod+F untouched for native find-in-page
     if (key === "f") {

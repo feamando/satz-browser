@@ -27,6 +27,8 @@ pub struct SatzSettings {
     pub gemma_path: String,
     pub port: u16,
     pub max_live_tabs: usize,
+    #[serde(default)]
+    pub repo_root: Option<String>,
 }
 
 impl Default for SatzSettings {
@@ -37,6 +39,7 @@ impl Default for SatzSettings {
             gemma_path: "models/gemma-4-e4b-it".to_string(),
             port: 8020,
             max_live_tabs: 8,
+            repo_root: None,
         }
     }
 }
@@ -44,6 +47,22 @@ impl Default for SatzSettings {
 pub struct SidecarState {
     pub child: Mutex<Option<Child>>,
     pub settings: SatzSettings,
+    pub token: String,
+    pub base_url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SidecarConfigResponse {
+    pub base_url: String,
+    pub token: String,
+}
+
+#[tauri::command]
+fn get_sidecar_config(sidecar: State<'_, SidecarState>) -> SidecarConfigResponse {
+    SidecarConfigResponse {
+        base_url: sidecar.base_url.clone(),
+        token: sidecar.token.clone(),
+    }
 }
 
 #[tauri::command]
@@ -283,7 +302,56 @@ fn load_or_create_settings(app_data_dir: &PathBuf) -> SatzSettings {
     default_settings
 }
 
-fn resolve_repo_root() -> PathBuf {
+fn generate_sidecar_token() -> String {
+    let mut bytes = [0u8; 32];
+    #[cfg(windows)]
+    unsafe {
+        #[link(name = "bcrypt")]
+        extern "system" {
+            fn BCryptGenRandom(
+                hAlgorithm: *mut std::ffi::c_void,
+                pbBuffer: *mut u8,
+                cbBuffer: u32,
+                dwFlags: u32,
+            ) -> i32;
+        }
+        // BCRYPT_USE_SYSTEM_PREFERRED_RNG = 0x00000002
+        let status = BCryptGenRandom(std::ptr::null_mut(), bytes.as_mut_ptr(), 32, 0x00000002);
+        if status == 0 {
+            return bytes.iter().map(|b| format!("{:02x}", b)).collect();
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            if f.read_exact(&mut bytes).is_ok() {
+                return bytes.iter().map(|b| format!("{:02x}", b)).collect();
+            }
+        }
+    }
+    // Fallback entropy mixing if OS RNG call fails
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let mut out = String::with_capacity(64);
+    for i in 0..4u64 {
+        let s = RandomState::new();
+        let mut h = s.build_hasher();
+        h.write_u64(i ^ (std::process::id() as u64));
+        out.push_str(&format!("{:016x}", h.finish()));
+    }
+    out
+}
+
+fn resolve_repo_root(settings: Option<&SatzSettings>) -> PathBuf {
+    if let Some(cfg) = settings {
+        if let Some(ref custom_root) = cfg.repo_root {
+            let p = PathBuf::from(custom_root);
+            if p.join("sidecar").join("satz_models.py").exists() {
+                return p;
+            }
+        }
+    }
     if let Ok(exe) = std::env::current_exe() {
         for anc in exe.ancestors() {
             if anc.join("sidecar").join("satz_models.py").exists() {
@@ -298,11 +366,14 @@ fn resolve_repo_root() -> PathBuf {
             }
         }
     }
-    PathBuf::from("C:\\Users\\feama\\satz-browser")
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn spawn_sidecar(settings: &SatzSettings, app_data_dir: &PathBuf) -> Option<Child> {
-    let repo_root = resolve_repo_root();
+fn spawn_sidecar(settings: &SatzSettings, app_data_dir: &PathBuf, token: &str) -> Option<Child> {
+    let repo_root = resolve_repo_root(Some(settings));
     let script_path = repo_root.join("sidecar").join("satz_models.py");
     if !script_path.exists() {
         return None;
@@ -325,7 +396,8 @@ fn spawn_sidecar(settings: &SatzSettings, app_data_dir: &PathBuf) -> Option<Chil
     let store_path = app_data_dir.join("planck_store.sqlite");
 
     let mut cmd = Command::new(python_bin);
-    cmd.arg(&script_path)
+    cmd.env("SATZ_SIDECAR_TOKEN", token)
+        .arg(&script_path)
         .arg("--sgs-root")
         .arg(sgs_root_str)
         .arg("--gemma-path")
@@ -477,7 +549,7 @@ fn ensure_default_desktop_on_windows() {
                         .encode_utf16()
                         .chain(std::iter::once(0))
                         .collect();
-                    let repo_root = resolve_repo_root();
+                    let repo_root = resolve_repo_root(None);
                     let cwd_wide: Vec<u16> = repo_root
                         .to_string_lossy()
                         .encode_utf16()
@@ -532,13 +604,17 @@ pub fn run() {
             let mut wv_manager = WebviewManagerState::default();
             wv_manager.max_live_tabs = settings.max_live_tabs.max(1);
 
-            let child_proc = spawn_sidecar(&settings, &app_data_dir);
+            let token = generate_sidecar_token();
+            let base_url = format!("http://127.0.0.1:{}", settings.port);
+            let child_proc = spawn_sidecar(&settings, &app_data_dir, &token);
 
             app.manage(db_state);
             app.manage(wv_manager);
             app.manage(SidecarState {
                 child: Mutex::new(child_proc),
                 settings,
+                token,
+                base_url,
             });
 
             #[cfg(target_os = "macos")]
@@ -577,6 +653,7 @@ pub fn run() {
             add_bookmark,
             remove_bookmark,
             get_db_path,
+            get_sidecar_config,
         ])
         .build(tauri::generate_context!())
         .expect("error while building satz application");

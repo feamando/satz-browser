@@ -1,5 +1,6 @@
 import type {
   BookmarkItem,
+  BrainProposalItem,
   BrowserTab,
   Conversation,
   ConversationDetail,
@@ -42,6 +43,10 @@ export interface AppState {
   knowledge: KnowledgeSummary;
   bookmarkTooltipNotice: string;
   profileStatusMessage: string;
+  tabHasPasswordField: Record<string, boolean>;
+  tabCanFillLogin: Record<string, boolean>;
+  messageProposals: Record<string, BrainProposalItem[]>;
+  revealedPasswords: Record<string, string>;
 }
 
 export const state: AppState = {
@@ -87,6 +92,10 @@ export const state: AppState = {
   },
   bookmarkTooltipNotice: "",
   profileStatusMessage: "",
+  tabHasPasswordField: {},
+  tabCanFillLogin: {},
+  messageProposals: {},
+  revealedPasswords: {},
 };
 
 export function escapeHtml(str: string): string {

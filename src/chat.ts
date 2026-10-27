@@ -1,5 +1,5 @@
 import { escapeHtml, getActiveTabSources, state } from "./state";
-import type { LocalModelId } from "./types";
+import type { BrainProposalItem, LocalModelId } from "./types";
 
 const LOCAL_MODELS: LocalModelId[] = [
   "gemma-4-e4b",
@@ -17,6 +17,8 @@ export interface ChatActions {
   onSelectTab?: (tabId: string) => void;
   onCloseTab?: (tabId: string) => void;
   onNewTab?: () => void;
+  onAcceptProposal?: (proposalId: string, msgId: string) => void;
+  onRejectProposal?: (proposalId: string, msgId: string) => void;
 }
 
 export function renderChatPanel(
@@ -111,11 +113,13 @@ export function renderChatPanel(
             : messages
                 .map((m) =>
                   renderMessageBlock(
+                    m.id,
                     m.role,
                     m.content,
                     m.model,
                     m.source_ids_json,
-                    m.cited_sources
+                    m.cited_sources,
+                    m.proposals ?? state.messageProposals[m.id]
                   )
                 )
                 .join("")
@@ -257,11 +261,13 @@ export function tickStreamingElapsed(): void {
 }
 
 function renderMessageBlock(
+  msgId: string,
   role: string,
   content: string,
   model: string | null,
   sourceIdsJson: string | null,
-  citedSources?: Array<{ url: string; title: string }>
+  citedSources?: Array<{ url: string; title: string }>,
+  proposals?: BrainProposalItem[]
 ): string {
   let sourceIds: string[] = [];
   if (sourceIdsJson) {
@@ -313,6 +319,35 @@ function renderMessageBlock(
     `
       : "";
 
+  const proposalsHtml =
+    proposals && proposals.length > 0
+      ? `
+      <div class="composer-controls">
+        ${proposals
+          .map((p) => {
+            const summaryPart = p.summary ? `, ${escapeHtml(p.summary.slice(0, 80))}` : "";
+            const status = p.status ?? "pending";
+            if (status === "accepted") {
+              return `<div class="muted">[store] ${escapeHtml(p.type)}: ${escapeHtml(p.name)}${summaryPart} [accepted]</div>`;
+            }
+            if (status === "rejected") {
+              return `<div class="muted">[store] ${escapeHtml(p.type)}: ${escapeHtml(p.name)}${summaryPart} [rejected]</div>`;
+            }
+            return `
+              <div class="rail-row">
+                <span>[store] ${escapeHtml(p.type)}: ${escapeHtml(p.name)}${summaryPart}</span>
+                <span>
+                  <button class="citation-link" data-accept-proposal="${escapeHtml(p.proposal_id)}" data-proposal-msg="${escapeHtml(msgId)}">[accept]</button>
+                  <button class="citation-link" data-reject-proposal="${escapeHtml(p.proposal_id)}" data-proposal-msg="${escapeHtml(msgId)}">[reject]</button>
+                </span>
+              </div>
+            `;
+          })
+          .join("")}
+      </div>
+    `
+      : "";
+
   return `
     <div class="msg-block ${isErrorMsg ? "msg-error-block" : ""}">
       <div class="msg-header">
@@ -320,6 +355,7 @@ function renderMessageBlock(
         <span>${modelLabel}${srcCountLabel}</span>
       </div>
       <div class="msg-body">${formattedBody}</div>
+      ${proposalsHtml}
       ${retryButtonHtml}
       ${openAsTabButtons}
     </div>
@@ -422,4 +458,26 @@ function bindChatEvents(container: HTMLElement, actions: ChatActions): void {
         actions.onNewTab();
       }
     });
+
+  container.querySelectorAll("[data-accept-proposal]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const pid = el.getAttribute("data-accept-proposal") ?? "";
+      const mid = el.getAttribute("data-proposal-msg") ?? "";
+      if (pid && actions.onAcceptProposal) {
+        actions.onAcceptProposal(pid, mid);
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-reject-proposal]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const pid = el.getAttribute("data-reject-proposal") ?? "";
+      const mid = el.getAttribute("data-proposal-msg") ?? "";
+      if (pid && actions.onRejectProposal) {
+        actions.onRejectProposal(pid, mid);
+      }
+    });
+  });
 }
