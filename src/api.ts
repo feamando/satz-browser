@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { extractDomain } from "./state";
 import type {
   BookmarkItem,
+  BrainProposalItem,
   BrowserTab,
   ChatMessage,
   Conversation,
@@ -16,7 +17,45 @@ import type {
   TabBoundsSpec,
 } from "./types";
 
-const SIDECAR_BASE = "http://127.0.0.1:8020";
+let sidecarBaseUrl = "";
+let sidecarAuthToken = "";
+let sidecarConfigPromise: Promise<{ baseUrl: string; token: string }> | null = null;
+
+async function ensureSidecarConfig(): Promise<{ baseUrl: string; token: string }> {
+  if (sidecarBaseUrl && sidecarAuthToken) {
+    return { baseUrl: sidecarBaseUrl, token: sidecarAuthToken };
+  }
+  if (!sidecarConfigPromise) {
+    sidecarConfigPromise = (async () => {
+      try {
+        const cfg = await invoke<{ base_url: string; token: string }>("get_sidecar_config");
+        sidecarBaseUrl = cfg.base_url;
+        sidecarAuthToken = cfg.token;
+      } catch {
+        if (!sidecarBaseUrl) {
+          sidecarBaseUrl = "http://127.0.0.1:8020";
+        }
+      }
+      return { baseUrl: sidecarBaseUrl, token: sidecarAuthToken };
+    })();
+  }
+  return await sidecarConfigPromise;
+}
+
+async function sidecarFetch(
+  path: string,
+  init: RequestInit = {}
+): Promise<Response> {
+  const { baseUrl, token } = await ensureSidecarConfig();
+  const headers = new Headers(init.headers ?? {});
+  if (token) {
+    headers.set("X-Satz-Token", token);
+  }
+  return await fetch(`${baseUrl}${path}`, {
+    ...init,
+    headers,
+  });
+}
 
 function mapConversationRow(raw: Record<string, unknown>): Conversation {
   // v1 -> v2 migration mapping: map legacy intent_title to title
@@ -210,7 +249,7 @@ export async function apiDeleteConversation(
 ): Promise<void> {
   await invoke("delete_conversation", { conversationId });
   try {
-    await fetch(`${SIDECAR_BASE}/forget`, {
+    await sidecarFetch("/forget", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ conversation_id: conversationId }),
@@ -334,10 +373,20 @@ export async function apiRemoveBookmark(bookmarkId: string): Promise<void> {
 
 export async function sidecarFetchHealth(): Promise<SidecarHealth> {
   try {
-    const res = await fetch(`${SIDECAR_BASE}/health`);
+    const res = await sidecarFetch("/health");
     if (!res.ok) throw new Error("sidecar error");
     const data = (await res.json()) as SidecarHealth;
-    return { ...data, online: true };
+    return {
+      online: true,
+      models: data.models ?? [
+        { id: "gemma-4-e4b", state: "not_loaded" },
+        { id: "planck3 (web)", state: "not_loaded" },
+        { id: "hertz (reader)", state: "not_loaded" },
+        { id: "planck (reader)", state: "not_loaded" },
+      ],
+      ingest_queue_len: data.ingest_queue_len ?? 0,
+      pause_learning: Boolean(data.pause_learning),
+    };
   } catch {
     return {
       online: false,
@@ -355,7 +404,7 @@ export async function sidecarFetchHealth(): Promise<SidecarHealth> {
 
 export async function sidecarFetchDigest(): Promise<DigestEntry[]> {
   try {
-    const res = await fetch(`${SIDECAR_BASE}/digest`);
+    const res = await sidecarFetch("/digest");
     if (!res.ok) return [];
     const data = (await res.json()) as { items?: DigestEntry[] };
     return data.items ?? [];
@@ -366,7 +415,7 @@ export async function sidecarFetchDigest(): Promise<DigestEntry[]> {
 
 export async function sidecarFetchKnowledge(): Promise<KnowledgeSummary | null> {
   try {
-    const res = await fetch(`${SIDECAR_BASE}/knowledge`);
+    const res = await sidecarFetch("/knowledge");
     if (!res.ok) return null;
     const raw = (await res.json()) as Record<string, unknown>;
     const rawDomains = (raw.top_domains ?? []) as Array<Record<string, unknown>>;
@@ -417,6 +466,8 @@ export async function sidecarFetchKnowledge(): Promise<KnowledgeSummary | null> 
                 last_active_at: String(p.last_active_at ?? ""),
                 credential_services_count: Number(p.credential_services_count ?? 0),
                 is_active: Boolean(p.is_active),
+                failed_attempts: Number(p.failed_attempts ?? 0),
+                retry_after_seconds: Number(p.retry_after_seconds ?? 0),
               })
             ),
             active_profile_id: rawProfile.active_profile_id
@@ -454,29 +505,29 @@ export async function sidecarFetchKnowledge(): Promise<KnowledgeSummary | null> 
               has_password: Boolean(s.has_password),
               has_token: Boolean(s.has_token),
               has_cookie: Boolean(s.has_cookie),
-              keys: ((s.keys ?? []) as unknown[]).map((k) => String(k)),
-            })),
-            raw_env: String(rawVault.raw_env ?? ""),
-          }
-        : undefined,
-      top_domains: rawDomains.map((d) => ({
-        domain: String(d.domain ?? ""),
-        visits: Number(d.visits ?? 0),
-        score: Number(d.score ?? d.trust ?? 0),
-      })),
-      top_topics: rawTopics.map((t) => ({
-        topic: String(t.topic ?? t.entity ?? ""),
-        weight: Number(t.weight ?? t.score ?? 0),
-      })),
-      passages: rawPassages.map((p) => ({
-        id: String(p.id ?? ""),
-        conversation_id: String(p.conversation_id ?? ""),
-        entity: String(p.entity ?? p.title ?? p.domain ?? ""),
-        url: String(p.url ?? ""),
-        text: String(p.text ?? ""),
-        added_at: String(p.added_at ?? p.ts ?? ""),
-      })),
-    };
+            keys: ((s.keys ?? []) as unknown[]).map((k) => String(k)),
+          })),
+          raw_env: "",
+        }
+      : undefined,
+    top_domains: rawDomains.map((d) => ({
+      domain: String(d.domain ?? ""),
+      visits: Number(d.visits ?? 0),
+      score: Number(d.score ?? d.trust ?? 0),
+    })),
+    top_topics: rawTopics.map((t) => ({
+      topic: String(t.topic ?? t.entity ?? ""),
+      weight: Number(t.weight ?? t.score ?? 0),
+    })),
+    passages: rawPassages.map((p) => ({
+      id: String(p.id ?? ""),
+      conversation_id: String(p.conversation_id ?? ""),
+      entity: String(p.entity ?? p.title ?? p.domain ?? ""),
+      url: String(p.url ?? ""),
+      text: String(p.text ?? ""),
+      added_at: String(p.added_at ?? p.ts ?? ""),
+    })),
+  };
   } catch {
     return null;
   }
@@ -484,7 +535,7 @@ export async function sidecarFetchKnowledge(): Promise<KnowledgeSummary | null> 
 
 export async function sidecarSetPauseLearning(paused: boolean): Promise<boolean> {
   try {
-    const res = await fetch(`${SIDECAR_BASE}/knowledge/pause`, {
+    const res = await sidecarFetch("/knowledge/pause", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ pause_learning: paused }),
@@ -499,7 +550,7 @@ export async function sidecarSetPauseLearning(paused: boolean): Promise<boolean>
 
 export async function sidecarDeletePassage(passageId: string): Promise<void> {
   try {
-    await fetch(`${SIDECAR_BASE}/knowledge/delete_passage`, {
+    await sidecarFetch("/knowledge/delete_passage", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ passage_id: passageId }),
@@ -511,7 +562,7 @@ export async function sidecarDeletePassage(passageId: string): Promise<void> {
 
 export async function sidecarDeleteBrainEntity(slug: string): Promise<void> {
   try {
-    await fetch(`${SIDECAR_BASE}/knowledge/delete_entity`, {
+    await sidecarFetch("/knowledge/delete_entity", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ slug }),
@@ -521,11 +572,43 @@ export async function sidecarDeleteBrainEntity(slug: string): Promise<void> {
   }
 }
 
+export async function sidecarAcceptBrainProposal(
+  proposalId: string
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await sidecarFetch("/brain/accept", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ proposal_id: proposalId }),
+    });
+    const data = (await res.json()) as { ok?: boolean; error?: string };
+    return { ok: Boolean(res.ok && data.ok), error: data.error };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarRejectBrainProposal(
+  proposalId: string
+): Promise<boolean> {
+  try {
+    const res = await sidecarFetch("/brain/reject", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ proposal_id: proposalId }),
+    });
+    const data = (await res.json()) as { ok?: boolean };
+    return Boolean(res.ok && data.ok);
+  } catch {
+    return false;
+  }
+}
+
 export async function sidecarSyncBookmarks(
   bookmarks: BookmarkItem[]
 ): Promise<void> {
   try {
-    await fetch(`${SIDECAR_BASE}/bookmarks/sync`, {
+    await sidecarFetch("/bookmarks/sync", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -546,7 +629,7 @@ export async function sidecarCreateProfile(
   pin: string
 ): Promise<{ ok: boolean; error?: string }> {
   try {
-    const res = await fetch(`${SIDECAR_BASE}/profile/create`, {
+    const res = await sidecarFetch("/profile/create", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, pin }),
@@ -563,7 +646,7 @@ export async function sidecarUnlockProfile(
   pin: string
 ): Promise<{ ok: boolean; error?: string }> {
   try {
-    const res = await fetch(`${SIDECAR_BASE}/profile/unlock`, {
+    const res = await sidecarFetch("/profile/unlock", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ profile_id: profileId, pin }),
@@ -577,7 +660,7 @@ export async function sidecarUnlockProfile(
 
 export async function sidecarLockProfile(): Promise<void> {
   try {
-    await fetch(`${SIDECAR_BASE}/profile/lock`, {
+    await sidecarFetch("/profile/lock", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
@@ -592,7 +675,7 @@ export async function sidecarDeleteProfile(
   pin: string
 ): Promise<{ ok: boolean; error?: string }> {
   try {
-    const res = await fetch(`${SIDECAR_BASE}/profile/delete`, {
+    const res = await sidecarFetch("/profile/delete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ profile_id: profileId, pin }),
@@ -613,7 +696,7 @@ export async function sidecarUpsertPassword(payload: {
   url?: string;
 }): Promise<{ ok: boolean; error?: string }> {
   try {
-    const res = await fetch(`${SIDECAR_BASE}/passwords/upsert`, {
+    const res = await sidecarFetch("/passwords/upsert", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -625,11 +708,54 @@ export async function sidecarUpsertPassword(payload: {
   }
 }
 
+export async function sidecarRevealPassword(
+  service: string,
+  field: string,
+  pin: string
+): Promise<{ ok: boolean; value?: string; error?: string }> {
+  try {
+    const res = await sidecarFetch("/passwords/reveal", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ service, field, pin }),
+    });
+    const data = (await res.json()) as {
+      ok?: boolean;
+      value?: string;
+      error?: string;
+    };
+    return {
+      ok: Boolean(res.ok && data.ok),
+      value: data.value,
+      error: data.error,
+    };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarMatchPasswordForUrl(
+  targetUrl: string
+): Promise<boolean> {
+  try {
+    const res = await sidecarFetch("/passwords/match", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: targetUrl }),
+    });
+    if (!res.ok) return false;
+    const data = (await res.json()) as { credentials?: Record<string, unknown> | null };
+    return Boolean(data.credentials);
+  } catch {
+    return false;
+  }
+}
+
 export async function sidecarSaveRawEnv(
   rawEnv: string
 ): Promise<{ ok: boolean; error?: string }> {
   try {
-    const res = await fetch(`${SIDECAR_BASE}/passwords/save_env`, {
+    const res = await sidecarFetch("/passwords/save_env", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ raw_env: rawEnv }),
@@ -645,7 +771,7 @@ export async function sidecarImportEnvFile(
   path: string
 ): Promise<{ ok: boolean; error?: string }> {
   try {
-    const res = await fetch(`${SIDECAR_BASE}/passwords/import_env`, {
+    const res = await sidecarFetch("/passwords/import_env", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
@@ -661,7 +787,7 @@ export async function sidecarDeletePassword(
   service: string
 ): Promise<{ ok: boolean; error?: string }> {
   try {
-    const res = await fetch(`${SIDECAR_BASE}/passwords/delete`, {
+    const res = await sidecarFetch("/passwords/delete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ service }),
@@ -681,7 +807,7 @@ export async function sidecarRunAnswer(
   band: string;
   sources: Array<{ id?: string; url: string; title: string; domain?: string }>;
 }> {
-  const res = await fetch(`${SIDECAR_BASE}/answer`, {
+  const res = await sidecarFetch("/answer", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ question, session: conversationId }),
@@ -697,7 +823,7 @@ export async function sidecarRunRead(
   question: string,
   sources: Array<{ id: string; url: string; title: string }>
 ): Promise<{ answer: string; source_ids: string[] }> {
-  const res = await fetch(`${SIDECAR_BASE}/read`, {
+  const res = await sidecarFetch("/read", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -724,9 +850,10 @@ export async function sidecarStreamChat(
 ): Promise<{
   source_ids: string[];
   cited_sources?: Array<{ url: string; title: string }>;
+  proposals?: BrainProposalItem[];
   error?: string;
 }> {
-  const res = await fetch(`${SIDECAR_BASE}/chat`, {
+  const res = await sidecarFetch("/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model, messages, sources, web }),
@@ -740,6 +867,7 @@ export async function sidecarStreamChat(
   let buffer = "";
   let finalSourceIds: string[] = [];
   let citedSources: Array<{ url: string; title: string }> | undefined;
+  let proposals: BrainProposalItem[] | undefined;
   let streamError: string | undefined;
 
   while (true) {
@@ -762,6 +890,7 @@ export async function sidecarStreamChat(
           done?: boolean;
           source_ids?: string[];
           cited_sources?: Array<{ url: string; title: string }>;
+          proposals?: BrainProposalItem[];
         };
         if (payload.status && onStatus) {
           onStatus(payload.status, payload.phase);
@@ -776,6 +905,7 @@ export async function sidecarStreamChat(
         if (payload.done) {
           finalSourceIds = payload.source_ids ?? [];
           citedSources = payload.cited_sources;
+          proposals = payload.proposals;
         }
       } catch {
         // Ignore malformed SSE line
@@ -785,6 +915,7 @@ export async function sidecarStreamChat(
   return {
     source_ids: finalSourceIds,
     cited_sources: citedSources,
+    proposals,
     error: streamError,
   };
 }

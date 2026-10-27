@@ -19,6 +19,7 @@ export interface KnowledgeActions {
   onSaveRawEnv?: (rawEnv: string) => void;
   onImportEnvFile?: (path: string) => void;
   onDeletePassword?: (service: string) => void;
+  onRevealPassword?: (service: string, field: string, pin: string) => void;
   onAutofillActiveTab?: () => void;
   onCloseKnowledgeView: () => void;
 }
@@ -155,14 +156,26 @@ export function renderKnowledgeView(
           <div class="vault-form-row">
             <input id="kb-import-env-path" class="vault-input" type="text" placeholder="import external .env file path (e.g. C:\\Users\\...\\.env)_" />
             <button id="kb-import-env-btn">[import .env file]</button>
+            <input
+              id="kb-reveal-pin-input"
+              class="vault-input vault-pin-input"
+              type="password"
+              inputmode="numeric"
+              maxlength="6"
+              placeholder="6-digit PIN to [reveal]_"
+            />
           </div>
 
           ${
             vaultServices.length === 0
-              ? `<div class="muted">no credentials in this profile's .env yet. add a service above or paste/import a .env file below.</div>`
+              ? `<div class="muted">no credentials in this profile's vault.enc yet. add a service above or paste/import a .env file below.</div>`
               : vaultServices
                   .map(
-                    (s) => `
+                    (s) => {
+                      const revPwd = state.revealedPasswords[`${s.service}:password`];
+                      const revTok = state.revealedPasswords[`${s.service}:token`];
+                      const revCook = state.revealedPasswords[`${s.service}:cookie`];
+                      return `
                 <div class="rail-row">
                   <span>
                     <strong>${escapeHtml(s.service)}</strong>
@@ -171,21 +184,40 @@ export function renderKnowledgeView(
                   </span>
                   <span>
                     <span class="muted">
-                      ${s.has_password ? "[password] " : ""}${s.has_token ? "[token] " : ""}${s.has_cookie ? "[cookie]" : ""}
+                      ${
+                        s.has_password
+                          ? revPwd
+                            ? `[password: ${escapeHtml(revPwd)}] `
+                            : `[password <button class="rail-menu-btn" data-reveal-service="${escapeHtml(s.service)}" data-reveal-field="password">[reveal]</button>] `
+                          : ""
+                      }${
+                        s.has_token
+                          ? revTok
+                            ? `[token: ${escapeHtml(revTok)}] `
+                            : `[token <button class="rail-menu-btn" data-reveal-service="${escapeHtml(s.service)}" data-reveal-field="token">[reveal]</button>] `
+                          : ""
+                      }${
+                        s.has_cookie
+                          ? revCook
+                            ? `[cookie: ${escapeHtml(revCook)}]`
+                            : `[cookie <button class="rail-menu-btn" data-reveal-service="${escapeHtml(s.service)}" data-reveal-field="cookie">[reveal]</button>]`
+                          : ""
+                      }
                     </span>
                     <button class="rail-menu-btn" data-delete-cred="${escapeHtml(s.service)}">[delete]</button>
                   </span>
                 </div>
-              `
+              `;
+                    }
                   )
                   .join("")
           }
 
           <div class="vault-raw-block">
-            <div class="muted">direct .env password file editor (${escapeHtml(activeProfile?.name ?? "")}):</div>
-            <textarea id="kb-raw-env-textarea" class="vault-textarea" rows="6" spellcheck="false">${escapeHtml(vault?.raw_env ?? "")}</textarea>
+            <div class="muted">write-only .env batch importer for encrypted vault.enc (${escapeHtml(activeProfile?.name ?? "")}):</div>
+            <textarea id="kb-raw-env-textarea" class="vault-textarea" rows="5" spellcheck="false" placeholder="paste KEY=VALUE lines here to merge into encrypted vault.enc (write-only; stored secrets are never returned over HTTP)_"></textarea>
             <div>
-              <button id="kb-save-raw-env-btn">[save .env file]</button>
+              <button id="kb-save-raw-env-btn">[merge into vault.enc]</button>
             </div>
           </div>
         `
@@ -405,6 +437,21 @@ export function renderKnowledgeView(
       const srv = (btn as HTMLElement).getAttribute("data-delete-cred");
       if (srv && actions.onDeletePassword) {
         actions.onDeletePassword(srv);
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-reveal-service]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const srv = el.getAttribute("data-reveal-service") ?? "";
+      const fld = el.getAttribute("data-reveal-field") ?? "password";
+      const pinEl = container.querySelector(
+        "#kb-reveal-pin-input"
+      ) as HTMLInputElement | null;
+      const pin = pinEl?.value.trim() ?? "";
+      if (srv && actions.onRevealPassword) {
+        actions.onRevealPassword(srv, fld, pin);
       }
     });
   });

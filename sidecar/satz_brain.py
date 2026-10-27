@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -102,6 +103,17 @@ def _load_yaml(text: str) -> dict[str, Any]:
         return {}
 
 
+def neutralize_brain_directives_in_source(text: str) -> str:
+    """
+    Section 2.4: Before prompt assembly, neutralise directive tags inside source text
+    (`<brain_store>` -> `‹brain_store›`) so a page cannot plant one for the model to echo.
+    """
+    if not text:
+        return ""
+    out = re.sub(r"<\s*(/?)\s*brain_store\b([^>]*)>", r"‹\1brain_store\2›", text, flags=re.IGNORECASE)
+    return out
+
+
 class SatzBrain:
     """Manages the local Satz Brain knowledge graph on disk."""
 
@@ -110,6 +122,7 @@ class SatzBrain:
         self.lock = threading.RLock()
         self.registry_path = self.brain_dir / "registry.yaml"
         self.brain_md_path = self.brain_dir / "BRAIN.md"
+        self.proposals: dict[str, dict[str, Any]] = {}
         self._ensure_layout()
 
     def _ensure_layout(self) -> None:
@@ -645,12 +658,19 @@ class SatzBrain:
         self,
         raw_text: str,
         source_url: str = "",
-    ) -> tuple[str, list[dict[str, Any]]]:
+        user_msg: str | None = None,
+    ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
         """
-        Parses <brain_store>JSON</brain_store> blocks from model output,
-        executes them against SatzBrain, and strips the raw XML tags from user-visible text.
+        Section 2.4:
+        Parses <brain_store>JSON</brain_store> blocks from model output.
+        - Executed directly ONLY when the user's own message matches `STORE_INTENT_RE`.
+        - Otherwise each directive becomes a proposal (`proposals`) shown under the answer:
+          `[store] <type>: <name>, <summary/attrs> [accept] [reject]`.
+        Returns `(cleaned_text, stored_entities, proposals)`.
         """
         stored: list[dict[str, Any]] = []
+        proposals: list[dict[str, Any]] = []
+        allow_direct = bool(user_msg and STORE_INTENT_RE.search(user_msg))
         pattern = re.compile(r"<brain_store>\s*(\{.*?\})\s*</brain_store>", re.DOTALL | re.IGNORECASE)
 
         def _replacer(match: re.Match) -> str:
@@ -658,25 +678,74 @@ class SatzBrain:
             try:
                 data = json.loads(payload_str)
                 if isinstance(data, dict):
-                    ent = self.upsert_entity(
-                        entity_type=str(data.get("type") or "note"),
-                        name=str(data.get("name") or data.get("title") or "Saved Fact"),
-                        summary=str(data.get("summary") or ""),
-                        attributes=data.get("attributes") if isinstance(data.get("attributes"), dict) else {},
-                        content=str(data.get("content") or data.get("summary") or ""),
-                        relationships=data.get("relationships"),
-                        aliases=data.get("aliases") if isinstance(data.get("aliases"), list) else [],
-                        source_url=str(data.get("source_url") or source_url or ""),
-                        tier=1,
-                        actor="model/brain_store",
-                    )
-                    stored.append(ent)
+                    etype = str(data.get("type") or "note")
+                    ename = str(data.get("name") or data.get("title") or "Saved Fact")
+                    esummary = str(data.get("summary") or "")
+                    eattrs = data.get("attributes") if isinstance(data.get("attributes"), dict) else {}
+                    econtent = str(data.get("content") or data.get("summary") or "")
+                    erels = data.get("relationships")
+                    ealiases = data.get("aliases") if isinstance(data.get("aliases"), list) else []
+                    esrc = str(data.get("source_url") or source_url or "")
+
+                    if allow_direct:
+                        ent = self.upsert_entity(
+                            entity_type=etype,
+                            name=ename,
+                            summary=esummary,
+                            attributes=eattrs,
+                            content=econtent,
+                            relationships=erels,
+                            aliases=ealiases,
+                            source_url=esrc,
+                            tier=1,
+                            actor="model/brain_store",
+                        )
+                        stored.append(ent)
+                    else:
+                        pid = f"prop-{secrets.token_hex(6)}"
+                        prop = {
+                            "proposal_id": pid,
+                            "type": etype,
+                            "name": ename,
+                            "summary": esummary,
+                            "attributes": eattrs,
+                            "content": econtent,
+                            "relationships": erels,
+                            "aliases": ealiases,
+                            "source_url": esrc,
+                        }
+                        with self.lock:
+                            self.proposals[pid] = prop
+                        proposals.append(prop)
             except Exception as e:
                 print(f"[satz-brain] failed to parse <brain_store>: {e}", flush=True)
             return ""
 
         cleaned = pattern.sub(_replacer, raw_text).strip()
-        return cleaned, stored
+        return cleaned, stored, proposals
+
+    def accept_proposal(self, proposal_id: str) -> dict[str, Any]:
+        """POST /brain/accept {proposal_id} -> commits a pending Brain proposal to disk."""
+        with self.lock:
+            prop = self.proposals.pop(proposal_id, None)
+            if not prop:
+                raise KeyError(f"Proposal '{proposal_id}' not found or already resolved.")
+            return self.upsert_entity(
+                entity_type=prop["type"],
+                name=prop["name"],
+                summary=prop["summary"],
+                attributes=prop["attributes"],
+                content=prop["content"],
+                relationships=prop["relationships"],
+                aliases=prop["aliases"],
+                source_url=prop["source_url"],
+                tier=1,
+                actor="user/proposal_accept",
+            )
+
+    def reject_proposal(self, proposal_id: str) -> bool:
+        with self.lock:
+            return self.proposals.pop(proposal_id, None) is not None
 
     def ensure_explicit_store_fulfilled(
         self,

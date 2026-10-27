@@ -45,6 +45,18 @@ export interface ChatMessage {
   source_ids_json: string | null;
   created_at: string;
   cited_sources?: Array<{ url: string; title: string; domain?: string }>;
+  proposals?: BrainProposalItem[];
+}
+
+export interface BrainProposalItem {
+  proposal_id: string;
+  type: string;
+  name: string;
+  summary: string;
+  attributes: Record<string, unknown>;
+  content: string;
+  source_url?: string;
+  status?: "pending" | "accepted" | "rejected";
 }
 
 export interface BookmarkItem {
@@ -83,9 +95,10 @@ export interface TabBoundsSpec {
 
 export interface TabPageEvent {
   tab_id: string;
-  event_type: "load_started" | "load_finished" | "title_changed";
+  event_type: "load_started" | "load_finished" | "title_changed" | "dom_captured";
   url: string | null;
   title: string | null;
+  has_password_field?: boolean | null;
 }
 
 export type LocalModelId =
@@ -145,6 +158,8 @@ export interface UserProfileItem {
   last_active_at: string;
   credential_services_count: number;
   is_active: boolean;
+  failed_attempts?: number;
+  retry_after_seconds?: number;
 }
 
 export interface ProfileStatusSummary {

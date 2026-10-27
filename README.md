@@ -39,10 +39,10 @@ Built on **Tauri v2** (`WebView2` on Windows 11, `WKWebView` on macOS) and power
      - **Layer 1 (`brain/`):** Structured Markdown + YAML frontmatter entity graph (`BRAIN.md` Tier 1 + Tier 2 index, `registry.yaml`, and typed entity files across `accounts/`, `people/`, `places/`, `organizations/`, `projects/`, `notes/`, `decisions/`). Models read `BRAIN.md` + hot-loaded entity files on every turn and can write/update entities directly via `<brain_store>` directives or natural-language store requests.
      - **Layer 2 (`planck_store.sqlite`):** Background ingest worker indexes browsed passages, entity co-mentions, domain visits, and dwell time to power `for you` (`GET /digest`) and passage retrieval.
    - **Continuous Bookmark Indexing:** Bookmarking a page hooks up that source to a background indexer (`_bookmark_indexer_loop`) that continuously refreshes and indexes its content into the knowledge base and Brain.
-7. **User Profiles (6-Digit PIN) & `.env` Password Vault (`sidecar/satz_passwords.py`):**
-   - Users can create named profiles protected by a **6-digit PIN** (`PBKDF2-HMAC-SHA256` + `Fernet` encryption).
-   - Each profile owns an isolated `.env`-format credential vault (`profiles/<profile_id>/passwords.env.enc`) and its own scoped `brain/` directory.
-   - When a profile is unlocked, the browser and background bookmark indexer can use stored `.env` credentials (`<SERVICE>_USERNAME`, `<SERVICE>_PASSWORD`, `<SERVICE>_TOKEN`, `<SERVICE>_COOKIE`) to autofill login forms or authenticate background extraction.
+7. **User Profiles (6-Digit PIN) & Encrypted Password Vault (`sidecar/satz_passwords.py`):**
+   - Users can create named profiles protected by a **6-digit PIN** combined with a per-profile 32-byte OS keychain `device_key` (`keyring`, service `satz-browser`) via `Argon2id` (`time_cost=3`, `memory_cost=64 MiB`, `parallelism=4`) + `HKDF-SHA256` (`info="satz-vault-v1"`) + `AES-256-GCM` (`profiles/<profile_id>/vault.enc`).
+   - PIN verification is authenticated decryption of `vault.enc` (no stored PIN hash), with exponential lockout after 5 wrong PINs (`30s` doubling up to `1h`, persisted in `registry.json`) and automatic inactivity lock after 30 minutes (`vault_autolock_minutes`).
+   - When a profile is unlocked, the browser and background bookmark indexer use strict exact-host / subdomain matching (`<SERVICE>_URL` or `KNOWN_SERVICE_ALIASES`) to fill login forms on explicit user action (`[fill login]` or `Mod+Shift+L`, verified against `window.location.origin` in the top frame) or authenticate background extraction. Secret values are never returned on `GET /passwords` or `GET /knowledge`; revealing a single field requires `POST /passwords/reveal {service, field, pin}`.
 
 ---
 

@@ -17,6 +17,7 @@ import {
   apiPinConversation,
   apiRemoveBookmark,
   apiRenameConversation,
+  sidecarAcceptBrainProposal,
   sidecarCreateProfile,
   sidecarDeleteBrainEntity,
   sidecarDeletePassage,
@@ -27,6 +28,9 @@ import {
   sidecarFetchKnowledge,
   sidecarImportEnvFile,
   sidecarLockProfile,
+  sidecarMatchPasswordForUrl,
+  sidecarRejectBrainProposal,
+  sidecarRevealPassword,
   sidecarRunAnswer,
   sidecarRunRead,
   sidecarSaveRawEnv,
@@ -138,6 +142,11 @@ async function initApp(): Promise<void> {
       input?.focus();
       input?.select();
     },
+    onFillLogin: () => {
+      if (state.activeTabId !== "chat") {
+        void apiAutofillTabCredentials(state.activeTabId, false);
+      }
+    },
     onToggleAgentRail: () => {
       state.agentRailOpen = !state.agentRailOpen;
       renderViewportRegion();
@@ -229,6 +238,10 @@ function handleMenuShortcut(cmd: string): void {
     handleToggleCompareMode();
   } else if (cmd === "bookmark_current") {
     void handleBookmarkCurrentPage();
+  } else if (cmd === "fill_login") {
+    if (state.activeTabId !== "chat") {
+      void apiAutofillTabCredentials(state.activeTabId, false);
+    }
   }
 }
 
@@ -298,6 +311,20 @@ async function handleTabPageEvent(payload: TabPageEvent): Promise<void> {
   }
   if (payload.title && payload.title !== tab.title) {
     tab.title = payload.title;
+  }
+
+  if (typeof payload.has_password_field === "boolean") {
+    state.tabHasPasswordField[tab.id] = payload.has_password_field;
+    const prevCanFill = Boolean(state.tabCanFillLogin[tab.id]);
+    if (payload.has_password_field && tab.url) {
+      const matched = await sidecarMatchPasswordForUrl(tab.url);
+      state.tabCanFillLogin[tab.id] = matched;
+    } else {
+      state.tabCanFillLogin[tab.id] = false;
+    }
+    if (prevCanFill !== Boolean(state.tabCanFillLogin[tab.id])) {
+      renderViewportRegion();
+    }
   }
 
   if (payload.event_type === "load_finished") {
@@ -473,6 +500,7 @@ function renderViewportRegion(): void {
         renderAllRegions();
       },
       onUnlockProfile: async (profileId, pin) => {
+        state.revealedPasswords = {};
         const res = await sidecarUnlockProfile(profileId, pin);
         state.profileStatusMessage = res.ok
           ? `profile "${profileId}" unlocked.`
@@ -482,13 +510,15 @@ function renderViewportRegion(): void {
         renderAllRegions();
       },
       onLockProfile: async () => {
+        state.revealedPasswords = {};
         await sidecarLockProfile();
-        state.profileStatusMessage = "profile locked. .env password vault unloaded.";
+        state.profileStatusMessage = "profile locked. encrypted vault unloaded.";
         const kb = await sidecarFetchKnowledge();
         if (kb) state.knowledge = kb;
         renderAllRegions();
       },
       onDeleteProfile: async (profileId, pin) => {
+        state.revealedPasswords = {};
         const res = await sidecarDeleteProfile(profileId, pin);
         state.profileStatusMessage = res.ok
           ? `profile "${profileId}" deleted.`
@@ -500,7 +530,7 @@ function renderViewportRegion(): void {
       onUpsertPassword: async (payload) => {
         const res = await sidecarUpsertPassword(payload);
         state.profileStatusMessage = res.ok
-          ? `saved ${payload.service} credentials to active profile .env.`
+          ? `saved ${payload.service} credentials to active profile vault.enc.`
           : `error: ${res.error ?? "failed to save credential"}`;
         const kb = await sidecarFetchKnowledge();
         if (kb) state.knowledge = kb;
@@ -509,8 +539,8 @@ function renderViewportRegion(): void {
       onSaveRawEnv: async (rawEnv) => {
         const res = await sidecarSaveRawEnv(rawEnv);
         state.profileStatusMessage = res.ok
-          ? "saved profile .env password file."
-          : `error: ${res.error ?? "failed to save .env"}`;
+          ? "merged .env lines into encrypted profile vault.enc."
+          : `error: ${res.error ?? "failed to save vault"}`;
         const kb = await sidecarFetchKnowledge();
         if (kb) state.knowledge = kb;
         renderViewportRegion();
@@ -518,7 +548,7 @@ function renderViewportRegion(): void {
       onImportEnvFile: async (path) => {
         const res = await sidecarImportEnvFile(path);
         state.profileStatusMessage = res.ok
-          ? `imported credentials from ${path} into profile .env.`
+          ? `imported credentials from ${path} into profile vault.enc.`
           : `error: ${res.error ?? "failed to import .env file"}`;
         const kb = await sidecarFetchKnowledge();
         if (kb) state.knowledge = kb;
@@ -526,18 +556,33 @@ function renderViewportRegion(): void {
       },
       onDeletePassword: async (service) => {
         await sidecarDeletePassword(service);
-        state.profileStatusMessage = `deleted ${service} from profile .env.`;
+        state.profileStatusMessage = `deleted ${service} from profile vault.enc.`;
         const kb = await sidecarFetchKnowledge();
         if (kb) state.knowledge = kb;
+        renderViewportRegion();
+      },
+      onRevealPassword: async (service, field, pin) => {
+        if (!pin) {
+          state.profileStatusMessage = "enter your 6-digit PIN in the reveal box first.";
+          renderViewportRegion();
+          return;
+        }
+        const res = await sidecarRevealPassword(service, field, pin);
+        if (res.ok && res.value !== undefined) {
+          state.revealedPasswords[`${service}:${field}`] = res.value;
+          state.profileStatusMessage = `revealed ${service} ${field}.`;
+        } else {
+          state.profileStatusMessage = `error: ${res.error ?? "failed to reveal secret"}`;
+        }
         renderViewportRegion();
       },
       onAutofillActiveTab: async () => {
         const openTab = state.activeDetail?.tabs.find((t) => t.is_open);
         if (openTab) {
-          const ok = await apiAutofillTabCredentials(openTab.id, true);
+          const ok = await apiAutofillTabCredentials(openTab.id, false);
           state.profileStatusMessage = ok
-            ? `dispatched .env auto-fill to open tab (${extractDomain(openTab.url)}).`
-            : `no matching .env credentials found for ${extractDomain(openTab.url)}.`;
+            ? `filled login credentials on open tab (${extractDomain(openTab.url)}).`
+            : `no matching credentials found for ${extractDomain(openTab.url)}.`;
           renderViewportRegion();
         }
       },
@@ -623,12 +668,18 @@ function renderSiteTabViewport(viewport: HTMLElement): void {
             type="text"
             value="${escapeHtml(tab.url)}"
           />
+          ${
+            state.tabCanFillLogin[tab.id]
+              ? `
           <button
             data-autofill-tab="${escapeHtml(tab.id)}"
-            title="Auto-fill & login on this tab using active profile .env credentials"
+            title="Fill login credentials (${MOD_LABEL}+shift+l)"
           >
-            [.env login]
+            [fill login]
           </button>
+          `
+              : ""
+          }
           <button id="toggle-agent-rail-btn" class="${state.agentRailOpen ? "active" : ""}">
             [chat rail ${MOD_LABEL}+j]
           </button>
@@ -754,7 +805,7 @@ function bindToolbarEvents(viewport: HTMLElement): void {
     btn.addEventListener("click", () => {
       const tabId = (btn as HTMLElement).getAttribute("data-autofill-tab");
       if (tabId) {
-        void apiAutofillTabCredentials(tabId, true);
+        void apiAutofillTabCredentials(tabId, false);
       }
     });
   });
@@ -796,6 +847,36 @@ function getChatActions() {
     },
     onNewTab: () => {
       void handleCreateNewTab();
+    },
+    onAcceptProposal: (proposalId: string, msgId: string) => {
+      void (async () => {
+        const res = await sidecarAcceptBrainProposal(proposalId);
+        if (res.ok) {
+          const list = state.messageProposals[msgId] ?? [];
+          for (const p of list) {
+            if (p.proposal_id === proposalId) {
+              p.status = "accepted";
+            }
+          }
+          const kb = await sidecarFetchKnowledge();
+          if (kb) state.knowledge = kb;
+          renderViewportRegion();
+        }
+      })();
+    },
+    onRejectProposal: (proposalId: string, msgId: string) => {
+      void (async () => {
+        const ok = await sidecarRejectBrainProposal(proposalId);
+        if (ok) {
+          const list = state.messageProposals[msgId] ?? [];
+          for (const p of list) {
+            if (p.proposal_id === proposalId) {
+              p.status = "rejected";
+            }
+          }
+          renderViewportRegion();
+        }
+      })();
     },
   };
 }
@@ -1134,14 +1215,25 @@ async function handleSendChatMessage(text: string): Promise<void> {
       (streamRes.error ? `[err] ${streamRes.error}` : "(no response)");
     stopStreamingProgress();
 
-    await apiAddMessage(
+    const savedMsg = await apiAddMessage(
       convId,
       "assistant",
       finalContent,
       state.selectedModel,
       JSON.stringify(streamRes.source_ids)
     );
+    if (streamRes.proposals && streamRes.proposals.length > 0) {
+      state.messageProposals[savedMsg.id] = streamRes.proposals;
+    }
     state.activeDetail = await apiGetConversation(convId);
+    if (state.activeDetail && state.messageProposals[savedMsg.id]) {
+      const msgObj = state.activeDetail.messages.find(
+        (m) => m.id === savedMsg.id
+      );
+      if (msgObj) {
+        msgObj.proposals = state.messageProposals[savedMsg.id];
+      }
+    }
     renderViewportRegion();
   } catch (err) {
     stopStreamingProgress();

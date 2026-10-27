@@ -1,4 +1,5 @@
 use crate::db::DbState;
+use crate::SidecarState;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
@@ -27,6 +28,8 @@ pub struct TabPageEventPayload {
     pub event_type: String,
     pub url: Option<String>,
     pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_password_field: Option<bool>,
 }
 
 pub struct WebviewManagerState {
@@ -300,6 +303,7 @@ pub fn sync_tab_webviews_impl(
                             event_type: ev_type.to_string(),
                             url: Some(url_str),
                             title: None,
+                            has_password_field: None,
                         },
                     );
                 })
@@ -326,6 +330,7 @@ pub fn sync_tab_webviews_impl(
                             event_type: "title_changed".to_string(),
                             url: current_url,
                             title: Some(title),
+                            has_password_field: None,
                         },
                     );
                 });
@@ -362,6 +367,7 @@ fn attach_child_webview_accelerators(app: AppHandle, child_wv: &tauri::Webview) 
             extern "system" {
                 fn GetKeyState(nVirtKey: i32) -> i16;
             }
+            const VK_SHIFT: i32 = 0x10;
             const VK_CONTROL: i32 = 0x11;
 
             let controller = platform_wv.controller();
@@ -374,27 +380,29 @@ fn attach_child_webview_accelerators(app: AppHandle, child_wv: &tauri::Webview) 
                             || kind == COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN
                         {
                             let ctrl_down = (GetKeyState(VK_CONTROL) as u16 & 0x8000) != 0;
+                            let shift_down = (GetKeyState(VK_SHIFT) as u16 & 0x8000) != 0;
                             if ctrl_down {
                                 let mut key: u32 = 0;
                                 let _ = args.VirtualKey(&mut key);
-                                let cmd = match key {
-                                    0x4E => Some("new_conversation"),     // Ctrl+N
-                                    0x4B => Some("filter_conversations"), // Ctrl+K
-                                    0x54 => Some("new_tab"),              // Ctrl+T
-                                    0x57 => Some("close_tab"),            // Ctrl+W
-                                    0x4C => Some("focus_address"),        // Ctrl+L
-                                    0x4A => Some("toggle_agent_rail"),    // Ctrl+J
-                                    0x4D => Some("toggle_compare"),       // Ctrl+M
-                                    0x44 => Some("bookmark_current"),     // Ctrl+D
-                                    0x31 => Some("tab_chat"),             // Ctrl+1
-                                    0x32 => Some("tab_2"),                // Ctrl+2
-                                    0x33 => Some("tab_3"),                // Ctrl+3
-                                    0x34 => Some("tab_4"),                // Ctrl+4
-                                    0x35 => Some("tab_5"),                // Ctrl+5
-                                    0x36 => Some("tab_6"),                // Ctrl+6
-                                    0x37 => Some("tab_7"),                // Ctrl+7
-                                    0x38 => Some("tab_8"),                // Ctrl+8
-                                    0x39 => Some("tab_9"),                // Ctrl+9
+                                let cmd = match (key, shift_down) {
+                                    (0x4C, true) => Some("fill_login"),           // Ctrl+Shift+L
+                                    (0x4E, false) => Some("new_conversation"),     // Ctrl+N
+                                    (0x4B, false) => Some("filter_conversations"), // Ctrl+K
+                                    (0x54, false) => Some("new_tab"),              // Ctrl+T
+                                    (0x57, false) => Some("close_tab"),            // Ctrl+W
+                                    (0x4C, false) => Some("focus_address"),        // Ctrl+L
+                                    (0x4A, false) => Some("toggle_agent_rail"),    // Ctrl+J
+                                    (0x4D, false) => Some("toggle_compare"),       // Ctrl+M
+                                    (0x44, false) => Some("bookmark_current"),     // Ctrl+D
+                                    (0x31, false) => Some("tab_chat"),             // Ctrl+1
+                                    (0x32, false) => Some("tab_2"),                // Ctrl+2
+                                    (0x33, false) => Some("tab_3"),                // Ctrl+3
+                                    (0x34, false) => Some("tab_4"),                // Ctrl+4
+                                    (0x35, false) => Some("tab_5"),                // Ctrl+5
+                                    (0x36, false) => Some("tab_6"),                // Ctrl+6
+                                    (0x37, false) => Some("tab_7"),                // Ctrl+7
+                                    (0x38, false) => Some("tab_8"),                // Ctrl+8
+                                    (0x39, false) => Some("tab_9"),                // Ctrl+9
                                     _ => None, // Ctrl+F (0x46) left to WebView2 find-in-page
                                 };
                                 if let Some(action) = cmd {
@@ -489,13 +497,22 @@ const DOM_CAPTURE_JS: &str = r#"(() => {
         parts.push('[MAIN VIEWPORT CONTENT]\n' + mainTxt.slice(0, 60000));
       }
     }
-    const bodyTxt = document.body && document.body.innerText ? document.body.innerText.trim() : '';
+    let bodyTxt = document.body && document.body.innerText ? document.body.innerText.trim() : '';
     if (bodyTxt) {
       parts.push('[FULL PAGE VISIBLE TEXT]\n' + bodyTxt.slice(0, 80000));
+    }
+    const passEls = document.querySelectorAll('input[type="password"]');
+    let hasVisiblePass = false;
+    for (let i = 0; i < passEls.length; i++) {
+      if (passEls[i].offsetParent !== null) {
+        hasVisiblePass = true;
+        break;
+      }
     }
     return JSON.stringify({
       url: location.href,
       title: document.title,
+      has_password_field: hasVisiblePass,
       visible_text: parts.join('\n\n').slice(0, 120000),
       html: document.documentElement ? document.documentElement.outerHTML.slice(0, 1500000) : ''
     });
@@ -503,6 +520,7 @@ const DOM_CAPTURE_JS: &str = r#"(() => {
     return JSON.stringify({
       url: location.href,
       title: document.title,
+      has_password_field: false,
       visible_text: document.body ? (document.body.innerText || '').slice(0, 100000) : '',
       html: ''
     });
@@ -520,58 +538,78 @@ fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+fn sidecar_port_and_token<R: tauri::Runtime>(app: &AppHandle<R>) -> (u16, String) {
+    if let Some(sc) = app.try_state::<SidecarState>() {
+        return (sc.settings.port, sc.token.clone());
+    }
+    (8020, String::new())
+}
+
 /// Captures the rendered DOM + visible text on Windows via WebView2 `ExecuteScript`
 /// and posts `{conversation_id, source_id, url, title, visible_text, html}` to `POST /ingest`.
+/// Section 2.3: Never triggers autofill during capture.
 fn trigger_dom_capture_and_ingest<R: tauri::Runtime>(
     app: AppHandle<R>,
     webview: tauri::Webview<R>,
     tab_id: String,
     fallback_url: String,
 ) {
-    let wv_for_auth = webview.clone();
-    let url_for_auth = fallback_url.clone();
-    std::thread::spawn(move || {
-        let _ = try_autofill_profile_credentials_on_webview(&wv_for_auth, &url_for_auth, false);
-    });
     trigger_dom_capture_with_completion(app, webview, tab_id, fallback_url, None);
 }
 
 pub fn autofill_tab_credentials_impl(
     app: &AppHandle,
     tab_id: &str,
-    auto_submit: bool,
+    _auto_submit: bool,
 ) -> Result<bool, String> {
     let label = tab_webview_label(tab_id);
     let Some(wv) = app.get_webview(&label) else {
         return Ok(false);
     };
     let url_str = wv.url().ok().map(|u| u.to_string()).unwrap_or_default();
+    let (port, token) = sidecar_port_and_token(app);
     Ok(try_autofill_profile_credentials_on_webview(
         &wv,
         &url_str,
-        auto_submit,
+        port,
+        &token,
     ))
 }
 
 fn try_autofill_profile_credentials_on_webview<R: tauri::Runtime>(
     webview: &tauri::Webview<R>,
     url: &str,
-    auto_submit: bool,
+    port: u16,
+    token: &str,
 ) -> bool {
     if url.is_empty() {
         return false;
     }
+    let Ok(parsed_page_url) = Url::parse(url) else {
+        return false;
+    };
+    if parsed_page_url.scheme() != "http" && parsed_page_url.scheme() != "https" {
+        return false;
+    }
+    let expected_origin = parsed_page_url.origin().ascii_serialization();
+    if expected_origin.is_empty() || expected_origin == "null" {
+        return false;
+    }
+
     let req_body = serde_json::json!({ "target": url }).to_string();
-    let Ok(mut stream) = TcpStream::connect_timeout(
-        &"127.0.0.1:8020".parse().unwrap(),
-        Duration::from_millis(400),
-    ) else {
+    let addr_str = format!("127.0.0.1:{}", port);
+    let Ok(sock_addr) = addr_str.parse() else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&sock_addr, Duration::from_millis(400)) else {
         return false;
     };
     let _ = stream.set_write_timeout(Some(Duration::from_millis(800)));
     let _ = stream.set_read_timeout(Some(Duration::from_millis(800)));
     let req = format!(
-        "POST /passwords/match HTTP/1.1\r\nHost: 127.0.0.1:8020\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST /passwords/match HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nX-Satz-Token: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        port,
+        token,
         req_body.len(),
         req_body
     );
@@ -605,14 +643,21 @@ fn try_autofill_profile_credentials_on_webview<R: tauri::Runtime>(
 
     let u_json = serde_json::to_string(username).unwrap_or_else(|_| "\"\"".to_string());
     let p_json = serde_json::to_string(password).unwrap_or_else(|_| "\"\"".to_string());
-    let submit_lit = if auto_submit { "true" } else { "false" };
+    let orig_json = serde_json::to_string(&expected_origin).unwrap_or_else(|_| "\"\"".to_string());
 
+    // Section 2.3:
+    // - Only runs on explicit user action
+    // - Verifies `window.location.origin === expectedOrigin`
+    // - Only fills top frame (`window.top === window.self`)
+    // - Never auto-submits the form
     let js = format!(
         r#"(() => {{
             try {{
+                if (window.top !== window.self) return false;
+                const expectedOrigin = {orig_json};
+                if (!expectedOrigin || window.location.origin !== expectedOrigin) return false;
                 const uVal = {u_json};
                 const pVal = {p_json};
-                const doSubmit = {submit_lit};
                 const setNativeValue = (el, val) => {{
                     const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
                     if (desc && desc.set) {{ desc.set.call(el, val); }} else {{ el.value = val; }}
@@ -620,16 +665,16 @@ fn try_autofill_profile_credentials_on_webview<R: tauri::Runtime>(
                     el.dispatchEvent(new Event('change', {{ bubbles: true }}));
                 }};
                 const passInputs = Array.from(document.querySelectorAll('input[type="password"]')).filter(el => el.offsetParent !== null);
+                if (passInputs.length === 0) return false;
                 const userInputs = Array.from(document.querySelectorAll('input[type="email"], input[name*="user" i], input[name*="email" i], input[name*="login" i], input[autocomplete="username"], input[type="text"]')).filter(el => el.offsetParent !== null);
                 let filled = false;
                 if (uVal && userInputs.length > 0) {{
-                    const uEl = userInputs[0];
-                    if (!uEl.value || doSubmit) {{ setNativeValue(uEl, uVal); filled = true; }}
+                    setNativeValue(userInputs[0], uVal);
+                    filled = true;
                 }}
                 if (pVal && passInputs.length > 0) {{
-                    const pEl = passInputs[0];
-                    if (!pEl.value || doSubmit) {{ setNativeValue(pEl, pVal); filled = true; }}
-                    if (doSubmit && pEl.form) {{ pEl.form.requestSubmit ? pEl.form.requestSubmit() : pEl.form.submit(); }}
+                    setNativeValue(passInputs[0], pVal);
+                    filled = true;
                 }}
                 return filled;
             }} catch (e) {{ return false; }}
@@ -758,6 +803,10 @@ fn handle_captured_dom_json<R: tauri::Runtime>(
                 .and_then(|v| v.as_str())
                 .unwrap_or(fallback_url);
             let title = parsed.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            let has_password_field = parsed
+                .get("has_password_field")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let visible_text = parsed.get("visible_text").and_then(|v| v.as_str());
             let html = parsed.get("html").and_then(|v| v.as_str());
 
@@ -768,6 +817,21 @@ fn handle_captured_dom_json<R: tauri::Runtime>(
                     let _ = db.record_tab_navigation_or_title(tab_id, url_opt, title_opt);
                 }
             }
+
+            let _ = app.emit(
+                "tab-page-event",
+                TabPageEventPayload {
+                    tab_id: tab_id.to_string(),
+                    event_type: "dom_captured".to_string(),
+                    url: Some(url.to_string()),
+                    title: if title.is_empty() {
+                        None
+                    } else {
+                        Some(title.to_string())
+                    },
+                    has_password_field: Some(has_password_field),
+                },
+            );
 
             post_ingest_to_sidecar(app, tab_id, url, title, visible_text, html);
             return;
@@ -817,15 +881,20 @@ fn post_ingest_to_sidecar<R: tauri::Runtime>(
         "html": capped_html,
     });
 
+    let (port, token) = sidecar_port_and_token(app);
+    let addr_str = format!("127.0.0.1:{}", port);
+    let Ok(sock_addr) = addr_str.parse() else {
+        return;
+    };
+
     let body_bytes = payload.to_string().into_bytes();
-    if let Ok(mut stream) = TcpStream::connect_timeout(
-        &"127.0.0.1:8020".parse().unwrap(),
-        Duration::from_millis(800),
-    ) {
+    if let Ok(mut stream) = TcpStream::connect_timeout(&sock_addr, Duration::from_millis(800)) {
         let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
         let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
         let req = format!(
-            "POST /ingest HTTP/1.1\r\nHost: 127.0.0.1:8020\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "POST /ingest HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nX-Satz-Token: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            port,
+            token,
             body_bytes.len()
         );
         let _ = stream.write_all(req.as_bytes());
