@@ -8,6 +8,7 @@ import type {
   KnowledgeSummary,
   LocalModelId,
   SidecarHealth,
+  SourceStatEntry,
 } from "./types";
 
 export const IS_MAC =
@@ -47,6 +48,8 @@ export interface AppState {
   tabCanFillLogin: Record<string, boolean>;
   messageProposals: Record<string, BrainProposalItem[]>;
   revealedPasswords: Record<string, string>;
+  sourceStats: Record<string, SourceStatEntry>;
+  showErrorLog: boolean;
 }
 
 export const state: AppState = {
@@ -81,6 +84,7 @@ export const state: AppState = {
     ],
     ingest_queue_len: 0,
     pause_learning: false,
+    errors: [],
   },
   digestItems: [],
   knowledge: {
@@ -96,6 +100,8 @@ export const state: AppState = {
   tabCanFillLogin: {},
   messageProposals: {},
   revealedPasswords: {},
+  sourceStats: {},
+  showErrorLog: false,
 };
 
 export function escapeHtml(str: string): string {

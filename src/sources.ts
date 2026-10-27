@@ -41,19 +41,28 @@ export function renderSourcesPanel(
                       ? `tab ${matchingTabIdx + 2}`
                       : `earlier`;
                 }
-                const timeStr = formatTimeHhMm(src.added_at);
+                const timeStr = formatTimeHhMm(src.captured_at || src.added_at);
                 const checkMark = src.in_context ? "[x]" : "[ ]";
+                const stat = state.sourceStats[src.id];
+                const charsCaptured =
+                  stat?.chars_captured ?? src.text_chars ?? 0;
+                const charsSent =
+                  stat?.chars_sent ??
+                  (src.in_context ? Math.min(6000, charsCaptured) : 0);
+                const wasCut = stat?.was_cut ?? charsCaptured > 6000;
+                const charsBadge = `${charsSent.toLocaleString()} / ${charsCaptured.toLocaleString()} chars${wasCut ? " · cut" : ""}`;
                 return `
                   <div class="source-row" data-source-id="${escapeHtml(src.id)}">
                     <div class="source-row-top">
                       <button class="rail-menu-btn" data-toggle-src="${escapeHtml(src.id)}" data-current-ctx="${src.in_context ? "1" : "0"}">${checkMark}</button>
                       <span class="muted">[${idx + 1}]</span>
                       <span class="truncate">${escapeHtml(src.domain)}</span>
-                      <span class="muted">${escapeHtml(locationLabel)} · ${escapeHtml(timeStr)}</span>
+                      <span class="muted">${escapeHtml(locationLabel)} · captured ${escapeHtml(timeStr)}</span>
                     </div>
                     <div class="source-row-title truncate" data-jump-src="${escapeHtml(src.id)}">
                       ${escapeHtml(src.title || src.url)}
                     </div>
+                    <div class="muted">${escapeHtml(charsBadge)}</div>
                   </div>
                 `;
               })

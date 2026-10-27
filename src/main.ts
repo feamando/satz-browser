@@ -18,6 +18,7 @@ import {
   apiRemoveBookmark,
   apiRenameConversation,
   apiSetConversationSummary,
+  apiSetSourceInContext,
   sidecarAcceptBrainProposal,
   sidecarCreateProfile,
   sidecarDeleteBrainEntity,
@@ -51,6 +52,7 @@ import {
 import { bindKeyboardShortcuts } from "./keys";
 import { renderKnowledgeView } from "./knowledge";
 import { renderRail } from "./rail";
+import { renderSourcesPanel } from "./sources";
 import { renderStartScreen } from "./start";
 import {
   classifyStartInput,
@@ -632,11 +634,33 @@ function renderViewportRegion(): void {
     viewport.innerHTML = `
       <div class="chat-view">
         <div class="viewport-primary" id="chat-main-container"></div>
+        ${
+          state.agentRailOpen
+            ? `<aside class="right-panel" id="chat-sources-rail"></aside>`
+            : ""
+        }
       </div>
     `;
     const chatEl = document.getElementById("chat-main-container");
     if (chatEl) {
       renderChatPanel(chatEl, getChatActions());
+    }
+    const sourcesEl = document.getElementById("chat-sources-rail");
+    if (sourcesEl) {
+      renderSourcesPanel(sourcesEl, {
+        onToggleSourceInContext: async (sourceId, inContext) => {
+          await apiSetSourceInContext(sourceId, inContext);
+          if (state.activeDetail) {
+            state.activeDetail = await apiGetConversation(
+              state.activeDetail.conversation.id
+            );
+          }
+          renderViewportRegion();
+        },
+        onJumpToSource: (src) => {
+          void handleCitationClick(1, src.id);
+        },
+      });
     }
     scheduleWebviewLayoutSync();
     return;
@@ -1211,10 +1235,22 @@ async function handleSendChatMessage(text: string): Promise<void> {
       (errText) => {
         updateStreamingStatus(`error: ${errText}`, "error");
       },
-      convSummary
+      convSummary,
+      (stats) => {
+        for (const st of stats) {
+          state.sourceStats[st.id] = st;
+        }
+      }
     );
 
+    if (streamRes.source_stats) {
+      for (const st of streamRes.source_stats) {
+        state.sourceStats[st.id] = st;
+      }
+    }
+
     const finalContent =
+      streamRes.annotated_text ||
       state.streamingText ||
       (streamRes.error ? `[err] ${streamRes.error}` : "(no response)");
     stopStreamingProgress();
@@ -1224,7 +1260,12 @@ async function handleSendChatMessage(text: string): Promise<void> {
       "assistant",
       finalContent,
       state.selectedModel,
-      JSON.stringify(streamRes.source_ids)
+      JSON.stringify(streamRes.source_ids),
+      typeof streamRes.citations_ok === "number" ? streamRes.citations_ok : null,
+      typeof streamRes.citations_flagged === "number"
+        ? streamRes.citations_flagged
+        : null,
+      streamRes.citation_check ? JSON.stringify(streamRes.citation_check) : null
     );
     if (streamRes.proposals && streamRes.proposals.length > 0) {
       state.messageProposals[savedMsg.id] = streamRes.proposals;

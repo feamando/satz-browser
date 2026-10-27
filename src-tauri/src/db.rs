@@ -53,6 +53,12 @@ pub struct ChatMessage {
     pub model: Option<String>,
     pub source_ids_json: Option<String>,
     pub created_at: String,
+    #[serde(default)]
+    pub citations_ok: Option<i64>,
+    #[serde(default)]
+    pub citations_flagged: Option<i64>,
+    #[serde(default)]
+    pub citation_check_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,6 +233,9 @@ impl DbState {
                 model TEXT NULL,
                 source_ids_json TEXT NULL,
                 created_at TEXT NOT NULL,
+                citations_ok INTEGER NULL,
+                citations_flagged INTEGER NULL,
+                citation_check_json TEXT NULL,
                 FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
             );
 
@@ -262,6 +271,29 @@ impl DbState {
             .unwrap_or(false);
         if !has_summary_col {
             conn.execute("ALTER TABLE conversations ADD COLUMN summary TEXT NULL", [])?;
+        }
+
+        for (col_name, col_type) in [
+            ("citations_ok", "INTEGER NULL"),
+            ("citations_flagged", "INTEGER NULL"),
+            ("citation_check_json", "TEXT NULL"),
+        ] {
+            let has_col: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = ?1",
+                    params![col_name],
+                    |r| {
+                        let c: i64 = r.get(0)?;
+                        Ok(c > 0)
+                    },
+                )
+                .unwrap_or(false);
+            if !has_col {
+                conn.execute(
+                    &format!("ALTER TABLE messages ADD COLUMN {} {}", col_name, col_type),
+                    [],
+                )?;
+            }
         }
 
         let bookmarks_seeded: Option<String> = conn
@@ -547,7 +579,8 @@ impl DbState {
             .collect::<SqlResult<Vec<_>>>()?;
 
         let mut msg_stmt = conn.prepare(
-            "SELECT id, conversation_id, role, content, model, source_ids_json, created_at
+            "SELECT id, conversation_id, role, content, model, source_ids_json, created_at,
+                    citations_ok, citations_flagged, citation_check_json
              FROM messages
              WHERE conversation_id = ?1
              ORDER BY created_at ASC, id ASC",
@@ -562,6 +595,9 @@ impl DbState {
                     model: row.get(4)?,
                     source_ids_json: row.get(5)?,
                     created_at: row.get(6)?,
+                    citations_ok: row.get(7)?,
+                    citations_flagged: row.get(8)?,
+                    citation_check_json: row.get(9)?,
                 })
             })?
             .collect::<SqlResult<Vec<_>>>()?;
@@ -976,13 +1012,47 @@ impl DbState {
         model: Option<&str>,
         source_ids_json: Option<&str>,
     ) -> SqlResult<ChatMessage> {
+        self.add_message_with_citations(
+            conversation_id,
+            role,
+            content,
+            model,
+            source_ids_json,
+            None,
+            None,
+            None,
+        )
+    }
+
+    pub fn add_message_with_citations(
+        &self,
+        conversation_id: &str,
+        role: &str,
+        content: &str,
+        model: Option<&str>,
+        source_ids_json: Option<&str>,
+        citations_ok: Option<i64>,
+        citations_flagged: Option<i64>,
+        citation_check_json: Option<&str>,
+    ) -> SqlResult<ChatMessage> {
         let conn = self.conn.lock().unwrap();
         let id = gen_id("msg");
         let ts = now_epoch_secs_str();
         conn.execute(
-            "INSERT INTO messages (id, conversation_id, role, content, model, source_ids_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![id, conversation_id, role, content, model, source_ids_json, ts],
+            "INSERT INTO messages (id, conversation_id, role, content, model, source_ids_json, created_at, citations_ok, citations_flagged, citation_check_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                id,
+                conversation_id,
+                role,
+                content,
+                model,
+                source_ids_json,
+                ts,
+                citations_ok,
+                citations_flagged,
+                citation_check_json
+            ],
         )?;
         conn.execute(
             "UPDATE conversations SET last_active_at = ?2 WHERE id = ?1",
@@ -996,6 +1066,9 @@ impl DbState {
             model: model.map(|s| s.to_string()),
             source_ids_json: source_ids_json.map(|s| s.to_string()),
             created_at: ts,
+            citations_ok,
+            citations_flagged,
+            citation_check_json: citation_check_json.map(|s| s.to_string()),
         })
     }
 
@@ -1271,5 +1344,66 @@ mod tests {
 
         let after = state.get_conversation("conv-m9-mig").unwrap();
         assert_eq!(after.conversation.summary.as_deref().map(|s| s.len()), Some(600));
+    }
+
+    #[test]
+    fn test_messages_citation_columns_migration_and_persistence() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema_version', '2');
+            CREATE TABLE conversations (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                pinned INTEGER NOT NULL DEFAULT 0,
+                origin TEXT NOT NULL DEFAULT 'chat',
+                created_at TEXT NOT NULL,
+                last_active_at TEXT NOT NULL
+            );
+            CREATE TABLE messages (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user',
+                content TEXT NOT NULL,
+                model TEXT NULL,
+                source_ids_json TEXT NULL,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO conversations (id, title, status, pinned, origin, created_at, last_active_at)
+            VALUES ('conv-m10', 'Citation Test', 'active', 0, 'chat', '1700000000', '1700000000');
+            ",
+        )
+        .unwrap();
+
+        DbState::init_connection(&conn).unwrap();
+        let state = DbState {
+            conn: Mutex::new(conn),
+            db_path: PathBuf::from(":memory:"),
+        };
+
+        let check_json = r#"[{"n":1,"sentence_idx":0,"ok":false,"missing":["999"]}]"#;
+        state
+            .add_message_with_citations(
+                "conv-m10",
+                "assistant",
+                "The price is 999 [1].",
+                Some("gemma-4-e4b"),
+                Some(r#"["src-1"]"#),
+                Some(0),
+                Some(1),
+                Some(check_json),
+            )
+            .unwrap();
+
+        let detail = state.get_conversation("conv-m10").unwrap();
+        assert_eq!(detail.messages.len(), 1);
+        assert_eq!(detail.messages[0].citations_ok, Some(0));
+        assert_eq!(detail.messages[0].citations_flagged, Some(1));
+        assert_eq!(
+            detail.messages[0].citation_check_json.as_deref(),
+            Some(check_json)
+        );
     }
 }

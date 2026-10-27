@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import hashlib
 import hmac
 import json
 import os
@@ -30,6 +31,8 @@ import secrets
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -96,6 +99,208 @@ def is_factual_question(text: str) -> bool:
     return False
 
 
+_SENTENCE_INITIAL_SKIP_WORDS = {
+    "according",
+    "additionally",
+    "also",
+    "based",
+    "currently",
+    "email",
+    "finally",
+    "first",
+    "furthermore",
+    "here",
+    "however",
+    "meanwhile",
+    "moreover",
+    "next",
+    "no",
+    "note",
+    "overall",
+    "page",
+    "second",
+    "source",
+    "sources",
+    "summary",
+    "tab",
+    "therefore",
+    "third",
+    "today",
+    "total",
+    "yes",
+}
+
+
+def check_citations(
+    answer_text: str,
+    hydrated_sources: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """
+    Section 3.3 (M10): Deterministic post-stream citation check.
+    - Splits the answer into sentences (`planck3.candidates.split_sentences`).
+    - For each sentence with `[n]`:
+      - `n` outside the source list -> removes the marker and marks the sentence `[unsourced]`.
+      - Every number, date and capitalised name in the sentence must appear in source `n`'s text
+        (case-insensitive, numbers normalised). If not, records `ok: False, missing: [...]`.
+    Returns:
+      {
+        "citation_check": [{n, sentence_idx, ok, missing}],
+        "citations_ok": int,
+        "citations_flagged": int,
+        "annotated_text": str,
+      }
+    """
+    from src.planck3.candidates import RE_DATE, RE_NUMBER, _entities, split_sentences
+
+    raw_text = (answer_text or "").strip()
+    if not raw_text:
+        return {
+            "citation_check": [],
+            "citations_ok": 0,
+            "citations_flagged": 0,
+            "annotated_text": answer_text,
+        }
+
+    # Separate trailing [brain: stored ...] lines so they are preserved untouched
+    brain_tail_idx = raw_text.find("\n\n[brain: stored ")
+    if brain_tail_idx != -1:
+        body_to_check = raw_text[:brain_tail_idx]
+        brain_tail = raw_text[brain_tail_idx:]
+    else:
+        body_to_check = raw_text
+        brain_tail = ""
+
+    # Protect [n] markers before calling split_sentences (which strips [\d+])
+    protected = re.sub(r"\[(\d+)\]", r"__SATZCITE_\1__", body_to_check)
+    raw_sents = split_sentences(protected, max_len=2000)
+    if not raw_sents and protected.strip():
+        raw_sents = [protected.strip()]
+
+    sentences = [re.sub(r"__SATZCITE_(\d+)__", r"[\1]", s) for s in raw_sents]
+    num_sources = len(hydrated_sources)
+
+    # Pre-normalize each source's full text
+    norm_sources: list[tuple[str, str]] = []
+    for src in hydrated_sources:
+        combined = " ".join(
+            str(src.get(k) or "")
+            for k in ("title", "domain", "url", "full_text", "text")
+        )
+        lower_src = combined.lower()
+        norm_num_src = re.sub(r"(?<=\d)[,\u00a0\u202f\u2009](?=\d)", "", lower_src)
+        norm_sources.append((lower_src, norm_num_src))
+
+    results: list[dict[str, Any]] = []
+    ok_count = 0
+    flagged_count = 0
+
+    for sent_idx, sent in enumerate(sentences):
+        cite_matches = [int(m.group(1)) for m in re.finditer(r"\[(\d+)\]", sent)]
+        if not cite_matches:
+            continue
+
+        # Sentence text without citation markers for fact extraction
+        clean_sent = re.sub(r"\[\d+\]", "", sent).strip()
+
+        # 1. Extract dates
+        dates_in_sent = [m.group(1).strip() for m in RE_DATE.finditer(clean_sent)]
+
+        # 2. Extract numbers (excluding bare numbers that are part of an extracted date)
+        date_spans = [m.span() for m in RE_DATE.finditer(clean_sent)]
+        numbers_in_sent: list[tuple[str, str]] = []
+        for m in RE_NUMBER.finditer(clean_sent):
+            st, en = m.span(1)
+            if any(st >= ds and en <= de for ds, de in date_spans):
+                continue
+            raw_num = m.group(1).strip()
+            norm_num = re.sub(r"[,\u00a0\u202f\u2009]", "", raw_num)
+            if norm_num:
+                numbers_in_sent.append((raw_num, norm_num))
+
+        # 3. Extract capitalised names
+        names_in_sent: list[str] = []
+        for ent_text, pos in _entities(clean_sent):
+            cleaned_ent = ent_text.strip(".,;:()[]\"'!?")
+            if len(cleaned_ent) < 2:
+                continue
+            words = cleaned_ent.split()
+            if pos == 0 and len(words) == 1 and words[0].lower() in _SENTENCE_INITIAL_SKIP_WORDS:
+                continue
+            if cleaned_ent.lower() in _SENTENCE_INITIAL_SKIP_WORDS:
+                continue
+            names_in_sent.append(cleaned_ent)
+
+        seen_n_in_sent: set[int] = set()
+        for n in cite_matches:
+            if n in seen_n_in_sent:
+                continue
+            seen_n_in_sent.add(n)
+
+            if n < 1 or n > num_sources:
+                results.append(
+                    {
+                        "n": n,
+                        "sentence_idx": sent_idx,
+                        "ok": False,
+                        "out_of_range": True,
+                        "missing": [f"source [{n}] out of range (1..{num_sources})"],
+                    }
+                )
+                flagged_count += 1
+                continue
+
+            lower_src, norm_num_src = norm_sources[n - 1]
+            missing: list[str] = []
+
+            for d_str in dates_in_sent:
+                if d_str.lower() not in lower_src:
+                    if d_str not in missing:
+                        missing.append(d_str)
+
+            for raw_num, norm_num in numbers_in_sent:
+                if norm_num.lower() not in norm_num_src and raw_num.lower() not in lower_src:
+                    if raw_num not in missing:
+                        missing.append(raw_num)
+
+            for name_str in names_in_sent:
+                name_low = name_str.lower()
+                if name_low not in lower_src:
+                    parts = [w.lower() for w in name_str.split() if len(w) >= 2]
+                    if not parts or not all(p in lower_src for p in parts):
+                        if name_str not in missing:
+                            missing.append(name_str)
+
+            is_ok = len(missing) == 0
+            if is_ok:
+                ok_count += 1
+            else:
+                flagged_count += 1
+            results.append(
+                {
+                    "n": n,
+                    "sentence_idx": sent_idx,
+                    "ok": is_ok,
+                    "missing": missing,
+                }
+            )
+
+    def _replace_out_of_range(match: re.Match) -> str:
+        n_val = int(match.group(1))
+        if n_val < 1 or n_val > num_sources:
+            return "[unsourced]"
+        return match.group(0)
+
+    annotated_body = re.sub(r"\[(\d+)\]", _replace_out_of_range, body_to_check)
+    annotated_text = annotated_body + brain_tail
+
+    return {
+        "citation_check": results,
+        "citations_ok": ok_count,
+        "citations_flagged": flagged_count,
+        "annotated_text": annotated_text,
+    }
+
+
 class SatzSidecarRuntime:
     def __init__(
         self,
@@ -104,12 +309,17 @@ class SatzSidecarRuntime:
         gemma_rel_path: str = "models/gemma-4-e4b-it",
         open_tab_char_budget: int = 6000,
         total_context_char_budget: int = 32000,
+        bookmark_interval_minutes: float = 30.0,
     ):
         self.sgs_root = sgs_root.resolve()
         self.store_path = store_path.resolve()
         self.gemma_rel_path = gemma_rel_path
         self.open_tab_char_budget = open_tab_char_budget
         self.total_context_char_budget = total_context_char_budget
+
+        # Section 3.4 (M10): Ring buffer of the last 50 errors
+        self.error_lock = threading.Lock()
+        self.error_log: collections.deque[dict[str, Any]] = collections.deque(maxlen=50)
 
         sidecar_dir = str(Path(__file__).resolve().parent)
         if sidecar_dir not in sys.path:
@@ -163,11 +373,41 @@ class SatzSidecarRuntime:
         self.ingest_queue: queue.Queue[dict[str, Any]] = queue.Queue()
         self.pause_learning = self._load_pause_learning()
         self.bookmark_wake_event = threading.Event()
-        self.bookmark_Refresh_interval_secs = 180.0
+        self.bookmark_pass_lock = threading.Lock()
+        self.bookmark_refresh_interval_secs = max(1.0, float(bookmark_interval_minutes) * 60.0)
+        self.bookmark_Refresh_interval_secs = self.bookmark_refresh_interval_secs
+        self.domain_backoff: dict[str, dict[str, float]] = {}
+        self.bookmark_stats: dict[str, int] = {
+            "indexed": 0,
+            "skipped_interval": 0,
+            "skipped_304": 0,
+            "skipped_hash": 0,
+            "skipped_backoff": 0,
+            "errors": 0,
+        }
         self.worker_thread = threading.Thread(target=self._ingest_worker_loop, daemon=True)
         self.worker_thread.start()
         self.bookmark_thread = threading.Thread(target=self._bookmark_indexer_loop, daemon=True)
         self.bookmark_thread.start()
+
+    def record_error(self, scope: str, err: Exception | str) -> dict[str, Any]:
+        entry = {
+            "ts": round(time.time(), 3),
+            "scope": str(scope),
+            "message": str(err),
+        }
+        with self.error_lock:
+            self.error_log.append(entry)
+        print(f"[satz-sidecar] [{scope}] {err}", flush=True)
+        return entry
+
+    def get_errors(self) -> list[dict[str, Any]]:
+        with self.error_lock:
+            return list(self.error_log)
+
+    def clear_errors(self) -> None:
+        with self.error_lock:
+            self.error_log.clear()
 
     def _refresh_active_profile_brain(self) -> None:
         from satz_brain import SatzBrain
@@ -183,7 +423,7 @@ class SatzSidecarRuntime:
                 self.ensure_gemma()
                 print("[satz-sidecar] gemma [warm] - preload complete", flush=True)
             except Exception as e:
-                print(f"[satz-sidecar] gemma preload warning: {e}", flush=True)
+                self.record_error("gemma_preload", e)
 
         t = threading.Thread(target=_preload, daemon=True)
         t.start()
@@ -227,7 +467,13 @@ class SatzSidecarRuntime:
                     title TEXT NOT NULL,
                     last_indexed_at REAL NOT NULL DEFAULT 0.0,
                     text_chars INTEGER NOT NULL DEFAULT 0,
-                    status TEXT NOT NULL DEFAULT 'pending'
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    etag TEXT,
+                    last_modified TEXT,
+                    content_hash TEXT,
+                    changed_at REAL DEFAULT 0.0,
+                    error_count INTEGER DEFAULT 0,
+                    backoff_until REAL DEFAULT 0.0
                 );
 
                 CREATE TABLE IF NOT EXISTS satz_meta (
@@ -236,6 +482,22 @@ class SatzSidecarRuntime:
                 );
                 """
             )
+            existing_bm_cols = {
+                r["name"]
+                for r in self.store.db.execute("PRAGMA table_info('satz_bookmarks')").fetchall()
+            }
+            for col_name, col_def in (
+                ("etag", "TEXT"),
+                ("last_modified", "TEXT"),
+                ("content_hash", "TEXT"),
+                ("changed_at", "REAL DEFAULT 0.0"),
+                ("error_count", "INTEGER DEFAULT 0"),
+                ("backoff_until", "REAL DEFAULT 0.0"),
+            ):
+                if col_name not in existing_bm_cols:
+                    self.store.db.execute(
+                        f"ALTER TABLE satz_bookmarks ADD COLUMN {col_name} {col_def}"
+                    )
             # Purge any historical source rows where unclosed <style> blocks polluted trafilatura fallback with raw CSS
             self.store.db.execute(
                 "DELETE FROM satz_sources WHERE text LIKE '%.J-J5-Ji{%' OR text LIKE '%{position:relative;display:%'"
@@ -336,6 +598,7 @@ class SatzSidecarRuntime:
             ],
             "ingest_queue_len": self.ingest_queue.qsize(),
             "pause_learning": self.pause_learning,
+            "errors": self.get_errors(),
         }
 
     # ── Lazy Model Loaders ───────────────────────────────────────────────
@@ -474,10 +737,13 @@ class SatzSidecarRuntime:
         # Only fall back to unauthenticated python web.fetch if no DOM html or visible_text was provided
         if not text and not html and not clean_visible and url and url.startswith(("http://", "https://")):
             capture_mode = "fetch"
-            page = self.web.fetch(url)
-            if page.get("html"):
-                text = extract_main_text(page["html"], url)
-                extra_lines = extract_jsonld(page["html"])
+            try:
+                page = self.web.fetch(url)
+                if page.get("html"):
+                    text = extract_main_text(page["html"], url)
+                    extra_lines = extract_jsonld(page["html"])
+            except Exception as fe:
+                self.record_error("web_fetch", f"{url}: {fe}")
 
         effective_title = (title or domain or url or "untitled").strip()
         now = time.time()
@@ -573,7 +839,7 @@ class SatzSidecarRuntime:
                         conversation_id=conv_id,
                     )
                 except Exception as be:
-                    print(f"[satz-sidecar] brain enrich error: {be}", flush=True)
+                    self.record_error("brain_enrich", f"{url}: {be}")
 
                 entity = main_entity(title) or title[:60]
                 query_str = f"{title} {domain}".strip()
@@ -614,12 +880,12 @@ class SatzSidecarRuntime:
                             )
                         self.store.db.commit()
             except Exception as e:
-                print(f"[satz-sidecar] ingest worker error: {e}", flush=True)
+                self.record_error("ingest_worker", e)
             finally:
                 self.ingest_queue.task_done()
 
     # ── Continuous Background Bookmark Indexer ───────────────────────────
-    def sync_bookmarks(self, bookmarks: list[dict[str, Any]]) -> dict[str, Any]:
+    def sync_bookmarks(self, bookmarks: list[dict[str, Any]], wake: bool = True) -> dict[str, Any]:
         """
         Syncs the active bookmark list into `satz_bookmarks` and wakes the background
         bookmark indexer so bookmarked sources are continuously indexed and updated.
@@ -659,13 +925,19 @@ class SatzSidecarRuntime:
                 self.store.db.execute("DELETE FROM satz_bookmarks")
             self.store.db.commit()
 
-        self.bookmark_wake_event.set()
+        if wake:
+            self.bookmark_wake_event.set()
         return {"ok": True, "bookmarks_count": len(incoming_ids)}
 
     def get_bookmarks_status(self) -> list[dict[str, Any]]:
         with self.store_lock:
             rows = self.store.db.execute(
-                "SELECT bookmark_id, url, domain, title, last_indexed_at, text_chars, status FROM satz_bookmarks ORDER BY last_indexed_at DESC"
+                """
+                SELECT bookmark_id, url, domain, title, last_indexed_at, text_chars, status,
+                       etag, last_modified, content_hash, changed_at, error_count, backoff_until
+                FROM satz_bookmarks
+                ORDER BY last_indexed_at DESC
+                """
             ).fetchall()
             return [
                 {
@@ -676,43 +948,117 @@ class SatzSidecarRuntime:
                     "last_indexed_at": float(r["last_indexed_at"] or 0.0),
                     "text_chars": int(r["text_chars"] or 0),
                     "status": r["status"],
+                    "etag": r["etag"],
+                    "last_modified": r["last_modified"],
+                    "content_hash": r["content_hash"],
+                    "changed_at": float(r["changed_at"] or 0.0),
+                    "error_count": int(r["error_count"] or 0),
+                    "backoff_until": float(r["backoff_until"] or 0.0),
                 }
                 for r in rows
             ]
 
-    def _bookmark_indexer_loop(self):
+    def _fetch_bookmark_url(
+        self,
+        url: str,
+        etag: str | None = None,
+        last_modified: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Section 3.4 (M10): Conditional HTTP GET sending `If-None-Match` and `If-Modified-Since`.
+        Returns {"status": int, "not_modified": bool, "etag": str|None, "last_modified": str|None, "html": str}.
+        """
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) SatzBrowser/0.4",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        if etag:
+            headers["If-None-Match"] = etag
+        if last_modified:
+            headers["If-Modified-Since"] = last_modified
+
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=10.0) as resp:
+                resp_headers = resp.headers
+                new_etag = resp_headers.get("ETag") or etag
+                new_lm = resp_headers.get("Last-Modified") or last_modified
+                raw_bytes = resp.read(2_000_000)
+                charset = resp_headers.get_content_charset() or "utf-8"
+                html = raw_bytes.decode(charset, errors="replace")
+                return {
+                    "status": int(getattr(resp, "status", 200) or 200),
+                    "not_modified": False,
+                    "etag": new_etag,
+                    "last_modified": new_lm,
+                    "html": html,
+                }
+        except urllib.error.HTTPError as he:
+            if he.code == 304:
+                return {
+                    "status": 304,
+                    "not_modified": True,
+                    "etag": etag,
+                    "last_modified": last_modified,
+                    "html": "",
+                }
+            raise
+
+    def run_bookmark_index_pass(self, now: float | None = None) -> dict[str, int]:
+        """
+        Section 3.4 (M10): Executes one pass over `satz_bookmarks`:
+        - Per-bookmark minimum interval (default 30 min = 1800s)
+        - Sends `If-None-Match` / `If-Modified-Since`
+        - Skips unchanged content by SHA-256 hash without re-ingesting
+        - Backs off per domain on errors (doubling from 60s, max 6 hours = 21600s)
+        - Stores `changed_at` when content changes from a previous version
+        """
         from src.planck3.web import domain_of, extract_main_text
 
-        while True:
-            self.bookmark_wake_event.wait(timeout=30.0)
-            self.bookmark_wake_event.clear()
+        cur_now = float(now if now is not None else time.time())
+        interval_secs = float(getattr(self, "bookmark_refresh_interval_secs", self.bookmark_Refresh_interval_secs))
+
+        with self.store_lock:
+            rows = self.store.db.execute(
+                """
+                SELECT bookmark_id, url, domain, title, last_indexed_at, text_chars, status,
+                       etag, last_modified, content_hash, changed_at, error_count, backoff_until
+                FROM satz_bookmarks
+                """
+            ).fetchall()
+
+        for r in rows:
             if self.pause_learning:
+                break
+            bid = r["bookmark_id"]
+            url = r["url"]
+            dom = r["domain"] or domain_of(url) or url
+            title = r["title"] or dom or url
+            last_ts = float(r["last_indexed_at"] or 0.0)
+            old_etag = r["etag"]
+            old_lm = r["last_modified"]
+            old_hash = str(r["content_hash"] or "")
+            old_chars = int(r["text_chars"] or 0)
+            row_backoff = float(r["backoff_until"] or 0.0)
+            dom_state = self.domain_backoff.get(dom, {"errors": float(r["error_count"] or 0), "backoff_until": row_backoff})
+            effective_backoff_until = max(row_backoff, float(dom_state.get("backoff_until", 0.0)))
+
+            if cur_now < effective_backoff_until:
+                self.bookmark_stats["skipped_backoff"] += 1
                 continue
 
+            if last_ts > 0 and (cur_now - last_ts) < interval_secs:
+                self.bookmark_stats["skipped_interval"] += 1
+                continue
+
+            extracted_text = ""
+            extracted_html: str | None = None
+            new_etag = old_etag
+            new_lm = old_lm
+
             try:
-                now = time.time()
-                with self.store_lock:
-                    rows = self.store.db.execute(
-                        "SELECT bookmark_id, url, domain, title, last_indexed_at FROM satz_bookmarks"
-                    ).fetchall()
-
-                for r in rows:
-                    if self.pause_learning:
-                        break
-                    bid = r["bookmark_id"]
-                    url = r["url"]
-                    dom = r["domain"] or domain_of(url)
-                    title = r["title"] or dom or url
-                    last_ts = float(r["last_indexed_at"] or 0.0)
-
-                    # Re-index immediately if never indexed (last_ts == 0) or older than refresh interval
-                    if last_ts > 0 and (now - last_ts) < self.bookmark_Refresh_interval_secs:
-                        continue
-
-                    extracted_text = ""
-                    extracted_html = None
-
-                    # 1. If the active profile is unlocked and has .env credentials for this bookmark, use them!
+                # 1. If the active profile is unlocked and has credentials for this bookmark, use them
+                if self.passwords.unlocked:
                     try:
                         auth_res = self.passwords.extract_with_profile_credentials(url)
                         if auth_res:
@@ -724,44 +1070,126 @@ class SatzSidecarRuntime:
                                 if main_t:
                                     extracted_text = f"{extracted_text}\n\n{main_t}".strip() if extracted_text else main_t
                     except Exception as ae:
-                        print(f"[satz-sidecar] bookmark auth extract note for {url}: {ae}", flush=True)
+                        self.record_error("bookmark_auth", f"{url}: {ae}")
 
-                    # 2. Check if there is fresh DOM text captured from a live tab for this URL
-                    if not extracted_text:
+                # 2. Otherwise fetch with If-None-Match / If-Modified-Since
+                if not extracted_text and url.startswith(("http://", "https://")):
+                    fetch_res = self._fetch_bookmark_url(url, etag=old_etag, last_modified=old_lm)
+                    new_etag = fetch_res.get("etag") or old_etag
+                    new_lm = fetch_res.get("last_modified") or old_lm
+                    if fetch_res.get("not_modified"):
+                        self.bookmark_stats["skipped_304"] += 1
+                        self.domain_backoff[dom] = {"errors": 0.0, "backoff_until": 0.0}
                         with self.store_lock:
-                            src_row = self.store.db.execute(
-                                "SELECT text FROM satz_sources WHERE url = ? AND capture_mode = 'dom' ORDER BY updated_at DESC LIMIT 1",
-                                (url,),
-                            ).fetchone()
-                            if src_row and src_row["text"]:
-                                extracted_text = src_row["text"]
+                            self.store.db.execute(
+                                """
+                                UPDATE satz_bookmarks
+                                SET last_indexed_at = ?, status = 'unchanged', error_count = 0, backoff_until = 0.0
+                                WHERE bookmark_id = ?
+                                """,
+                                (cur_now, bid),
+                            )
+                            self.store.db.commit()
+                        continue
 
-                    # 3. Otherwise fetch the live page in the background
-                    if not extracted_text and url.startswith(("http://", "https://")):
-                        page = self.web.fetch(url)
-                        if page.get("html"):
-                            extracted_html = page["html"]
-                            extracted_text = extract_main_text(extracted_html, url) or ""
+                    if fetch_res.get("html"):
+                        extracted_html = str(fetch_res["html"])
+                        extracted_text = extract_main_text(extracted_html, url) or ""
 
-                    res = self.ingest_page(
-                        conversation_id="bookmarks",
-                        source_id=f"bookmark:{bid}",
-                        url=url,
-                        title=f"[Bookmark] {title}",
-                        html=extracted_html,
-                        visible_text=extracted_text or None,
-                    )
-                    chars = int(res.get("text_chars") or len(extracted_text))
-                    status_str = "indexed" if chars > 0 else "empty"
+                # 3. Fallback to cached DOM source text if HTTP returned empty body
+                if not extracted_text:
+                    with self.store_lock:
+                        src_row = self.store.db.execute(
+                            "SELECT text FROM satz_sources WHERE url = ? AND capture_mode = 'dom' ORDER BY updated_at DESC LIMIT 1",
+                            (url,),
+                        ).fetchone()
+                        if src_row and src_row["text"]:
+                            extracted_text = src_row["text"]
 
+                normalized_body = (extracted_text or extracted_html or "").strip()
+                new_hash = (
+                    hashlib.sha256(normalized_body.encode("utf-8")).hexdigest()
+                    if normalized_body
+                    else ""
+                )
+
+                # Skip re-ingesting if content hash matches previous content hash
+                if old_hash and new_hash and new_hash == old_hash:
+                    self.bookmark_stats["skipped_hash"] += 1
+                    self.domain_backoff[dom] = {"errors": 0.0, "backoff_until": 0.0}
                     with self.store_lock:
                         self.store.db.execute(
-                            "UPDATE satz_bookmarks SET last_indexed_at = ?, text_chars = ?, status = ? WHERE bookmark_id = ?",
-                            (time.time(), chars, status_str, bid),
+                            """
+                            UPDATE satz_bookmarks
+                            SET last_indexed_at = ?, etag = ?, last_modified = ?, status = 'unchanged',
+                                error_count = 0, backoff_until = 0.0
+                            WHERE bookmark_id = ?
+                            """,
+                            (cur_now, new_etag, new_lm, bid),
                         )
                         self.store.db.commit()
+                    continue
+
+                res = self.ingest_page(
+                    conversation_id="bookmarks",
+                    source_id=f"bookmark:{bid}",
+                    url=url,
+                    title=f"[Bookmark] {title}",
+                    html=extracted_html,
+                    visible_text=extracted_text or None,
+                )
+                chars = int(res.get("text_chars") or len(extracted_text)) or old_chars
+                status_str = "indexed" if chars > 0 else "empty"
+                new_changed_at = cur_now if (old_hash and new_hash and new_hash != old_hash) else float(r["changed_at"] or 0.0)
+                self.bookmark_stats["indexed"] += 1
+                self.domain_backoff[dom] = {"errors": 0.0, "backoff_until": 0.0}
+
+                with self.store_lock:
+                    self.store.db.execute(
+                        """
+                        UPDATE satz_bookmarks
+                        SET last_indexed_at = ?, text_chars = ?, status = ?,
+                            etag = ?, last_modified = ?, content_hash = ?, changed_at = ?,
+                            error_count = 0, backoff_until = 0.0
+                        WHERE bookmark_id = ?
+                        """,
+                        (cur_now, chars, status_str, new_etag, new_lm, new_hash, new_changed_at, bid),
+                    )
+                    self.store.db.commit()
+            except Exception as exc:
+                self.bookmark_stats["errors"] += 1
+                self.record_error("bookmark_indexer", f"{dom} ({url}): {exc}")
+                prev_errs = int(dom_state.get("errors", 0.0))
+                next_errs = prev_errs + 1
+                backoff_secs = min(21600.0, 60.0 * (2 ** (next_errs - 1)))
+                backoff_until = cur_now + backoff_secs
+                self.domain_backoff[dom] = {
+                    "errors": float(next_errs),
+                    "backoff_until": backoff_until,
+                }
+                with self.store_lock:
+                    self.store.db.execute(
+                        """
+                        UPDATE satz_bookmarks
+                        SET status = ?, error_count = ?, backoff_until = ?
+                        WHERE domain = ? OR bookmark_id = ?
+                        """,
+                        (f"backoff ({int(backoff_secs)}s)", next_errs, backoff_until, dom, bid),
+                    )
+                    self.store.db.commit()
+
+        return dict(self.bookmark_stats)
+
+    def _bookmark_indexer_loop(self):
+        while True:
+            self.bookmark_wake_event.wait(timeout=30.0)
+            self.bookmark_wake_event.clear()
+            if self.pause_learning:
+                continue
+            try:
+                self.run_bookmark_index_pass()
             except Exception as e:
-                print(f"[satz-sidecar] bookmark indexer error: {e}", flush=True)
+                self.record_error("bookmark_loop", e)
 
     def get_source_text(self, source_id: str, url: str, title: str = "") -> tuple[str, list[str]]:
         with self.store_lock:
@@ -1112,7 +1540,7 @@ class SatzSidecarRuntime:
                             f"{safe_auth_text}"
                         )
                 except Exception as pe:
-                    print(f"[satz-sidecar] profile credential extraction note: {pe}", flush=True)
+                    self.record_error("credential_extract", f"{tgt}: {pe}")
 
         # 3. Also pull relevant passages from persistent SQLite knowledge store & continuously-indexed bookmarks
         if question and total_chars < self.total_context_char_budget - 1000:
@@ -1141,7 +1569,7 @@ class SatzSidecarRuntime:
                     if any(k in norm_text(f"{btitle} {bdom} {btext[:600]}") for k in keys) or bdom.lower() in question.lower():
                         kb_lines.append(f"- (BOOKMARK INDEXED: {bdom} · {btitle} - {burl}): {btext[:600]}")
             except Exception as kbe:
-                print(f"[satz-sidecar] local_passages lookup note: {kbe}", flush=True)
+                self.record_error("local_passages", kbe)
             if kb_lines:
                 blocks.append("STORED PASSAGES & CONTINUOUSLY INDEXED BOOKMARKS:\n" + "\n".join(kb_lines[:6]))
 
@@ -1236,7 +1664,7 @@ class SatzSidecarRuntime:
                 if clean_sum:
                     return clean_sum[:600]
             except Exception as e:
-                print(f"[satz-sidecar] gemma summary fallback: {e}", flush=True)
+                self.record_error("gemma_summary", e)
 
         base = f"{prev_summary.strip()} | " if prev_summary.strip() else ""
         condensed = base + " ; ".join(t.replace("\n", " ")[:90] for t in turns[-6:])
@@ -1335,7 +1763,7 @@ class SatzSidecarRuntime:
                         )
                         cited_web_sources.append({"url": wurl, "title": ws.get("title") or wurl})
             except Exception as e:
-                print(f"[satz-sidecar] web pre-search failed: {e}", flush=True)
+                self.record_error("web_presearch", e)
                 yield {
                     "status": f"web search warning: {e} (continuing with local tabs)",
                     "phase": "warning",
@@ -1344,18 +1772,20 @@ class SatzSidecarRuntime:
         context_str, used_source_ids, hydrated_sources = self.assemble_chat_context(user_msg, combined_sources)
         brain_context = self.brain.build_model_context(user_msg, hydrated_sources or combined_sources)
 
+        source_stats_list = [
+            {
+                "id": hs["id"],
+                "chars_captured": hs.get("chars_captured", len(hs.get("text", ""))),
+                "chars_sent": hs.get("chars_sent", len(hs.get("text", ""))),
+                "was_cut": hs.get("was_cut", False),
+            }
+            for hs in hydrated_sources
+        ]
+
         yield {
             "status": f"assembled {len(used_source_ids)} source(s) ({len(context_str):,} chars) + brain index",
             "phase": "context_ready",
-            "source_stats": [
-                {
-                    "id": hs["id"],
-                    "chars_captured": hs.get("chars_captured", len(hs.get("text", ""))),
-                    "chars_sent": hs.get("chars_sent", len(hs.get("text", ""))),
-                    "was_cut": hs.get("was_cut", False),
-                }
-                for hs in hydrated_sources
-            ],
+            "source_stats": source_stats_list,
         }
 
         prior = [m for m in messages[:-1] if m.get("role") in ("user", "assistant")]
@@ -1480,11 +1910,19 @@ class SatzSidecarRuntime:
             ]
             yield {"delta": "".join(confirm_lines)}
 
+        # Section 3.3 (M10): Deterministic citation verification over sentences with [n]
+        cite_res = check_citations(cleaned_final, hydrated_sources)
+
         ms = int((time.perf_counter() - t0) * 1000)
         done_payload: dict[str, Any] = {
             "done": True,
             "source_ids": used_source_ids,
             "ms": ms,
+            "citation_check": cite_res["citation_check"],
+            "citations_ok": cite_res["citations_ok"],
+            "citations_flagged": cite_res["citations_flagged"],
+            "annotated_text": cite_res["annotated_text"],
+            "source_stats": source_stats_list,
         }
         if cited_web_sources:
             done_payload["cited_sources"] = cited_web_sources
@@ -1501,6 +1939,30 @@ class SatzSidecarRuntime:
         with self.store_lock:
             raw = build_digest(self.store)
             items = []
+
+            # Section 3.4 (M10): Include recently changed bookmarks in /digest
+            changed_bm_rows = self.store.db.execute(
+                """
+                SELECT bookmark_id, url, domain, title, changed_at
+                FROM satz_bookmarks
+                WHERE changed_at IS NOT NULL AND changed_at > 0
+                ORDER BY changed_at DESC
+                LIMIT 4
+                """
+            ).fetchall()
+            for cbm in changed_bm_rows:
+                bm_title = cbm["title"] or cbm["domain"] or cbm["url"]
+                items.append(
+                    {
+                        "entity": cbm["domain"] or "bookmark",
+                        "reason": "bookmark updated",
+                        "title": f"changed: {bm_title}",
+                        "url": cbm["url"],
+                        "domain": cbm["domain"],
+                        "kind": "bookmark_changed",
+                    }
+                )
+
             for sec in raw.get("interests", []):
                 ent = sec["entity"]
                 for p in sec.get("recent", [])[:2]:
@@ -1905,6 +2367,10 @@ def make_sidecar_server(
                 creds = runtime.passwords.find_credentials_for_target(target)
                 return self._json({"ok": True, "credentials": creds})
 
+            if self.path == "/errors/clear":
+                runtime.clear_errors()
+                return self._json({"ok": True, "errors": []})
+
             if self.path == "/chat/summarize":
                 messages = data.get("messages") or []
                 prev_summary = str(data.get("summary") or "")
@@ -1935,6 +2401,7 @@ def make_sidecar_server(
                         self.wfile.write(line.encode("utf-8"))
                         self.wfile.flush()
                 except Exception as e:
+                    runtime.record_error("chat_stream", e)
                     err_payload = {
                         "error": str(e),
                         "delta": f"[error: {e}]",
@@ -1962,12 +2429,14 @@ def main():
     parser.add_argument("--port", type=int, default=8020)
     parser.add_argument("--preload-gemma", action="store_true", default=True)
     parser.add_argument("--no-preload-gemma", action="store_false", dest="preload_gemma")
+    parser.add_argument("--bookmark-interval-minutes", type=float, default=30.0)
     args = parser.parse_args()
 
     runtime = SatzSidecarRuntime(
         sgs_root=Path(args.sgs_root),
         store_path=Path(args.store),
         gemma_rel_path=args.gemma_path,
+        bookmark_interval_minutes=args.bookmark_interval_minutes,
     )
     server = make_sidecar_server(runtime, host=args.host, port=args.port)
     if args.preload_gemma:
