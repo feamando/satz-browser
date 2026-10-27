@@ -32,11 +32,20 @@ pub struct TabPageEventPayload {
     pub has_password_field: Option<bool>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TabCaptureCacheEntry {
+    pub tab_id: String,
+    pub url: String,
+    pub captured_at: u64,
+    pub text_hash: u64,
+}
+
 pub struct WebviewManagerState {
     pub max_live_tabs: usize,
     pub tab_urls: Mutex<HashMap<String, String>>,
     pub last_shown: Mutex<HashMap<String, Instant>>,
     pub visible_tabs: Mutex<HashSet<String>>,
+    pub capture_cache: Mutex<HashMap<String, TabCaptureCacheEntry>>,
 }
 
 impl Default for WebviewManagerState {
@@ -46,8 +55,42 @@ impl Default for WebviewManagerState {
             tab_urls: Mutex::new(HashMap::new()),
             last_shown: Mutex::new(HashMap::new()),
             visible_tabs: Mutex::new(HashSet::new()),
+            capture_cache: Mutex::new(HashMap::new()),
         }
     }
+}
+
+pub fn should_recapture_tab(
+    tab_id: &str,
+    tab_url: &str,
+    visible_tabs: &HashSet<String>,
+    cache: &HashMap<String, TabCaptureCacheEntry>,
+) -> bool {
+    if visible_tabs.contains(tab_id) {
+        return true;
+    }
+    match cache.get(tab_id) {
+        Some(entry) => entry.url != tab_url,
+        None => true,
+    }
+}
+
+pub fn wait_for_receivers_with_shared_deadline(
+    receivers: Vec<std::sync::mpsc::Receiver<()>>,
+    total_budget: Duration,
+) -> usize {
+    let deadline = Instant::now() + total_budget;
+    let mut completed = 0;
+    for rx in receivers {
+        let rem = deadline.saturating_duration_since(Instant::now());
+        if rem.is_zero() {
+            break;
+        }
+        if rx.recv_timeout(rem).is_ok() {
+            completed += 1;
+        }
+    }
+    completed
 }
 
 pub fn is_likely_url_token(raw: &str) -> bool {
@@ -111,6 +154,7 @@ pub fn close_tab_webview(app: &AppHandle, state: &WebviewManagerState, tab_id: &
     state.tab_urls.lock().unwrap().remove(tab_id);
     state.last_shown.lock().unwrap().remove(tab_id);
     state.visible_tabs.lock().unwrap().remove(tab_id);
+    state.capture_cache.lock().unwrap().remove(tab_id);
 }
 
 pub fn select_lru_eviction_candidates(
@@ -750,11 +794,14 @@ fn trigger_dom_capture_with_completion<R: tauri::Runtime>(
     }
 }
 
-/// Synchronously captures all currently open live WebView2 tabs for `conversation_id`
-/// right before a chat or reader request so SPA state, opened emails, and selections are fresh.
+/// Section 3.1 (M9):
+/// Re-captures ONLY the visible tab(s), plus any open tab whose URL changed since its last capture.
+/// All other open tabs (including tabs suspended by the LRU cap) use their cached capture.
+/// Waits on all receivers against one shared deadline of 800 ms total.
 pub fn capture_open_tabs_for_conversation(
     app: &AppHandle,
     db: &DbState,
+    wv_state: &WebviewManagerState,
     conversation_id: &str,
 ) -> Result<usize, String> {
     let detail = db
@@ -765,8 +812,14 @@ pub fn capture_open_tabs_for_conversation(
         return Ok(0);
     }
 
+    let visible_snapshot = wv_state.visible_tabs.lock().unwrap().clone();
+    let cache_snapshot = wv_state.capture_cache.lock().unwrap().clone();
+
     let mut receivers = Vec::new();
     for tab in open_tabs {
+        if !should_recapture_tab(&tab.id, &tab.url, &visible_snapshot, &cache_snapshot) {
+            continue;
+        }
         let label = tab_webview_label(&tab.id);
         if let Some(wv) = app.get_webview(&label) {
             let (tx, rx) = std::sync::mpsc::channel();
@@ -782,9 +835,7 @@ pub fn capture_open_tabs_for_conversation(
     }
 
     let count = receivers.len();
-    for rx in receivers {
-        let _ = rx.recv_timeout(Duration::from_millis(1200));
-    }
+    wait_for_receivers_with_shared_deadline(receivers, Duration::from_millis(800));
     Ok(count)
 }
 
@@ -809,6 +860,32 @@ fn handle_captured_dom_json<R: tauri::Runtime>(
                 .unwrap_or(false);
             let visible_text = parsed.get("visible_text").and_then(|v| v.as_str());
             let html = parsed.get("html").and_then(|v| v.as_str());
+
+            if let Some(wv_state) = app.try_state::<WebviewManagerState>() {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                visible_text.unwrap_or("").hash(&mut hasher);
+                html.unwrap_or("").hash(&mut hasher);
+                let text_hash = hasher.finish();
+                let captured_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                wv_state.capture_cache.lock().unwrap().insert(
+                    tab_id.to_string(),
+                    TabCaptureCacheEntry {
+                        tab_id: tab_id.to_string(),
+                        url: url.to_string(),
+                        captured_at,
+                        text_hash,
+                    },
+                );
+                // Also record under fallback_url if WebView2 redirected
+                if !fallback_url.is_empty() && fallback_url != url {
+                    // Keep the canonical URL in DB synced below
+                }
+            }
 
             if let Some(db) = app.try_state::<DbState>() {
                 let url_opt = if url.is_empty() { None } else { Some(url) };
@@ -971,5 +1048,77 @@ mod tests {
                 input
             );
         }
+    }
+
+    #[test]
+    fn test_capture_cache_and_shared_deadline() {
+        let mut visible = HashSet::new();
+        visible.insert("tab-1".to_string());
+
+        let mut cache = HashMap::new();
+        for i in 1..=8 {
+            let tid = format!("tab-{}", i);
+            cache.insert(
+                tid.clone(),
+                TabCaptureCacheEntry {
+                    tab_id: tid,
+                    url: format!("https://example.com/{}", i),
+                    captured_at: 1_700_000_000,
+                    text_hash: 12345,
+                },
+            );
+        }
+
+        // Visible tab-1 MUST be recaptured even when URL matches cache
+        assert!(should_recapture_tab(
+            "tab-1",
+            "https://example.com/1",
+            &visible,
+            &cache
+        ));
+
+        // Non-visible tabs 2..7 whose URL matches cache MUST NOT be recaptured (use cache)
+        for i in 2..=7 {
+            assert!(!should_recapture_tab(
+                &format!("tab-{}", i),
+                &format!("https://example.com/{}", i),
+                &visible,
+                &cache
+            ));
+        }
+
+        // Non-visible tab-8 whose URL changed since last capture MUST be recaptured
+        assert!(should_recapture_tab(
+            "tab-8",
+            "https://example.com/8-new-page",
+            &visible,
+            &cache
+        ));
+
+        // Uncached tab-9 MUST be recaptured
+        assert!(should_recapture_tab(
+            "tab-9",
+            "https://example.com/9",
+            &visible,
+            &cache
+        ));
+
+        // Shared 800 ms deadline across 8 hung receivers must complete in ~800 ms, not 8 * 1200 ms
+        let mut rxs = Vec::new();
+        let mut _txs = Vec::new();
+        for _ in 0..8 {
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            _txs.push(tx);
+            rxs.push(rx);
+        }
+        let t0 = Instant::now();
+        let completed = wait_for_receivers_with_shared_deadline(rxs, Duration::from_millis(800));
+        let elapsed = t0.elapsed();
+        assert_eq!(completed, 0);
+        assert!(
+            elapsed < Duration::from_millis(980),
+            "Shared deadline took {:?}, expected ~800ms",
+            elapsed
+        );
     }
 }

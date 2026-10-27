@@ -352,6 +352,110 @@ class TestSatzSidecar(unittest.TestCase):
         self.assertIsNotNone(accepted)
         self.assertTrue((brain.brain_dir / "notes" / "x.md").exists())
 
+    def test_m9_brain_cap_100_entities_40k_article_ranking_prompt_order_and_lru(self):
+        # 1. Populate 100 entities into Brain and verify Brain section is <= 3,000 characters
+        brain = self.runtime.brain
+        for i in range(100):
+            brain.upsert_entity(
+                entity_type="organization" if i % 2 == 0 else "person",
+                name=f"Entity Org {i:03d}",
+                summary=f"Detailed summary for organization or person number {i:03d} operating in Berlin and Zurich.",
+                attributes={"city": "Berlin", "index": i, "code": f"ORG-{i:03d}"},
+                content=f"Long background notes for Entity Org {i:03d}. " * 12,
+                aliases=[f"org{i:03d}", f"alias-{i:03d}"],
+                tier=1 if i < 60 else 2,
+            )
+
+        brain_ctx = brain.build_model_context(
+            "What is the status of Entity Org 042 in Berlin?",
+            open_sources=[{"title": "Entity Org 007 Portal", "domain": "org007.example.com", "url": "https://org007.example.com"}],
+        )
+        self.assertLessEqual(
+            len(brain_ctx),
+            3000,
+            f"Brain context with 100 entities was {len(brain_ctx)} chars (expected <= 3000)",
+        )
+        self.assertIn("Entity Org 042", brain_ctx)
+
+        # 2. A question about the last third of a 40k-character article includes the relevant passage within the 6,000-char tab budget
+        lede_part = (
+            "Arctic Shipping and Maritime Infrastructure Report 2026. "
+            "This comprehensive report examines port operations across the North Atlantic. "
+        )
+        filler_part = ("Standard container handling statistics remained steady during the winter quarter. " * 450)  # ~37,000 chars
+        last_third_fact = (
+            "In the final phase of the treaty, the Reykjavik Deepwater Terminal approved a "
+            "special icebreaker tariff of 4.75 million kroner on October 14, 2026. "
+        )
+        tail_part = ("Appendix tables and meteorological observations follow below. " * 80)
+        article_40k = lede_part + filler_part + last_third_fact + tail_part
+        self.assertGreaterEqual(len(article_40k), 40000)
+
+        ctx, used_ids, hydrated = self.runtime.assemble_chat_context(
+            "What special icebreaker tariff did the Reykjavik Deepwater Terminal approve?",
+            [
+                {
+                    "id": "src-40k",
+                    "url": "https://reuters.com/arctic-40k",
+                    "title": "Arctic Shipping 40k Report",
+                    "domain": "reuters.com",
+                    "is_open_tab": True,
+                    "text": article_40k,
+                }
+            ],
+        )
+        self.assertEqual(used_ids, ["src-40k"])
+        self.assertEqual(len(hydrated), 1)
+        self.assertTrue(hydrated[0]["was_cut"])
+        self.assertLessEqual(hydrated[0]["chars_sent"], 6000)
+        self.assertIn("4.75 million kroner", ctx)
+        self.assertIn("Reykjavik Deepwater Terminal", ctx)
+
+        # 3. Prompt order: system prompt byte-identical between turns, then Brain -> sources -> history (with summary) -> user message
+        msgs_turn1 = self.runtime.build_ordered_chat_messages(
+            user_msg="First question?",
+            brain_context=brain_ctx,
+            context_str=ctx,
+            prior_messages=[{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi there"}],
+            conversation_summary="Earlier they discussed port tariffs.",
+        )
+        msgs_turn2 = self.runtime.build_ordered_chat_messages(
+            user_msg="Second question?",
+            brain_context="BRAIN2",
+            context_str="SOURCES2",
+            prior_messages=[],
+            conversation_summary="",
+        )
+        self.assertEqual(msgs_turn1[0]["role"], "system")
+        self.assertEqual(msgs_turn1[0]["content"], msgs_turn2[0]["content"])
+        u_body = msgs_turn1[1]["content"]
+        idx_brain = u_body.index("SATZ BRAIN KNOWLEDGE BASE:")
+        idx_sources = u_body.index("SOURCES (OPEN TABS & RETRIEVED CONTEXT):")
+        idx_history = u_body.index("CONVERSATION HISTORY:")
+        idx_summary = u_body.index("[Summary of earlier conversation: Earlier they discussed port tariffs.]")
+        idx_user = u_body.index("USER REQUEST: First question?")
+        self.assertLess(idx_brain, idx_sources)
+        self.assertLess(idx_sources, idx_history)
+        self.assertLess(idx_history, idx_summary)
+        self.assertLess(idx_summary, idx_user)
+
+        # 4. Rolling conversation summary <= 600 chars
+        summary_str = self.runtime.summarize_conversation(
+            [{"role": "user" if idx % 2 == 0 else "assistant", "content": f"Turn {idx} content " * 20} for idx in range(12)],
+            prev_summary="Initial topic",
+        )
+        self.assertTrue(0 < len(summary_str) <= 600)
+
+        # 5. answer_sessions capped at 32 entries (LRU)
+        class DummyAnswerer:
+            pass
+
+        for s_idx in range(45):
+            self.runtime._get_or_create_answer_session(f"sess-{s_idx}", DummyAnswerer())
+        self.assertEqual(len(self.runtime.answer_sessions), 32)
+        self.assertNotIn("sess-0", self.runtime.answer_sessions)
+        self.assertIn("sess-44", self.runtime.answer_sessions)
+
 
 if __name__ == "__main__":
     unittest.main()

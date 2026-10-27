@@ -17,6 +17,7 @@ import {
   apiPinConversation,
   apiRemoveBookmark,
   apiRenameConversation,
+  apiSetConversationSummary,
   sidecarAcceptBrainProposal,
   sidecarCreateProfile,
   sidecarDeleteBrainEntity,
@@ -36,6 +37,7 @@ import {
   sidecarSaveRawEnv,
   sidecarSetPauseLearning,
   sidecarStreamChat,
+  sidecarSummarizeConversation,
   sidecarSyncBookmarks,
   sidecarUnlockProfile,
   sidecarUpsertPassword,
@@ -1188,6 +1190,7 @@ async function handleSendChatMessage(text: string): Promise<void> {
       content: m.content,
     }));
 
+    const convSummary = state.activeDetail?.conversation.summary ?? "";
     const streamRes = await sidecarStreamChat(
       state.selectedModel,
       historyPayload,
@@ -1207,7 +1210,8 @@ async function handleSendChatMessage(text: string): Promise<void> {
       },
       (errText) => {
         updateStreamingStatus(`error: ${errText}`, "error");
-      }
+      },
+      convSummary
     );
 
     const finalContent =
@@ -1234,6 +1238,29 @@ async function handleSendChatMessage(text: string): Promise<void> {
         msgObj.proposals = state.messageProposals[savedMsg.id];
       }
     }
+
+    // Section 3.2 (M9): After every 6th assistant turn, write a rolling summary (max 600 chars) in background
+    const allMessages = state.activeDetail?.messages ?? [];
+    const assistantTurns = allMessages.filter((m) => m.role === "assistant").length;
+    if (assistantTurns > 0 && assistantTurns % 6 === 0) {
+      const msgsForSummary = allMessages.map((m) => ({
+        role: m.role,
+        content: m.content,
+      }));
+      void (async () => {
+        const newSum = await sidecarSummarizeConversation(
+          msgsForSummary,
+          convSummary
+        );
+        if (newSum) {
+          await apiSetConversationSummary(convId, newSum);
+          if (state.activeDetail?.conversation.id === convId) {
+            state.activeDetail.conversation.summary = newSum;
+          }
+        }
+      })();
+    }
+
     renderViewportRegion();
   } catch (err) {
     stopStreamingProgress();

@@ -10,6 +10,7 @@ export interface Conversation {
   created_at: string;
   last_active_at: string;
   source_count?: number;
+  summary?: string | null;
 }
 
 export interface BrowserTab {

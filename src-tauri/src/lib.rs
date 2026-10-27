@@ -27,8 +27,14 @@ pub struct SatzSettings {
     pub gemma_path: String,
     pub port: u16,
     pub max_live_tabs: usize,
+    #[serde(default = "default_true")]
+    pub preload_gemma: bool,
     #[serde(default)]
     pub repo_root: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for SatzSettings {
@@ -39,6 +45,7 @@ impl Default for SatzSettings {
             gemma_path: "models/gemma-4-e4b-it".to_string(),
             port: 8020,
             max_live_tabs: 8,
+            preload_gemma: true,
             repo_root: None,
         }
     }
@@ -221,9 +228,20 @@ async fn sync_tab_webviews(
 async fn capture_open_tabs(
     app: AppHandle,
     db: State<'_, DbState>,
+    wv_state: State<'_, WebviewManagerState>,
     conversation_id: String,
 ) -> Result<usize, String> {
-    capture_open_tabs_for_conversation(&app, &db, &conversation_id)
+    capture_open_tabs_for_conversation(&app, &db, &wv_state, &conversation_id)
+}
+
+#[tauri::command]
+fn set_conversation_summary(
+    db: State<'_, DbState>,
+    conversation_id: String,
+    summary: String,
+) -> Result<(), String> {
+    db.set_conversation_summary(&conversation_id, &summary)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -405,8 +423,11 @@ fn spawn_sidecar(settings: &SatzSettings, app_data_dir: &PathBuf, token: &str) -
         .arg("--port")
         .arg(settings.port.to_string())
         .arg("--store")
-        .arg(store_path.to_string_lossy().to_string())
-        .current_dir(&repo_root)
+        .arg(store_path.to_string_lossy().to_string());
+    if settings.preload_gemma {
+        cmd.arg("--preload-gemma");
+    }
+    cmd.current_dir(&repo_root)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -646,6 +667,7 @@ pub fn run() {
             control_tab,
             sync_tab_webviews,
             capture_open_tabs,
+            set_conversation_summary,
             autofill_tab_credentials,
             set_source_in_context,
             add_message,
