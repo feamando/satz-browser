@@ -15,6 +15,8 @@ pub struct Conversation {
     pub created_at: String,
     pub last_active_at: String,
     pub source_count: i64,
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,7 +190,8 @@ impl DbState {
                 pinned INTEGER NOT NULL DEFAULT 0,
                 origin TEXT NOT NULL DEFAULT 'chat',
                 created_at TEXT NOT NULL,
-                last_active_at TEXT NOT NULL
+                last_active_at TEXT NOT NULL,
+                summary TEXT NULL
             );
 
             CREATE TABLE IF NOT EXISTS tabs (
@@ -246,6 +249,20 @@ impl DbState {
             );
             ",
         )?;
+
+        let has_summary_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = 'summary'",
+                [],
+                |r| {
+                    let c: i64 = r.get(0)?;
+                    Ok(c > 0)
+                },
+            )
+            .unwrap_or(false);
+        if !has_summary_col {
+            conn.execute("ALTER TABLE conversations ADD COLUMN summary TEXT NULL", [])?;
+        }
 
         let bookmarks_seeded: Option<String> = conn
             .query_row(
@@ -437,7 +454,8 @@ impl DbState {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT c.id, c.title, c.status, c.pinned, c.origin, c.created_at, c.last_active_at,
-                    (SELECT COUNT(*) FROM tabs t WHERE t.conversation_id = c.id AND t.is_open = 1) AS src_cnt
+                    (SELECT COUNT(*) FROM tabs t WHERE t.conversation_id = c.id AND t.is_open = 1) AS src_cnt,
+                    c.summary
              FROM conversations c
              ORDER BY c.pinned DESC, c.last_active_at DESC, c.created_at DESC",
         )?;
@@ -452,6 +470,7 @@ impl DbState {
                 created_at: row.get(5)?,
                 last_active_at: row.get(6)?,
                 source_count: row.get(7)?,
+                summary: row.get(8)?,
             })
         })?;
         rows.collect()
@@ -461,7 +480,8 @@ impl DbState {
         let conn = self.conn.lock().unwrap();
         let conversation = conn.query_row(
             "SELECT c.id, c.title, c.status, c.pinned, c.origin, c.created_at, c.last_active_at,
-                    (SELECT COUNT(*) FROM tabs t WHERE t.conversation_id = c.id AND t.is_open = 1) AS src_cnt
+                    (SELECT COUNT(*) FROM tabs t WHERE t.conversation_id = c.id AND t.is_open = 1) AS src_cnt,
+                    c.summary
              FROM conversations c
              WHERE c.id = ?1",
             params![conversation_id],
@@ -476,6 +496,7 @@ impl DbState {
                     created_at: row.get(5)?,
                     last_active_at: row.get(6)?,
                     source_count: row.get(7)?,
+                    summary: row.get(8)?,
                 })
             },
         )?;
@@ -593,7 +614,22 @@ impl DbState {
             created_at: ts.clone(),
             last_active_at: ts,
             source_count: 0,
+            summary: None,
         })
+    }
+
+    pub fn set_conversation_summary(
+        &self,
+        conversation_id: &str,
+        summary: &str,
+    ) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let truncated: String = summary.chars().take(600).collect();
+        conn.execute(
+            "UPDATE conversations SET summary = ?2 WHERE id = ?1",
+            params![conversation_id, truncated],
+        )?;
+        Ok(())
     }
 
     pub fn rename_conversation(
@@ -1194,5 +1230,46 @@ mod tests {
         state.auto_archive_stale_direct_conversations().unwrap();
         let stale_conv = state.get_conversation("conv-direct-stale").unwrap();
         assert_eq!(stale_conv.conversation.status, "archived");
+    }
+
+    #[test]
+    fn test_conversations_summary_column_migration_and_update() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Simulate an existing v2 DB created before M9 (without `summary` column on `conversations`)
+        conn.execute_batch(
+            "
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema_version', '2');
+            CREATE TABLE conversations (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                pinned INTEGER NOT NULL DEFAULT 0,
+                origin TEXT NOT NULL DEFAULT 'chat',
+                created_at TEXT NOT NULL,
+                last_active_at TEXT NOT NULL
+            );
+            INSERT INTO conversations (id, title, status, pinned, origin, created_at, last_active_at)
+            VALUES ('conv-m9-mig', 'Pre-M9 Conversation', 'active', 0, 'chat', '1700000000', '1700000000');
+            ",
+        )
+        .unwrap();
+
+        DbState::init_connection(&conn).unwrap();
+        let state = DbState {
+            conn: Mutex::new(conn),
+            db_path: PathBuf::from(":memory:"),
+        };
+
+        let before = state.get_conversation("conv-m9-mig").unwrap();
+        assert_eq!(before.conversation.summary, None);
+
+        let long_summary = "S".repeat(750);
+        state
+            .set_conversation_summary("conv-m9-mig", &long_summary)
+            .unwrap();
+
+        let after = state.get_conversation("conv-m9-mig").unwrap();
+        assert_eq!(after.conversation.summary.as_deref().map(|s| s.len()), Some(600));
     }
 }

@@ -70,6 +70,7 @@ function mapConversationRow(raw: Record<string, unknown>): Conversation {
     last_active_at: String(raw.last_active_at ?? raw.created_at ?? ""),
     source_count:
       typeof raw.source_count === "number" ? raw.source_count : undefined,
+    summary: raw.summary ? String(raw.summary) : null,
   };
 }
 
@@ -256,6 +257,17 @@ export async function apiDeleteConversation(
     });
   } catch {
     // Sidecar offline is fine
+  }
+}
+
+export async function apiSetConversationSummary(
+  conversationId: string,
+  summary: string
+): Promise<void> {
+  try {
+    await invoke("set_conversation_summary", { conversationId, summary });
+  } catch {
+    // Ignore if command unavailable
   }
 }
 
@@ -839,6 +851,24 @@ export async function sidecarRunRead(
   return await res.json();
 }
 
+export async function sidecarSummarizeConversation(
+  messages: Array<{ role: string; content: string }>,
+  summary?: string
+): Promise<string> {
+  try {
+    const res = await sidecarFetch("/chat/summarize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages, summary: summary ?? "" }),
+    });
+    if (!res.ok) return "";
+    const data = (await res.json()) as { summary?: string };
+    return String(data.summary ?? "").slice(0, 600);
+  } catch {
+    return "";
+  }
+}
+
 export async function sidecarStreamChat(
   model: LocalModelId,
   messages: Array<{ role: string; content: string }>,
@@ -846,7 +876,8 @@ export async function sidecarStreamChat(
   web: boolean,
   onDelta: (delta: string) => void,
   onStatus?: (status: string, phase?: string) => void,
-  onError?: (err: string) => void
+  onError?: (err: string) => void,
+  summary?: string
 ): Promise<{
   source_ids: string[];
   cited_sources?: Array<{ url: string; title: string }>;
@@ -856,7 +887,7 @@ export async function sidecarStreamChat(
   const res = await sidecarFetch("/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model, messages, sources, web }),
+    body: JSON.stringify({ model, messages, sources, web, summary: summary ?? "" }),
   });
   if (!res.ok || !res.body) {
     throw new Error(`/chat returned HTTP ${res.status}`);

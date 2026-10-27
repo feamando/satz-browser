@@ -4,13 +4,23 @@ export function renderStatusLine(): void {
   const container = document.getElementById("region-status-bar");
   if (!container) return;
 
+  const gemmaEntry = state.sidecar.models.find((m) => m.id === "gemma-4-e4b");
+  const gemmaWarmLabel =
+    state.sidecar.online && gemmaEntry?.state === "ready"
+      ? `<span>gemma [warm]</span>`
+      : state.sidecar.online && gemmaEntry?.state === "loading"
+        ? `<span>gemma [loading]</span>`
+        : "";
+
   const modelEntry = state.sidecar.models.find(
     (m) => m.id === state.selectedModel
   );
   const modelStatus = !state.sidecar.online
     ? "[offline]"
     : modelEntry?.state === "ready"
-      ? "[ok]"
+      ? state.selectedModel === "gemma-4-e4b"
+        ? "[warm]"
+        : "[ok]"
       : modelEntry?.state === "loading"
         ? "[loading]"
         : modelEntry?.state === "missing"
@@ -25,6 +35,7 @@ export function renderStatusLine(): void {
   container.innerHTML = `
     <div class="status-segment">
       <span>model: <span class="status-item">${escapeHtml(state.selectedModel)}</span> ${modelStatus}</span>
+      ${gemmaWarmLabel}
       <span>models ${sidecarStatus}</span>
       <span>sources in context: <span class="status-item">${sourcesInContext}</span></span>
     </div>

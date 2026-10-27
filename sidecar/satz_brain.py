@@ -117,13 +117,60 @@ def neutralize_brain_directives_in_source(text: str) -> str:
 class SatzBrain:
     """Manages the local Satz Brain knowledge graph on disk."""
 
-    def __init__(self, brain_dir: Path):
+    def __init__(self, brain_dir: Path, sgs_root: Path | None = None):
         self.brain_dir = brain_dir
+        self.sgs_root = sgs_root
         self.lock = threading.RLock()
         self.registry_path = self.brain_dir / "registry.yaml"
         self.brain_md_path = self.brain_dir / "BRAIN.md"
         self.proposals: dict[str, dict[str, Any]] = {}
+        self._brain_md_cache: str = ""
+        self._brain_md_mtime: float = -1.0
+        self._encoder: Any = None
+        self._entity_emb_cache: dict[str, tuple[str, Any]] = {}
         self._ensure_layout()
+
+    def _get_encoder(self) -> Any:
+        if self._encoder is not None:
+            return self._encoder
+        try:
+            from src.planck3.encoders import make_encoder
+
+            sgs_base = self.sgs_root or (Path(__file__).resolve().parent.parent.parent / "sgs")
+            ckpt = sgs_base / "checkpoints" / "planck13" / "best.pt"
+            tok = sgs_base / "data" / "wikipedia" / "tokenizer.model"
+            if ckpt.exists() and tok.exists():
+                self._encoder = make_encoder(
+                    "planck",
+                    checkpoint=str(ckpt),
+                    tokenizer=str(tok),
+                    device="cpu",
+                )
+            else:
+                self._encoder = make_encoder("hash")
+        except Exception:
+            try:
+                from src.planck3.encoders import make_encoder
+
+                self._encoder = make_encoder("hash")
+            except Exception:
+                self._encoder = None
+        return self._encoder
+
+    def get_cached_brain_md(self) -> str:
+        with self.lock:
+            if not self.brain_md_path.exists():
+                return self.regenerate_brain_md()
+            try:
+                mtime = self.brain_md_path.stat().st_mtime
+                if self._brain_md_cache and mtime == self._brain_md_mtime:
+                    return self._brain_md_cache
+                text = self.brain_md_path.read_text(encoding="utf-8")
+                self._brain_md_cache = text
+                self._brain_md_mtime = mtime
+                return text
+            except OSError:
+                return self.regenerate_brain_md()
 
     def _ensure_layout(self) -> None:
         with self.lock:
@@ -453,16 +500,17 @@ class SatzBrain:
 
             content = "\n".join(lines) + "\n"
             self.brain_md_path.write_text(content, encoding="utf-8")
+            try:
+                self._brain_md_mtime = self.brain_md_path.stat().st_mtime
+            except OSError:
+                self._brain_md_mtime = time.time()
+            self._brain_md_cache = content
             return content
 
     def get_brain_summary(self) -> dict[str, Any]:
         with self.lock:
             reg = self._load_registry()
-            brain_md = (
-                self.brain_md_path.read_text(encoding="utf-8")
-                if self.brain_md_path.exists()
-                else self.regenerate_brain_md()
-            )
+            brain_md = self.get_cached_brain_md()
             entities_out: list[dict[str, Any]] = []
             for slug, meta in sorted(
                 (reg.get("entities") or {}).items(),
@@ -515,6 +563,45 @@ class SatzBrain:
             ]
 
             scored: list[tuple[float, str, dict[str, Any]]] = []
+            slug_list = list(entities.keys())
+            ent_texts: list[str] = []
+            for slug in slug_list:
+                meta = entities[slug]
+                aliases_str = " ".join(str(a) for a in (meta.get("aliases") or []))
+                ent_texts.append(
+                    f"{meta.get('name') or slug} {aliases_str} {meta.get('summary') or ''}"
+                )
+
+            sim_scores: dict[str, float] = {}
+            if search_blob.strip() and ent_texts:
+                enc = self._get_encoder()
+                if enc is not None:
+                    try:
+                        import numpy as np
+
+                        missing_indices: list[int] = []
+                        missing_texts: list[str] = []
+                        for idx, sl in enumerate(slug_list):
+                            txt = ent_texts[idx]
+                            cached = self._entity_emb_cache.get(sl)
+                            if cached is None or cached[0] != txt:
+                                missing_indices.append(idx)
+                                missing_texts.append(txt)
+
+                        q_and_missing = [search_blob[:400]] + missing_texts
+                        encoded_batch = enc.encode(q_and_missing).astype(np.float32)
+                        q_vec = encoded_batch[0]
+                        for m_offset, orig_idx in enumerate(missing_indices):
+                            sl = slug_list[orig_idx]
+                            self._entity_emb_cache[sl] = (ent_texts[orig_idx], encoded_batch[1 + m_offset])
+
+                        cand_vecs = np.stack([self._entity_emb_cache[sl][1] for sl in slug_list], axis=0)
+                        dots = cand_vecs @ q_vec
+                        for idx, sl in enumerate(slug_list):
+                            sim_scores[sl] = float(dots[idx])
+                    except Exception:
+                        pass
+
             for slug, meta in entities.items():
                 score = 0.0
                 name_l = str(meta.get("name") or "").lower()
@@ -535,7 +622,11 @@ class SatzBrain:
                 if int(meta.get("tier") or 2) == 1:
                     score += 0.5
 
-                if score > 0:
+                sim = sim_scores.get(slug, 0.0)
+                if sim > 0.12:
+                    score += sim * 2.5
+
+                if score > 0.6:
                     scored.append((score, slug, meta))
 
             scored.sort(key=lambda item: item[0], reverse=True)
@@ -553,7 +644,7 @@ class SatzBrain:
                         "path": ref or "",
                         "summary": meta.get("summary") or "",
                         "attributes": meta.get("attributes") or {},
-                        "body": body_text[:1200],
+                        "body": body_text[:800],
                     }
                 )
             return results
@@ -562,11 +653,13 @@ class SatzBrain:
         self,
         query: str,
         open_sources: list[dict[str, Any]] | None = None,
+        max_chars: int = 3000,
     ) -> str:
         """
-        Builds the Brain context block injected into the model prompt:
-        1. Compressed BRAIN.md index (Tier 1 & Tier 2)
-        2. Hot-loaded full entity details matching the query or active tabs
+        Section 3.2 (M9):
+        - Keeps BRAIN.md cached in memory (reloaded only when mtime changes).
+        - Sends only Tier 1 rows whose name or alias overlaps the question or open sources,
+          plus hot entities, capped at 3,000 characters for the whole Brain section.
         """
         with self.lock:
             reg = self._load_registry()
@@ -576,27 +669,99 @@ class SatzBrain:
                     "SATZ BRAIN (LOCAL KNOWLEDGE GRAPH):\n"
                     "No entities stored yet. You can store entities, addresses, contacts, accounts, "
                     "and notes into the Brain at any time using <brain_store>..."
-                )
+                )[:max_chars]
 
-            brain_md = (
-                self.brain_md_path.read_text(encoding="utf-8")
-                if self.brain_md_path.exists()
-                else self.regenerate_brain_md()
-            )
+            # Warm / validate in-memory BRAIN.md cache via mtime check
+            _ = self.get_cached_brain_md()
+
+            search_blob = (query or "").lower()
+            for src in open_sources or []:
+                search_blob += " " + str(src.get("title") or "").lower()
+                search_blob += " " + str(src.get("domain") or "").lower()
+                search_blob += " " + str(src.get("url") or "").lower()
+
+            query_tokens = {
+                t
+                for t in re.findall(r"[a-z0-9]{3,}", search_blob)
+                if t not in {"the", "and", "for", "from", "with", "this", "that", "what", "where", "when", "give", "show", "tell", "http", "https", "www"}
+            }
+
+            scored_tier1_rows: list[tuple[float, str]] = []
+            for slug, meta in entities.items():
+                if int(meta.get("tier") or 2) != 1:
+                    continue
+                name_str = str(meta.get("name") or slug)
+                name_l = name_str.lower()
+                aliases = [str(a).lower() for a in (meta.get("aliases") or [])]
+                name_tokens = set(re.findall(r"[a-z0-9]{3,}", name_l + " " + " ".join(aliases)))
+
+                row_score = 0.0
+                if slug in search_blob or (name_l and name_l in search_blob):
+                    row_score += 10.0
+                if any(al and al in search_blob for al in aliases):
+                    row_score += 8.0
+                overlap_cnt = len(query_tokens & name_tokens)
+                row_score += overlap_cnt * 2.0
+
+                if row_score <= 0.0:
+                    continue
+
+                etype = str(meta.get("$type") or "note")
+                status = str(meta.get("$status") or "active")
+                summary = str(meta.get("summary") or "").replace("|", "/").replace("\n", " ")[:100]
+                ref = str(meta.get("$ref") or "")
+                attrs = meta.get("attributes") or {}
+                attr_pairs = [
+                    f"{k}:{str(v).replace('|', '/')[:40]}"
+                    for k, v in list(attrs.items())[:3]
+                    if k != "source_url"
+                ]
+                attr_str = ",".join(attr_pairs) if attr_pairs else ref
+                row_line = f"{slug}|{etype}|{name_str.replace('|', '/')}|{status}|{summary}|{attr_str}"
+                scored_tier1_rows.append((row_score, row_line))
+
+            scored_tier1_rows.sort(key=lambda item: (-item[0], item[1]))
+
+            header_lines = [
+                "# BRAIN.md (Relevant Tier 1 Index)",
+                "id|type|name|status|summary|attributes",
+            ]
+            if scored_tier1_rows:
+                tier1_budget = max_chars // 2
+                cur_len = sum(len(x) + 1 for x in header_lines)
+                for _sc, rline in scored_tier1_rows[:20]:
+                    if cur_len + len(rline) + 1 > tier1_budget:
+                        break
+                    header_lines.append(rline)
+                    cur_len += len(rline) + 1
+            else:
+                header_lines.append("(no direct Tier 1 match for this query)")
+
+            out = "\n".join(header_lines)
             hot = self.load_hot_entities(query, open_sources, limit=5)
-
-            parts = [brain_md.strip()]
-            if hot:
-                parts.append("\n## Hot-Loaded Brain Entities (Full Detail)")
+            if hot and len(out) < max_chars - 120:
+                out += "\n\n## Hot-Loaded Brain Entities"
                 for h in hot:
-                    attrs_json = json.dumps(h["attributes"], ensure_ascii=False) if h["attributes"] else "{}"
-                    parts.append(
-                        f"### [{h['type'].upper()}] {h['name']} ({h['path']})\n"
+                    attrs_json = (
+                        json.dumps(h["attributes"], ensure_ascii=False)
+                        if h["attributes"]
+                        else "{}"
+                    )
+                    block = (
+                        f"\n### [{h['type'].upper()}] {h['name']} ({h['path']})\n"
                         f"Summary: {h['summary']}\n"
                         f"Attributes: {attrs_json}\n"
                         f"{h['body']}"
                     )
-            return "\n".join(parts)
+                    if len(out) + len(block) <= max_chars:
+                        out += block
+                    else:
+                        rem = max_chars - len(out)
+                        if rem > 80:
+                            out += block[:rem]
+                        break
+
+            return out[:max_chars]
 
     def enrich_from_page(
         self,
