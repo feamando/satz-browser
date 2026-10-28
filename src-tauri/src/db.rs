@@ -19,6 +19,10 @@ pub struct Conversation {
     pub summary: Option<String>,
 }
 
+fn default_tab_kind() -> String {
+    "site".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowserTab {
     pub id: String,
@@ -28,6 +32,8 @@ pub struct BrowserTab {
     pub title: String,
     pub is_open: bool,
     pub created_at: String,
+    #[serde(default = "default_tab_kind")]
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,6 +214,7 @@ impl DbState {
                 title TEXT NOT NULL,
                 is_open INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'site',
                 FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
             );
 
@@ -271,6 +278,23 @@ impl DbState {
             .unwrap_or(false);
         if !has_summary_col {
             conn.execute("ALTER TABLE conversations ADD COLUMN summary TEXT NULL", [])?;
+        }
+
+        let has_tab_kind_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('tabs') WHERE name = 'kind'",
+                [],
+                |r| {
+                    let c: i64 = r.get(0)?;
+                    Ok(c > 0)
+                },
+            )
+            .unwrap_or(false);
+        if !has_tab_kind_col {
+            conn.execute(
+                "ALTER TABLE tabs ADD COLUMN kind TEXT NOT NULL DEFAULT 'site'",
+                [],
+            )?;
         }
 
         for (col_name, col_type) in [
@@ -489,7 +513,10 @@ impl DbState {
                     (SELECT COUNT(*) FROM tabs t WHERE t.conversation_id = c.id AND t.is_open = 1) AS src_cnt,
                     c.summary
              FROM conversations c
-             ORDER BY c.pinned DESC, c.last_active_at DESC, c.created_at DESC",
+             ORDER BY CASE WHEN c.origin = 'mail' THEN 1 ELSE 0 END DESC,
+                      c.pinned DESC,
+                      c.last_active_at DESC,
+                      c.created_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
             let pinned_int: i32 = row.get(3)?;
@@ -506,6 +533,35 @@ impl DbState {
             })
         })?;
         rows.collect()
+    }
+
+    pub fn ensure_mail_conversation(&self) -> SqlResult<Conversation> {
+        {
+            let conn = self.conn.lock().unwrap();
+            let existing_id: Option<String> = conn
+                .query_row(
+                    "SELECT id FROM conversations WHERE origin = 'mail' LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(cid) = existing_id {
+                conn.execute(
+                    "UPDATE conversations SET pinned = 1, status = 'active' WHERE id = ?1",
+                    params![cid],
+                )?;
+                drop(conn);
+                return Ok(self.get_conversation(&cid)?.conversation);
+            }
+            let ts = now_epoch_secs_str();
+            let cid = "conv-mail";
+            conn.execute(
+                "INSERT OR REPLACE INTO conversations (id, title, status, pinned, origin, created_at, last_active_at)
+                 VALUES (?1, 'mail', 'active', 1, 'mail', ?2, ?2)",
+                params![cid, ts],
+            )?;
+        }
+        Ok(self.get_conversation("conv-mail")?.conversation)
     }
 
     pub fn get_conversation(&self, conversation_id: &str) -> SqlResult<ConversationDetail> {
@@ -534,7 +590,7 @@ impl DbState {
         )?;
 
         let mut tab_stmt = conn.prepare(
-            "SELECT id, conversation_id, position, url, title, is_open, created_at
+            "SELECT id, conversation_id, position, url, title, is_open, created_at, kind
              FROM tabs
              WHERE conversation_id = ?1
              ORDER BY position ASC, created_at ASC",
@@ -550,6 +606,7 @@ impl DbState {
                     title: row.get(4)?,
                     is_open: is_open_int != 0,
                     created_at: row.get(6)?,
+                    kind: row.get::<_, Option<String>>(7)?.unwrap_or_else(default_tab_kind),
                 })
             })?
             .collect::<SqlResult<Vec<_>>>()?;
@@ -688,7 +745,7 @@ impl DbState {
         {
             let conn = self.conn.lock().unwrap();
             conn.execute(
-                "UPDATE conversations SET pinned = CASE WHEN pinned = 1 THEN 0 ELSE 1 END WHERE id = ?1",
+                "UPDATE conversations SET pinned = CASE WHEN origin = 'mail' THEN 1 WHEN pinned = 1 THEN 0 ELSE 1 END WHERE id = ?1",
                 params![conversation_id],
             )?;
         }
@@ -704,7 +761,7 @@ impl DbState {
         {
             let conn = self.conn.lock().unwrap();
             conn.execute(
-                "UPDATE conversations SET status = ?2 WHERE id = ?1",
+                "UPDATE conversations SET status = CASE WHEN origin = 'mail' THEN 'active' ELSE ?2 END WHERE id = ?1",
                 params![conversation_id, status],
             )?;
         }
@@ -713,8 +770,20 @@ impl DbState {
 
     pub fn delete_conversation(&self, conversation_id: &str) -> SqlResult<()> {
         let conn = self.conn.lock().unwrap();
+        let origin: Option<String> = conn
+            .query_row(
+                "SELECT origin FROM conversations WHERE id = ?1",
+                params![conversation_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if origin.as_deref() == Some("mail") {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "Pinned Mail conversation cannot be deleted".to_string(),
+            ));
+        }
         conn.execute(
-            "DELETE FROM conversations WHERE id = ?1",
+            "DELETE FROM conversations WHERE id = ?1 AND origin != 'mail'",
             params![conversation_id],
         )?;
         Ok(())
@@ -726,10 +795,83 @@ impl DbState {
         url: &str,
         title: Option<&str>,
     ) -> SqlResult<(BrowserTab, SourceItem)> {
+        self.open_tab_with_kind(conversation_id, url, title, None)
+    }
+
+    pub fn open_tab_with_kind(
+        &self,
+        conversation_id: &str,
+        url: &str,
+        title: Option<&str>,
+        kind: Option<&str>,
+    ) -> SqlResult<(BrowserTab, SourceItem)> {
         let conn = self.conn.lock().unwrap();
-        let tab_id = gen_id("tab");
         let ts = now_epoch_secs_str();
-        let domain = extract_domain(url);
+        let resolved_kind = match kind {
+            Some("mail") | Some("compose") | Some("site") => kind.unwrap().to_string(),
+            _ if url.starts_with("satzmail://message/") => "mail".to_string(),
+            _ if url.starts_with("satzmail://compose") => "compose".to_string(),
+            _ => "site".to_string(),
+        };
+
+        // If an open mail tab for this message URL already exists in the conversation, return it
+        if resolved_kind == "mail" {
+            let existing: Option<BrowserTab> = conn
+                .query_row(
+                    "SELECT id, conversation_id, position, url, title, is_open, created_at, kind
+                     FROM tabs
+                     WHERE conversation_id = ?1 AND url = ?2 AND is_open = 1
+                     LIMIT 1",
+                    params![conversation_id, url],
+                    |row| {
+                        let is_open_int: i32 = row.get(5)?;
+                        Ok(BrowserTab {
+                            id: row.get(0)?,
+                            conversation_id: row.get(1)?,
+                            position: row.get(2)?,
+                            url: row.get(3)?,
+                            title: row.get(4)?,
+                            is_open: is_open_int != 0,
+                            created_at: row.get(6)?,
+                            kind: row.get::<_, Option<String>>(7)?.unwrap_or_else(default_tab_kind),
+                        })
+                    },
+                )
+                .optional()?;
+            if let Some(tab) = existing {
+                let msg_id = url.strip_prefix("satzmail://message/").unwrap_or(&tab.id);
+                let src_id = format!("mail:{}", msg_id);
+                conn.execute(
+                    "INSERT OR REPLACE INTO sources (id, conversation_id, tab_id, url, title, domain, in_context, added_at, captured_at, text_chars)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'mail', 1, ?6, ?6, NULL)",
+                    params![src_id, conversation_id, tab.id, url, tab.title, ts],
+                )?;
+                return Ok((
+                    tab.clone(),
+                    SourceItem {
+                        id: src_id,
+                        conversation_id: conversation_id.to_string(),
+                        tab_id: Some(tab.id),
+                        url: url.to_string(),
+                        title: tab.title,
+                        domain: "mail".to_string(),
+                        in_context: true,
+                        added_at: ts.clone(),
+                        captured_at: Some(ts),
+                        text_chars: None,
+                    },
+                ));
+            }
+        }
+
+        let tab_id = gen_id("tab");
+        let domain = if resolved_kind == "mail" {
+            "mail".to_string()
+        } else if resolved_kind == "compose" {
+            "compose".to_string()
+        } else {
+            extract_domain(url)
+        };
         let tab_title = title
             .filter(|t| !t.trim().is_empty())
             .unwrap_or(&domain)
@@ -744,24 +886,32 @@ impl DbState {
             .unwrap_or(0);
 
         conn.execute(
-            "INSERT INTO tabs (id, conversation_id, position, url, title, is_open, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)",
-            params![tab_id, conversation_id, next_pos, url, tab_title, ts],
+            "INSERT INTO tabs (id, conversation_id, position, url, title, is_open, created_at, kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)",
+            params![tab_id, conversation_id, next_pos, url, tab_title, ts, resolved_kind],
         )?;
 
-        let src_id = gen_id("src");
-        conn.execute(
-            "INSERT INTO sources (id, conversation_id, tab_id, url, title, domain, in_context, added_at, captured_at, text_chars)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, NULL, NULL)",
-            params![src_id, conversation_id, tab_id, url, tab_title, domain, ts],
-        )?;
+        let src_id = if resolved_kind == "mail" {
+            let msg_id = url.strip_prefix("satzmail://message/").unwrap_or(&tab_id);
+            format!("mail:{}", msg_id)
+        } else {
+            gen_id("src")
+        };
 
-        let hist_id = gen_id("hist");
-        conn.execute(
-            "INSERT INTO history_log (id, conversation_id, tab_id, url, title, visited_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![hist_id, conversation_id, tab_id, url, tab_title, ts],
-        )?;
+        if resolved_kind != "compose" {
+            conn.execute(
+                "INSERT OR REPLACE INTO sources (id, conversation_id, tab_id, url, title, domain, in_context, added_at, captured_at, text_chars)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, NULL, NULL)",
+                params![src_id, conversation_id, tab_id, url, tab_title, domain, ts],
+            )?;
+
+            let hist_id = gen_id("hist");
+            conn.execute(
+                "INSERT INTO history_log (id, conversation_id, tab_id, url, title, visited_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![hist_id, conversation_id, tab_id, url, tab_title, ts],
+            )?;
+        }
 
         conn.execute(
             "UPDATE conversations SET last_active_at = ?2 WHERE id = ?1",
@@ -777,6 +927,7 @@ impl DbState {
                 title: tab_title.clone(),
                 is_open: true,
                 created_at: ts.clone(),
+                kind: resolved_kind,
             },
             SourceItem {
                 id: src_id,
@@ -840,9 +991,9 @@ impl DbState {
         new_title: Option<&str>,
     ) -> SqlResult<Option<(BrowserTab, Option<SourceItem>)>> {
         let conn = self.conn.lock().unwrap();
-        let current: Option<(String, i32, String, String, i32, String)> = conn
+        let current: Option<(String, i32, String, String, i32, String, String)> = conn
             .query_row(
-                "SELECT conversation_id, position, url, title, is_open, created_at FROM tabs WHERE id = ?1",
+                "SELECT conversation_id, position, url, title, is_open, created_at, COALESCE(kind, 'site') FROM tabs WHERE id = ?1",
                 params![tab_id],
                 |r| {
                     Ok((
@@ -852,12 +1003,13 @@ impl DbState {
                         r.get(3)?,
                         r.get(4)?,
                         r.get(5)?,
+                        r.get(6)?,
                     ))
                 },
             )
             .optional()?;
 
-        let (conv_id, position, cur_url, cur_title, is_open_int, created_at) = match current {
+        let (conv_id, position, cur_url, cur_title, is_open_int, created_at, tab_kind) = match current {
             Some(c) => c,
             None => return Ok(None),
         };
@@ -914,6 +1066,7 @@ impl DbState {
                 title: final_title.clone(),
                 is_open: is_open_int != 0,
                 created_at,
+                kind: tab_kind,
             };
             let new_source = SourceItem {
                 id: src_id,
@@ -953,6 +1106,7 @@ impl DbState {
             title: final_title,
             is_open: is_open_int != 0,
             created_at,
+            kind: tab_kind,
         };
         Ok(Some((updated_tab, None)))
     }
@@ -1405,5 +1559,91 @@ mod tests {
             detail.messages[0].citation_check_json.as_deref(),
             Some(check_json)
         );
+    }
+
+    #[test]
+    fn test_tabs_kind_migration_and_pinned_mail_conversation() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Simulate pre-M11 v2 database without `tabs.kind`
+        conn.execute_batch(
+            "
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema_version', '2');
+            CREATE TABLE conversations (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                pinned INTEGER NOT NULL DEFAULT 0,
+                origin TEXT NOT NULL DEFAULT 'chat',
+                created_at TEXT NOT NULL,
+                last_active_at TEXT NOT NULL
+            );
+            CREATE TABLE tabs (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                position INTEGER NOT NULL DEFAULT 0,
+                url TEXT NOT NULL,
+                title TEXT NOT NULL,
+                is_open INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            );
+            INSERT INTO conversations (id, title, status, pinned, origin, created_at, last_active_at)
+            VALUES ('conv-pre-m11', 'Pre-M11', 'active', 0, 'chat', '1700000000', '1700000000');
+            INSERT INTO tabs (id, conversation_id, position, url, title, is_open, created_at)
+            VALUES ('tab-legacy-1', 'conv-pre-m11', 0, 'https://dw.com', 'DW', 1, '1700000000');
+            ",
+        )
+        .unwrap();
+
+        DbState::init_connection(&conn).unwrap();
+        let state = DbState {
+            conn: Mutex::new(conn),
+            db_path: PathBuf::from(":memory:"),
+        };
+
+        // 1. Existing tab defaults to kind = 'site'
+        let pre_detail = state.get_conversation("conv-pre-m11").unwrap();
+        assert_eq!(pre_detail.tabs.len(), 1);
+        assert_eq!(pre_detail.tabs[0].kind, "site");
+
+        // 2. Pinned Mail conversation creation & protection against unpin/archive/delete
+        let mail_conv = state.ensure_mail_conversation().unwrap();
+        assert_eq!(mail_conv.origin, "mail");
+        assert!(mail_conv.pinned);
+        assert_eq!(mail_conv.status, "active");
+
+        let after_unpin = state.pin_conversation(&mail_conv.id).unwrap();
+        assert!(after_unpin.pinned, "Mail conversation must stay pinned");
+
+        let after_archive = state.archive_conversation(&mail_conv.id, true).unwrap();
+        assert_eq!(after_archive.status, "active", "Mail conversation cannot be archived");
+
+        assert!(
+            state.delete_conversation(&mail_conv.id).is_err(),
+            "Mail conversation cannot be deleted"
+        );
+
+        // 3. Opening mail and compose tabs in Mail conversation
+        let (mail_tab, mail_src) = state
+            .open_tab_with_kind(
+                &mail_conv.id,
+                "satzmail://message/msg-42",
+                Some("Re: Lisbon dates"),
+                Some("mail"),
+            )
+            .unwrap();
+        assert_eq!(mail_tab.kind, "mail");
+        assert_eq!(mail_src.id, "mail:msg-42");
+
+        let (compose_tab, _) = state
+            .open_tab_with_kind(
+                &mail_conv.id,
+                "satzmail://compose/draft-1",
+                Some("compose: Re: Lisbon dates"),
+                Some("compose"),
+            )
+            .unwrap();
+        assert_eq!(compose_tab.kind, "compose");
     }
 }

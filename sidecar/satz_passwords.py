@@ -329,6 +329,21 @@ class ProfilePasswordManager:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def get_profile_mail_db_path(self, profile_id: str | None = None) -> Path:
+        self._check_autolock()
+        pid = profile_id or self.active_profile_id
+        if not pid:
+            return self.base_dir / "mail.sqlite"
+        return self.get_profile_dir(pid) / "mail.sqlite"
+
+    def get_unlocked_credentials_map(self) -> dict[str, str]:
+        with self.lock:
+            self._check_autolock()
+            if not self.unlocked or not self._unlocked_env_cache:
+                return {}
+            self.touch_activity()
+            return dict(self._unlocked_env_cache)
+
     def get_profile_vault_path(self, profile_id: str | None = None) -> Path | None:
         pid = profile_id or self.active_profile_id
         if not pid:
@@ -769,19 +784,24 @@ class ProfilePasswordManager:
 
     def upsert_service_credential(
         self,
-        service_or_domain: str,
-        username: str,
+        service_or_domain: str = "",
+        username: str = "",
         password: str = "",
         token: str = "",
         cookie: str = "",
         url: str = "",
+        imap_host: str = "",
+        smtp_host: str = "",
+        extra: dict[str, str] | None = None,
+        service: str = "",
     ) -> dict[str, Any]:
         with self.lock:
             self._check_autolock()
             if not self.unlocked or not self.active_profile_id:
                 raise PermissionError("Unlock a profile with its 6-digit PIN before storing passwords.")
 
-            prefix = _normalize_service_prefix(service_or_domain)
+            target_svc = service_or_domain or service
+            prefix = _normalize_service_prefix(target_svc)
             env_map = dict(self._unlocked_env_cache)
 
             if username.strip():
@@ -792,8 +812,16 @@ class ProfilePasswordManager:
                 env_map[f"{prefix}_TOKEN"] = token.strip()
             if cookie.strip():
                 env_map[f"{prefix}_COOKIE"] = cookie.strip()
-            effective_url = (url or service_or_domain or "").strip()
-            if effective_url:
+            if imap_host.strip():
+                env_map[f"{prefix}_IMAP_HOST"] = imap_host.strip()
+            if smtp_host.strip():
+                env_map[f"{prefix}_SMTP_HOST"] = smtp_host.strip()
+            if extra:
+                for k, v in extra.items():
+                    if k and v:
+                        env_map[str(k).strip().upper()] = str(v).strip()
+            effective_url = (url or target_svc or "").strip()
+            if effective_url and not imap_host:
                 env_map[f"{prefix}_URL"] = effective_url
 
             self._persist_active_vault(env_map)
@@ -948,6 +976,22 @@ class ProfilePasswordManager:
             elif service == "OUTLOOK" or host_matches_allowed(matched_host, "outlook.live.com") or host_matches_allowed(matched_host, "outlook.office.com"):
                 imap_host = "outlook.office365.com"
 
+        # Section 4.4 (M11): Once an account exists in mail.sqlite for that service/host/email,
+        # read from mail.sqlite instead of the 8-email raw IMAP snippet path.
+        mail_sqlite_text = self._read_recent_emails_from_mail_sqlite(
+            service=service,
+            host=imap_host,
+            username=username,
+            limit=8,
+        )
+        if mail_sqlite_text:
+            return {
+                "service": service,
+                "username": username,
+                "mode": "mail_sqlite",
+                "text": mail_sqlite_text,
+            }
+
         if imap_host and username and password:
             imap_text = self._fetch_imap_recent_emails(imap_host, username, password, limit=8)
             if imap_text:
@@ -970,6 +1014,66 @@ class ProfilePasswordManager:
                 }
 
         return None
+
+    def _read_recent_emails_from_mail_sqlite(
+        self,
+        service: str,
+        host: str,
+        username: str,
+        limit: int = 8,
+    ) -> str:
+        """
+        Section 4.4 (M11): Reads recent messages from `profiles/<id>/mail.sqlite` once an account
+        exists for that service/email/host, replacing the legacy 8-email live IMAP snippet path.
+        """
+        import sqlite3
+
+        mail_db = self.get_profile_mail_db_path()
+        if not mail_db.exists():
+            return ""
+        try:
+            conn = sqlite3.connect(str(mail_db), timeout=5.0)
+            conn.row_factory = sqlite3.Row
+            try:
+                acct = conn.execute(
+                    """
+                    SELECT id, email, in_host, vault_prefix
+                    FROM accounts
+                    WHERE LOWER(vault_prefix) = LOWER(?)
+                       OR LOWER(email) = LOWER(?)
+                       OR (? != '' AND LOWER(in_host) = LOWER(?))
+                    LIMIT 1
+                    """,
+                    (service, username, host, host),
+                ).fetchone()
+                if not acct:
+                    return ""
+                rows = conn.execute(
+                    """
+                    SELECT id, from_name, from_addr, subject, date, snippet, body_text
+                    FROM messages
+                    WHERE account_id = ? AND hidden = 0
+                    ORDER BY date DESC
+                    LIMIT ?
+                    """,
+                    (acct["id"], limit),
+                ).fetchall()
+                if not rows:
+                    return ""
+                blocks: list[str] = [
+                    f"[LOCAL MAIL.SQLITE INBOX ({acct['email']} on {acct['in_host']}) - LATEST {len(rows)} EMAILS]"
+                ]
+                for idx, r in enumerate(rows, 1):
+                    sender = f"{r['from_name']} <{r['from_addr']}>".strip() if r["from_name"] else r["from_addr"]
+                    snip = (r["snippet"] or r["body_text"] or "").strip()[:500]
+                    blocks.append(
+                        f"[{idx}] From: {sender} | Subject: {r['subject']} | ID: mail:{r['id']}\n    Snippet: {snip}"
+                    )
+                return "\n".join(blocks)
+            finally:
+                conn.close()
+        except Exception:
+            return ""
 
     def _fetch_imap_recent_emails(self, host: str, username: str, password: str, limit: int = 8) -> str:
         try:
