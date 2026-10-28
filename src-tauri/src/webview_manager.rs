@@ -817,6 +817,9 @@ pub fn capture_open_tabs_for_conversation(
 
     let mut receivers = Vec::new();
     for tab in open_tabs {
+        if tab.kind != "site" || tab.url.starts_with("satzmail://") {
+            continue;
+        }
         if !should_recapture_tab(&tab.id, &tab.url, &visible_snapshot, &cache_snapshot) {
             continue;
         }

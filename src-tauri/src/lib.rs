@@ -167,14 +167,20 @@ fn delete_conversation(
 }
 
 #[tauri::command]
+fn ensure_mail_conversation(db: State<'_, DbState>) -> Result<Conversation, String> {
+    db.ensure_mail_conversation().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn open_tab(
     db: State<'_, DbState>,
     conversation_id: String,
     url: String,
     title: Option<String>,
+    kind: Option<String>,
 ) -> Result<BrowserTab, String> {
     let (tab, _src) = db
-        .open_tab(&conversation_id, &url, title.as_deref())
+        .open_tab_with_kind(&conversation_id, &url, title.as_deref(), kind.as_deref())
         .map_err(|e| e.to_string())?;
     Ok(tab)
 }
@@ -670,6 +676,7 @@ pub fn run() {
             get_conversation,
             get_conversation_bundle,
             create_conversation,
+            ensure_mail_conversation,
             rename_conversation,
             pin_conversation,
             toggle_pin_conversation,
