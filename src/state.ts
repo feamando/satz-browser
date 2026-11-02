@@ -35,6 +35,7 @@ export interface AppState {
   renamingConvId: string | null;
   selectedModel: LocalModelId;
   webSearchEnabled: boolean;
+  mailContextEnabled: boolean;
   isStreaming: boolean;
   streamingText: string;
   streamingStatus: string;
@@ -65,6 +66,20 @@ export interface AppState {
   mailSearchQuery: string;
   mailSearchRows: Array<Record<string, unknown>> | null;
   mailMessageDetails: Record<string, Record<string, unknown>>;
+  mailTriageOverview: string;
+  mailTriageSources: Array<{
+    id: string;
+    url: string;
+    title: string;
+    domain: string;
+    is_open_tab: boolean;
+  }>;
+  siteTabPromoCodes: Record<string, Array<Record<string, unknown>>>;
+  openCodesPopoverTabId: string | null;
+  mailEvalOpen: boolean;
+  mailEvalItems: Array<Record<string, unknown>>;
+  mailEvalIdx: number;
+  mailEvalReport: Record<string, unknown> | null;
   mailComposeDrafts: Record<
     string,
     {
@@ -102,6 +117,7 @@ export const state: AppState = {
   renamingConvId: null,
   selectedModel: "gemma-4-e4b",
   webSearchEnabled: false,
+  mailContextEnabled: false,
   isStreaming: false,
   streamingText: "",
   streamingStatus: "",
@@ -149,6 +165,14 @@ export const state: AppState = {
   mailSearchQuery: "",
   mailSearchRows: null,
   mailMessageDetails: {},
+  mailTriageOverview: "",
+  mailTriageSources: [],
+  siteTabPromoCodes: {},
+  openCodesPopoverTabId: null,
+  mailEvalOpen: false,
+  mailEvalItems: [],
+  mailEvalIdx: 0,
+  mailEvalReport: null,
   mailComposeDrafts: {},
 };
 

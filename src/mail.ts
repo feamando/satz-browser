@@ -4,9 +4,13 @@ import {
   sidecarConfirmMailSend,
   sidecarDraftMailReply,
   sidecarGetMailAccounts,
+  sidecarGetMailEval,
+  sidecarGetMailEvalReport,
   sidecarGetMailLane,
   sidecarGetMailMessage,
+  sidecarGetMailTriage,
   sidecarHideMailMessage,
+  sidecarLabelMailEval,
   sidecarLabelMailMessage,
   sidecarOpenMailMessage,
   sidecarPrepareMailSend,
@@ -138,10 +142,17 @@ export async function refreshMailState(): Promise<void> {
     if (state.mailActiveLane === "inbox") {
       state.mailInboxRows = laneRes.rows ?? [];
     }
+    const triageRes = await sidecarGetMailTriage();
+    if (triageRes.ok) {
+      state.mailTriageOverview = triageRes.overview ?? "";
+      state.mailTriageSources = triageRes.sources ?? [];
+    }
   } else {
     state.mailLaneRows = [];
     state.mailLaneGroups = [];
     state.mailCounts = { inbox_unread: 0, pings: 0, orders: 0, promos: 0 };
+    state.mailTriageOverview = "";
+    state.mailTriageSources = [];
   }
 }
 
@@ -164,8 +175,12 @@ export function renderMailAccountsSectionHtml(): string {
     <div class="kb-section" id="mail-accounts-panel">
       <div class="kb-section-title">
         <span>mail accounts (${accounts.length})</span>
-        <button id="mail-sync-all-btn">[sync now]</button>
+        <div>
+          <button id="mail-toggle-eval-btn" class="${state.mailEvalOpen ? "active" : ""}">[eval mode (200 emails)]</button>
+          <button id="mail-sync-all-btn">[sync now]</button>
+        </div>
       </div>
+      ${state.mailEvalOpen ? renderMailEvalPanelHtml() : ""}
       ${
         state.mailStatusMessage
           ? `<div class="kb-status-banner">${escapeHtml(state.mailStatusMessage)}</div>`
@@ -415,6 +430,195 @@ export function bindMailAccountsEvents(
       await onChanged();
     });
   });
+
+  container
+    .querySelector("#mail-toggle-eval-btn")
+    ?.addEventListener("click", async () => {
+      state.mailEvalOpen = !state.mailEvalOpen;
+      if (state.mailEvalOpen) {
+        const sample = await sidecarGetMailEval(200);
+        state.mailEvalItems = sample.items ?? [];
+        state.mailEvalIdx = 0;
+        state.mailEvalReport = await sidecarGetMailEvalReport();
+      }
+      await onChanged();
+    });
+
+  container.querySelectorAll("[data-eval-nav]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const dir = (btn as HTMLElement).getAttribute("data-eval-nav");
+      if (dir === "prev") {
+        state.mailEvalIdx = Math.max(0, state.mailEvalIdx - 1);
+      } else {
+        state.mailEvalIdx = Math.min(
+          Math.max(0, state.mailEvalItems.length - 1),
+          state.mailEvalIdx + 1
+        );
+      }
+      await onChanged();
+    });
+  });
+
+  container.querySelectorAll("[data-eval-label]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const item = state.mailEvalItems[state.mailEvalIdx];
+      if (!item) return;
+      const lbl = (btn as HTMLElement).getAttribute("data-eval-label") as
+        | "email"
+        | "ping"
+        | "information"
+        | "promotion"
+        | null;
+      if (!lbl) return;
+      const mid = String(item.id ?? "");
+      const curExtOk =
+        typeof item.human_extract_ok === "number"
+          ? item.human_extract_ok === 1
+          : undefined;
+      await sidecarLabelMailEval(mid, lbl, curExtOk);
+      item.human_label = lbl;
+      state.mailEvalReport = await sidecarGetMailEvalReport();
+      if (
+        lbl !== "information" &&
+        lbl !== "promotion" &&
+        state.mailEvalIdx < state.mailEvalItems.length - 1
+      ) {
+        state.mailEvalIdx += 1;
+      }
+      await onChanged();
+    });
+  });
+
+  container.querySelectorAll("[data-eval-extract]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const item = state.mailEvalItems[state.mailEvalIdx];
+      if (!item) return;
+      const okStr = (btn as HTMLElement).getAttribute("data-eval-extract");
+      const extOk = okStr === "y";
+      const mid = String(item.id ?? "");
+      const lbl = (String(item.human_label || item.pred_label || "email") as
+        | "email"
+        | "ping"
+        | "information"
+        | "promotion");
+      await sidecarLabelMailEval(mid, lbl, extOk);
+      item.human_label = lbl;
+      item.human_extract_ok = extOk ? 1 : 0;
+      state.mailEvalReport = await sidecarGetMailEvalReport();
+      if (state.mailEvalIdx < state.mailEvalItems.length - 1) {
+        state.mailEvalIdx += 1;
+      }
+      await onChanged();
+    });
+  });
+}
+
+function renderMailEvalPanelHtml(): string {
+  const items = state.mailEvalItems;
+  const idx = Math.min(state.mailEvalIdx, Math.max(0, items.length - 1));
+  const item = items[idx];
+  const rep = (state.mailEvalReport ?? {}) as Record<string, unknown>;
+  const matrix = (rep.confusion_matrix ?? {}) as Record<
+    string,
+    Record<string, number>
+  >;
+  const labels = ["email", "ping", "information", "promotion"];
+
+  if (!item) {
+    return `
+      <div class="kb-card">
+        <div class="kb-card-header">eval mode (200 stratified emails · excluded from training)</div>
+        <div class="muted">no messages sampled yet. sync a mail account first.</div>
+      </div>
+    `;
+  }
+
+  const extracts = (item.extracts ?? {}) as Record<string, string>;
+  const extEntries = Object.entries(extracts);
+  const humanLabel = String(item.human_label || "");
+  const predLabel = String(item.pred_label || "email");
+  const showExtractCheck =
+    humanLabel === "information" ||
+    humanLabel === "promotion" ||
+    predLabel === "information" ||
+    predLabel === "promotion";
+
+  return `
+    <div class="kb-card" id="mail-eval-card">
+      <div class="kb-card-header">
+        <span>eval mode · message ${idx + 1} / ${items.length} (labelled: ${Number(rep.total_evaluated ?? 0)})</span>
+        <div>
+          <button data-eval-nav="prev">[&lt; prev]</button>
+          <button data-eval-nav="next">[next &gt;]</button>
+        </div>
+      </div>
+      <div class="rail-row">
+        <span><strong>${escapeHtml(String(item.from_name || item.from_addr || ""))}</strong> · ${escapeHtml(String(item.subject || ""))}</span>
+        <span class="muted">pred: ${escapeHtml(predLabel)} (${Number(item.pred_confidence ?? 0).toFixed(2)}) ${humanLabel ? `· human: [${escapeHtml(humanLabel)}]` : ""}</span>
+      </div>
+      <div class="muted">${escapeHtml(String(item.new_text || item.snippet || "").slice(0, 360))}</div>
+      <div class="rail-row">
+        <span class="muted">set human label (1-4):</span>
+        <div>
+          <button data-eval-label="email" class="${humanLabel === "email" ? "active" : ""}">[1 email]</button>
+          <button data-eval-label="ping" class="${humanLabel === "ping" ? "active" : ""}">[2 ping]</button>
+          <button data-eval-label="information" class="${humanLabel === "information" ? "active" : ""}">[3 information]</button>
+          <button data-eval-label="promotion" class="${humanLabel === "promotion" ? "active" : ""}">[4 promotion]</button>
+        </div>
+      </div>
+      ${
+        showExtractCheck
+          ? `<div class="rail-row">
+              <span class="muted">extracts: ${
+                extEntries.length > 0
+                  ? extEntries
+                      .map(([k, v]) => `${escapeHtml(k)}=${escapeHtml(v)}`)
+                      .join(" · ")
+                  : "(none)"
+              }</span>
+              <div>
+                <span class="muted">correct?</span>
+                <button data-eval-extract="y" class="${item.human_extract_ok === 1 ? "active" : ""}">[y]</button>
+                <button data-eval-extract="n" class="${item.human_extract_ok === 0 ? "active" : ""}">[n]</button>
+              </div>
+            </div>`
+          : ""
+      }
+      <div class="rail-row">
+        <span class="muted">
+          gates: email-&gt;promo ${Number(rep.real_email_misfiled_as_promotion_pct ?? 0).toFixed(2)}% (target &lt;=1%) ·
+          promo recall ${Number(rep.promotion_recall_pct ?? 100).toFixed(2)}% (target &gt;=90%) ·
+          extract acc ${Number(rep.extraction_accuracy_pct ?? 100).toFixed(2)}% (target &gt;=90%)
+        </span>
+        <span>${rep.gates_passed ? "[gates: PASS]" : "[gates: pending]"}</span>
+      </div>
+      <table class="kb-table">
+        <thead>
+          <tr>
+            <th>true \\ pred</th>
+            <th>email</th>
+            <th>ping</th>
+            <th>information</th>
+            <th>promotion</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${labels
+            .map(
+              (t) => `
+            <tr>
+              <td>${escapeHtml(t)}</td>
+              ${labels
+                .map((p) => `<td>${Number(matrix[t]?.[p] ?? 0)}</td>`)
+                .join("")}
+            </tr>
+          `
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
 }
 
 export function renderMailLaneView(

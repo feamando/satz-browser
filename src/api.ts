@@ -951,7 +951,8 @@ export async function sidecarStreamChat(
   onStatus?: (status: string, phase?: string) => void,
   onError?: (err: string) => void,
   summary?: string,
-  onSourceStats?: (stats: SourceStatEntry[]) => void
+  onSourceStats?: (stats: SourceStatEntry[]) => void,
+  mail?: boolean
 ): Promise<{
   source_ids: string[];
   cited_sources?: Array<{ url: string; title: string }>;
@@ -966,7 +967,14 @@ export async function sidecarStreamChat(
   const res = await sidecarFetch("/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model, messages, sources, web, summary: summary ?? "" }),
+    body: JSON.stringify({
+      model,
+      messages,
+      sources,
+      web,
+      mail: Boolean(mail),
+      summary: summary ?? "",
+    }),
   });
   if (!res.ok || !res.body) {
     throw new Error(`/chat returned HTTP ${res.status}`);
@@ -1392,3 +1400,92 @@ export async function sidecarUndoMailSend(
     return { ok: false, error: String(e) };
   }
 }
+
+export async function sidecarGetMailTriage(): Promise<{
+  ok: boolean;
+  unlocked?: boolean;
+  overview?: string;
+  sources?: Array<{
+    id: string;
+    url: string;
+    title: string;
+    domain: string;
+    is_open_tab: boolean;
+  }>;
+  emails_needing_attention?: Array<Record<string, unknown>>;
+  order_updates?: Array<Record<string, unknown>>;
+  expiring_promos?: Array<Record<string, unknown>>;
+}> {
+  try {
+    const res = await sidecarFetch("/mail/triage");
+    if (!res.ok) return { ok: false };
+    return await res.json();
+  } catch {
+    return { ok: false };
+  }
+}
+
+export async function sidecarGetMailCodes(
+  domain: string
+): Promise<Array<Record<string, unknown>>> {
+  try {
+    const res = await sidecarFetch(
+      `/mail/codes?domain=${encodeURIComponent(domain)}`
+    );
+    if (!res.ok) return [];
+    const data = (await res.json()) as {
+      ok?: boolean;
+      codes?: Array<Record<string, unknown>>;
+    };
+    return data.codes ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export async function sidecarGetMailEval(limit = 200): Promise<{
+  ok: boolean;
+  total_sampled?: number;
+  labelled_count?: number;
+  items?: Array<Record<string, unknown>>;
+}> {
+  try {
+    const res = await sidecarFetch(`/mail/eval?limit=${limit}`);
+    if (!res.ok) return { ok: false, items: [] };
+    return await res.json();
+  } catch {
+    return { ok: false, items: [] };
+  }
+}
+
+export async function sidecarLabelMailEval(
+  messageId: string,
+  label: "email" | "ping" | "information" | "promotion",
+  extractOk?: boolean | null
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await sidecarFetch("/mail/eval/label", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message_id: messageId,
+        label,
+        extract_ok: extractOk,
+      }),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarGetMailEvalReport(): Promise<Record<string, unknown>> {
+  try {
+    const res = await sidecarFetch("/mail/eval/report");
+    if (!res.ok) return { ok: false };
+    return await res.json();
+  } catch {
+    return { ok: false };
+  }
+}
+

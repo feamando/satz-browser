@@ -12,6 +12,7 @@ export interface ChatActions {
   onSendMessage: (text: string) => void;
   onChangeModel: (model: LocalModelId) => void;
   onToggleWeb: () => void;
+  onToggleMail?: () => void;
   onClickCitation: (citationIndex: number, sourceId: string | null) => void;
   onOpenUrlAsTab: (url: string, title: string) => void;
   onSelectTab?: (tabId: string) => void;
@@ -108,11 +109,37 @@ export function renderChatPanel(
     )
     .join("");
 
+  const isMailConv = detail.conversation.origin === "mail";
+  const mailEffectiveOn = isMailConv || state.mailContextEnabled;
+  const triageSourceIds = state.mailTriageSources.map((s) => s.id);
+  const mailSuggestionsHtml =
+    isMailConv && !state.isStreaming
+      ? `
+        <div class="composer-controls">
+          <span class="muted">suggestions:</span>
+          <button class="citation-link" data-chat-suggest="what do I need to deal with today?">[what do I need to deal with today?]</button>
+          <button class="citation-link" data-chat-suggest="summarize unread">[summarize unread]</button>
+          <button class="citation-link" data-chat-suggest="draft a reply to [1]">[draft a reply to [1]]</button>
+        </div>
+      `
+      : "";
+
   container.innerHTML = `
     <div class="chat-column">
       <div class="chat-messages" id="chat-messages-list">
         ${
-          messages.length === 0 && !state.isStreaming
+          isMailConv && state.mailTriageOverview
+            ? renderMessageBlock(
+                "mail-triage-overview",
+                "assistant",
+                state.mailTriageOverview,
+                "triage overview",
+                JSON.stringify(triageSourceIds)
+              )
+            : ""
+        }
+        ${
+          messages.length === 0 && !state.isStreaming && !(isMailConv && state.mailTriageOverview)
             ? `<div class="muted">no messages in this conversation yet.</div>`
             : messages
                 .map((m) =>
@@ -152,6 +179,7 @@ export function renderChatPanel(
 
       <div class="chat-composer">
         ${contextPillsHtml}
+        ${mailSuggestionsHtml}
         <div class="composer-input-row">
           <span class="muted">&gt;</span>
           <input
@@ -180,6 +208,9 @@ export function renderChatPanel(
             </select>
             <button id="chat-web-toggle" class="${state.webSearchEnabled ? "active" : ""}">
               web: ${state.webSearchEnabled ? "on" : "off"}
+            </button>
+            <button id="chat-mail-toggle" class="${mailEffectiveOn ? "active" : ""}" title="include top 5 FTS matches from mail.sqlite as sources">
+              mail: ${mailEffectiveOn ? "on" : "off"}
             </button>
           </div>
         </div>
@@ -448,6 +479,24 @@ function bindChatEvents(container: HTMLElement, actions: ChatActions): void {
     ?.addEventListener("click", () => {
       actions.onToggleWeb();
     });
+
+  container
+    .querySelector("#chat-mail-toggle")
+    ?.addEventListener("click", () => {
+      if (actions.onToggleMail) {
+        actions.onToggleMail();
+      }
+    });
+
+  container.querySelectorAll("[data-chat-suggest]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (state.isStreaming) return;
+      const prompt = (btn as HTMLElement).getAttribute("data-chat-suggest");
+      if (prompt) {
+        actions.onSendMessage(prompt);
+      }
+    });
+  });
 
   container.querySelectorAll("[data-citation-idx]").forEach((btn) => {
     btn.addEventListener("click", () => {

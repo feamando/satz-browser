@@ -1701,6 +1701,7 @@ class SatzSidecarRuntime:
         sources: list[dict[str, Any]],
         web_enabled: bool = False,
         conversation_summary: str = "",
+        mail_enabled: bool = False,
     ):
         """Generator yielding SSE dicts: {'delta': ...} then {'done': True, 'source_ids': [...], 'ms': ...}."""
         from src.planck3.candidates import main_entity
@@ -1725,22 +1726,67 @@ class SatzSidecarRuntime:
         has_mail_or_app_tab = any(
             any(
                 tok in str(s.get("url") or "").lower() or tok in str(s.get("domain") or "").lower()
-                for tok in ("mail.google.com", "gmail", "outlook", "proton.me", "calendar.google.com")
+                for tok in ("mail.google.com", "gmail", "outlook", "proton.me", "calendar.google.com", "satzmail://")
             )
             for s in combined_sources
         )
         is_personal_or_tab_query = bool(
             has_mail_or_app_tab
             or re.search(
-                r"\b(my\s+(?:latest\s+)?(?:email|inbox|mail|account|calendar|messages|address|tab|page)|"
-                r"(?:latest|newest|recent|unread|first|last)\s+(?:email|emails|mail|mails|message|messages|thread)|"
-                r"(?:summarize|summary|read|check|get\s+me)\s+(?:my\s+|the\s+)?(?:latest\s+|recent\s+)?(?:email|emails|mail|inbox|page|tab|article|thread)|"
+                r"\b(my\s+(?:latest\s+)?(?:email|inbox|mail|account|calendar|messages|address|tab|page|order|package)|"
+                r"(?:latest|newest|recent|unread|first|last)\s+(?:email|emails|mail|mails|message|messages|thread|order)|"
+                r"(?:summarize|summary|read|check|get\s+me|what\s+do\s+i\s+need\s+to\s+deal\s+with)\s+(?:my\s+|the\s+)?(?:latest\s+|recent\s+|today\b)?(?:email|emails|mail|inbox|page|tab|article|thread|today)?|"
                 r"this\s+(?:email|page|tab|article|site|screen|message|thread)|"
                 r"store\s+the|save\s+the|in\s+the\s+knowledge\s*base|in\s+my\s+brain)\b",
                 user_msg,
                 re.IGNORECASE,
             )
         )
+
+        # Section 4.1 & 4.8 (M14): Inject mail sources from `mail.sqlite` when `mail_enabled` is on
+        # or when `is_personal_or_tab_query` matches and mail accounts exist.
+        if getattr(self, "mail", None) is not None and self.passwords.unlocked:
+            existing_sids = {str(s.get("id") or "") for s in combined_sources}
+            mail_candidates: list[dict[str, Any]] = []
+            if mail_enabled and user_msg:
+                search_res = self.mail.search_messages(user_msg, limit=5)
+                mail_candidates = list(search_res.get("rows") or [])
+                if not mail_candidates:
+                    # Fallback to token search over non-stopwords
+                    q_words = [
+                        w
+                        for w in re.findall(r"[A-Za-z0-9äöüÄÖÜß]{3,}", user_msg)
+                        if w.lower() not in {"what", "when", "where", "does", "with", "from", "have", "need", "deal", "today", "your", "this", "that"}
+                    ]
+                    for qw in q_words[:3]:
+                        sub_res = self.mail.search_messages(qw, limit=5)
+                        for sr in sub_res.get("rows") or []:
+                            if not any(x["id"] == sr["id"] for x in mail_candidates):
+                                mail_candidates.append(sr)
+                                if len(mail_candidates) >= 5:
+                                    break
+                        if len(mail_candidates) >= 5:
+                            break
+            if (mail_enabled or is_personal_or_tab_query) and not mail_candidates and not existing_sids:
+                triage = self.mail.get_triage_set()
+                for ts in (triage.get("sources") or [])[:5]:
+                    if ts["id"] not in existing_sids:
+                        existing_sids.add(ts["id"])
+                        combined_sources.append(ts)
+            for mc in mail_candidates[:5]:
+                mid = str(mc.get("id") or "")
+                sid = f"mail:{mid}"
+                if mid and sid not in existing_sids:
+                    existing_sids.add(sid)
+                    combined_sources.append(
+                        {
+                            "id": sid,
+                            "url": f"satzmail://message/{mid}",
+                            "title": f"{mc.get('from_name') or mc.get('from_addr')}: {mc.get('subject')}",
+                            "domain": "mail",
+                            "is_open_tab": True,
+                        }
+                    )
 
         # Detect when the user is asking to find/search items on a site (e.g. "find me some hats on zalando")
         is_site_discovery_query = bool(
@@ -1988,6 +2034,48 @@ class SatzSidecarRuntime:
                     }
                 )
 
+            # Section 4.1 (M14): Include Mail triage items in `For you` (/digest)
+            if getattr(self, "mail", None) is not None and self.passwords.unlocked:
+                try:
+                    triage = self.mail.get_triage_set()
+                    for em in (triage.get("emails_needing_attention") or [])[:2]:
+                        if em.get("needs_reply"):
+                            items.append(
+                                {
+                                    "entity": em.get("from_name") or em.get("from_addr") or "mail",
+                                    "reason": "mail action",
+                                    "title": f"reply waiting: {em.get('subject')}",
+                                    "url": f"satzmail://message/{em['id']}",
+                                    "domain": "mail",
+                                    "kind": "mail_reply",
+                                }
+                            )
+                    for ord_item in (triage.get("order_updates") or [])[:2]:
+                        items.append(
+                            {
+                                "entity": ord_item.get("merchant") or "orders",
+                                "reason": f"order {ord_item.get('status') or 'update'}",
+                                "title": f"order {ord_item.get('status') or 'shipped'}: {ord_item.get('merchant')}",
+                                "url": f"satzmail://message/{ord_item['id']}",
+                                "domain": "mail",
+                                "kind": "mail_order",
+                            }
+                        )
+                    for pr_item in (triage.get("expiring_promos") or [])[:2]:
+                        exp_lbl = pr_item.get("expiry") or "soon"
+                        items.append(
+                            {
+                                "entity": pr_item.get("company") or "promos",
+                                "reason": f"code {pr_item.get('voucher_code')}",
+                                "title": f"code expires {exp_lbl}: {pr_item.get('company')}",
+                                "url": f"satzmail://message/{pr_item['id']}",
+                                "domain": "mail",
+                                "kind": "mail_promo",
+                            }
+                        )
+                except Exception as me:
+                    self.record_error("digest_mail", me)
+
             for sec in raw.get("interests", []):
                 ent = sec["entity"]
                 for p in sec.get("recent", [])[:2]:
@@ -2215,6 +2303,16 @@ def make_sidecar_server(
                 return self._json(runtime.mail.get_lane(name=lane_name, cursor=cursor_val))
             if route_path == "/mail/status":
                 return self._json(runtime.mail.get_status())
+            if route_path == "/mail/triage":
+                return self._json(runtime.mail.get_triage_set())
+            if route_path == "/mail/codes":
+                dom = query_params.get("domain", "")
+                return self._json({"ok": True, "codes": runtime.mail.get_active_codes_for_domain(dom)})
+            if route_path == "/mail/eval":
+                lim = int(query_params.get("limit", "200") or 200)
+                return self._json(runtime.mail.get_eval_sample(limit=lim))
+            if route_path == "/mail/eval/report":
+                return self._json(runtime.mail.get_eval_report())
             if route_path == "/mail/search":
                 q = query_params.get("q", "")
                 return self._json(runtime.mail.search_messages(q))
@@ -2482,6 +2580,12 @@ def make_sidecar_server(
                 res = runtime.mail.undo_send(outbox_id)
                 return self._json(res, 200 if res.get("ok") else 400)
 
+            if self.path == "/mail/eval/label":
+                mid = str(data.get("message_id") or "")
+                lbl = str(data.get("label") or "")
+                ext_ok = data.get("extract_ok")
+                return self._json(runtime.mail.record_eval_label(mid, lbl, extract_ok=ext_ok))
+
             if self.path == "/chat/summarize":
                 messages = data.get("messages") or []
                 prev_summary = str(data.get("summary") or "")
@@ -2492,6 +2596,7 @@ def make_sidecar_server(
                 messages = data.get("messages") or []
                 sources = data.get("sources") or []
                 web_enabled = bool(data.get("web", False))
+                mail_enabled = bool(data.get("mail", False))
                 conversation_summary = str(data.get("summary") or "")
 
                 self.send_response(200)
@@ -2507,6 +2612,7 @@ def make_sidecar_server(
                         sources,
                         web_enabled=web_enabled,
                         conversation_summary=conversation_summary,
+                        mail_enabled=mail_enabled,
                     ):
                         line = f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                         self.wfile.write(line.encode("utf-8"))

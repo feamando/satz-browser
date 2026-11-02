@@ -1494,6 +1494,387 @@ class TestSatzSidecar(unittest.TestCase):
         self.assertTrue(any(op.get("op") == "uid" and "\\Answered" in str(op.get("args")) for op in imap_ops))
         self.assertTrue(any(op.get("op") == "append" and op.get("folder") == "Sent" for op in imap_ops))
 
+    def test_m14_mail_triage_chat_citations_normal_conv_mail_toggle_codes_pill_and_200_eval_report(self):
+        """
+        Milestone M14 Check:
+        - "what do I need to deal with today?" in Mail chat cites at least 3 emails with `[n]`, and each `[n]` maps to `mail:<message_id>` (`satzmail://message/<id>`).
+        - In a normal conversation with `mail` on, "when does my Zalando order arrive?" cites the Zalando order email.
+        - `get_active_codes_for_domain("zalando.de")` returns matching active promo codes for the site tab `codes (N)` pill.
+        - `/digest` includes `reply waiting: <subject>`, `order <status>: <merchant>`, and `code expires <date>: <company>`.
+        - 200 stratified labelled emails in Eval Mode produce the confusion matrix and pass all gates (`real_email_misfiled_as_promotion_pct <= 1.0%`, `promotion_recall_pct >= 90.0%`, `extraction_accuracy_pct >= 90.0%`), and Eval labels are excluded from classifier training.
+        """
+        import datetime
+        import re
+
+        self.runtime.passwords.create_profile("Nikita", "123456")
+        self.runtime._refresh_active_profile_brain()
+        self.runtime.mail.stop_all_sync_threads()
+        self.runtime.mail.pipeline.stop_worker()
+
+        class FakeM14IMAP:
+            def __init__(self, host, port, security="ssl"):
+                pass
+
+            def login(self, user, password):
+                return ("OK", [b"Logged in"])
+
+            def logout(self):
+                return ("BYE", [b"Logout"])
+
+        class FakeM14SMTP:
+            def __init__(self, host, port, security="starttls"):
+                pass
+
+            def login(self, user, password):
+                pass
+
+            def quit(self):
+                pass
+
+        self.runtime.mail.imap_factory = FakeM14IMAP
+        self.runtime.mail.smtp_factory = FakeM14SMTP
+
+        add_res = self.runtime.mail.add_account(
+            {
+                "preset": "gmx",
+                "label": "GMX Main",
+                "email": "nikita@gmx.net",
+                "password": "app-password-m14",
+                "start_sync": False,
+            }
+        )
+        self.assertTrue(add_res["ok"])
+        acct_id = add_res["account_id"]
+
+        today_date = datetime.date.today()
+        in_3_days_str = (today_date + datetime.timedelta(days=3)).strftime("%d.%m.%Y")
+        in_3_days_iso = (today_date + datetime.timedelta(days=3)).isoformat()
+        expired_str = "01.01.2024"
+
+        def fake_gemma_label(from_str: str, subject: str, new_text: str, hints: str) -> str:
+            sub_l = subject.lower()
+            from_l = from_str.lower()
+            if "github" in from_l or "linear" in from_l or "[ping]" in sub_l:
+                return "ping"
+            if "order" in sub_l or "bestell" in sub_l or "shipped" in sub_l:
+                return "information"
+            if "rabatt" in sub_l or "% off" in sub_l or "voucher" in sub_l or "promo" in sub_l:
+                return "promotion"
+            return "email"
+
+        def noop_trainer(samples, out_dir, version):
+            (out_dir / "version.txt").write_text(version, encoding="utf-8")
+
+        self.runtime.mail.pipeline.gemma_label_fn = fake_gemma_label
+        self.runtime.mail.pipeline.trainer_fn = noop_trainer
+        self.runtime.mail.pipeline.model_predict_fn = lambda inp: ("email", 0.1)
+
+        # ── 1. Ingest key triage emails: 2 action emails, 1 Zalando order email, 1 active Zalando promo, 1 expired Zalando promo ──
+        key_messages = [
+            (
+                1,
+                "Jordan Reyes <jordan.reyes@example.com>",
+                "Q4 Product Roadmap Sign-off",
+                "Hi Nikita,\n\nCould you please confirm the Q4 launch milestone dates by Friday?\n\nBest,\nJordan",
+            ),
+            (
+                2,
+                "Anna Weber <anna@partner.org>",
+                "Lisbon Workshop Dates",
+                "Hi Nikita,\n\nWe need your flight arrival time for the Lisbon workshop.\n\nThanks,\nAnna",
+            ),
+            (
+                3,
+                "Zalando <service@zalando.de>",
+                "Your Zalando Order #104099887712 has shipped",
+                "Hello Nikita,\n\nYour Zalando order number: 104099887712 has shipped via DHL and arrives on Thursday, November 5.\n"
+                "Tracking number: JJD149999200011223344\n"
+                "Track here: https://www.dhl.de/de/privatkunden/pakete-empfangen/verfolgen.html?piececode=JJD149999200011223344\n"
+                "Total: 129.95 EUR",
+            ),
+            (
+                4,
+                "Zalando Deals <newsletter@zalando.de>",
+                "25% off autumn essentials promo",
+                f"Save 25% off your next purchase! Use promo code: ZALANDO25AUTUMN valid until {in_3_days_str}.\n"
+                "Unsubscribe here.",
+            ),
+            (
+                5,
+                "Zalando Deals <newsletter@zalando.de>",
+                "10% off winter clearance promo",
+                f"Save 10% off! Use promo code: ZALANDO10OLD valid until {expired_str}.\n"
+                "Unsubscribe here.",
+            ),
+        ]
+
+        stored_key_ids: list[str] = []
+        for uid_val, from_hdr, subj_hdr, body_txt in key_messages:
+            raw_bytes = (
+                f"Message-ID: <m14-key-{uid_val}@example.com>\r\n"
+                f"From: {from_hdr}\r\n"
+                f"To: nikita@gmx.net\r\n"
+                f"Subject: {subj_hdr}\r\n"
+                f"Date: Mon, 02 Nov 2026 10:0{uid_val}:00 +0000\r\n"
+                f"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+                f"{body_txt}\r\n"
+            ).encode("utf-8")
+            mid = self.runtime.mail._store_parsed_raw_email(
+                account_id=acct_id,
+                folder_name="INBOX",
+                role="inbox",
+                uid=uid_val,
+                pop_uidl="",
+                raw_bytes=raw_bytes,
+                seen=0,
+                answered=0,
+                flagged=0,
+            )
+            assert mid is not None
+            stored_key_ids.append(mid)
+            self.runtime.mail.pipeline.process_single_message(mid)
+
+        # ── 2. Verify Mail Triage & Mail Chat citing >= 3 emails with `[n]` ──
+        triage = self.runtime.mail.get_triage_set()
+        self.assertTrue(triage["ok"])
+        self.assertGreaterEqual(len(triage["emails_needing_attention"]), 2)
+        self.assertGreaterEqual(len(triage["order_updates"]), 1)
+        self.assertGreaterEqual(len(triage["expiring_promos"]), 1)
+        self.assertGreaterEqual(len(triage["sources"]), 3)
+
+        # Overview has `[1]`, `[2]`, `[3]` citations
+        overview_cites = re.findall(r"\[(\d+)\]", triage["overview"])
+        self.assertGreaterEqual(len(set(overview_cites)), 3)
+
+        # Mock Gemma for deterministic streaming chat test
+        class FakeGemmaTok:
+            def apply_chat_template(self, msgs, **kwargs):
+                class FakeInputs(dict):
+                    def __init__(self, prompt_text):
+                        super().__init__()
+                        import torch
+                        self["input_ids"] = torch.zeros((1, 8), dtype=torch.long)
+                        self.prompt_text = prompt_text
+
+                    def to(self, device):
+                        return self
+
+                return FakeInputs(msgs[-1]["content"])
+
+            def decode(self, token_ids, skip_special_tokens=True):
+                return ""
+
+        class FakeGemmaModel:
+            device = "cpu"
+
+            def generate(self, **kwargs):
+                streamer = kwargs.get("streamer")
+                prompt_text = getattr(kwargs, "prompt_text", "")
+                if streamer is not None:
+                    # Inspect the sources in context through the runtime's last assembled context
+                    if "zalando" in last_chat_question[0].lower() and "arrive" in last_chat_question[0].lower():
+                        streamer.text_queue.put(
+                            "Your Zalando order #104099887712 shipped via DHL and arrives on Thursday, November 5 [1]."
+                        )
+                    else:
+                        streamer.text_queue.put(
+                            "Today you need to confirm Q4 launch dates for Jordan Reyes [1], send your flight arrival time for the Lisbon workshop to Anna Weber [2], track your Zalando order #104099887712 arriving Thursday [3], and use code ZALANDO25AUTUMN before it expires [4]."
+                        )
+                    streamer.end()
+
+        last_chat_question = [""]
+        orig_ensure_gemma = self.runtime.ensure_gemma
+        self.runtime.gemma_tok = FakeGemmaTok()
+        self.runtime.gemma_model = FakeGemmaModel()
+        self.runtime.ensure_gemma = lambda: (self.runtime.gemma_tok, self.runtime.gemma_model)
+
+        try:
+            # 2a. Ask "what do I need to deal with today?" in Mail chat
+            last_chat_question[0] = "what do I need to deal with today?"
+            events_triage = list(
+                self.runtime.stream_chat(
+                    messages=[{"role": "user", "content": last_chat_question[0]}],
+                    sources=triage["sources"],
+                    web_enabled=False,
+                    mail_enabled=True,
+                )
+            )
+            done_triage = [e for e in events_triage if e.get("done")][-1]
+            answer_triage = "".join(e.get("delta", "") for e in events_triage)
+            cited_nums = [int(n) for n in re.findall(r"\[(\d+)\]", answer_triage)]
+            self.assertGreaterEqual(len(set(cited_nums)), 3)
+            for n in set(cited_nums):
+                sid = done_triage["source_ids"][n - 1]
+                self.assertTrue(sid.startswith("mail:"))
+                msg_id = sid.split("mail:", 1)[1]
+                detail = self.runtime.mail.get_message_detail(msg_id)
+                self.assertTrue(detail["ok"])
+
+            # 2b. In a normal conversation with `mail` toggle on, ask "when does my Zalando order arrive?"
+            last_chat_question[0] = "when does my Zalando order arrive?"
+            events_zalando = list(
+                self.runtime.stream_chat(
+                    messages=[{"role": "user", "content": last_chat_question[0]}],
+                    sources=[],
+                    web_enabled=False,
+                    mail_enabled=True,
+                )
+            )
+            done_zalando = [e for e in events_zalando if e.get("done")][-1]
+            self.assertGreaterEqual(len(done_zalando["source_ids"]), 1)
+            zalando_order_sid = f"mail:{stored_key_ids[2]}"
+            self.assertIn(zalando_order_sid, done_zalando["source_ids"])
+        finally:
+            self.runtime.ensure_gemma = orig_ensure_gemma
+
+        # ── 3. Site tab `codes (N)` pill matching & `/digest` For you mail items ──
+        active_codes = self.runtime.mail.get_active_codes_for_domain("www.zalando.de")
+        code_strings = [c["code"] for c in active_codes]
+        self.assertIn("ZALANDO25AUTUMN", code_strings)
+        self.assertNotIn("ZALANDO10OLD", code_strings, "Expired promo codes must be excluded from active codes pill")
+
+        digest_res = self.runtime.get_digest()
+        digest_titles = [it["title"] for it in digest_res["items"]]
+        self.assertTrue(any(t.startswith("reply waiting:") for t in digest_titles))
+        self.assertTrue(any(t.startswith("order shipped:") for t in digest_titles))
+        self.assertTrue(any(t.startswith("code expires ") for t in digest_titles))
+
+        # ── 4. Eval Mode on 200 Stratified Emails (Confusion Matrix & Gate Report) ──
+        # Seed 195 additional stratified messages across 45 domains (50 total per class across 200 messages)
+        # Key messages already have: 2 email, 0 ping, 1 information, 2 promotion.
+        # Add: 48 email, 50 ping, 49 information, 48 promotion = 195 messages -> total 200 messages (50 of each class).
+        extra_specs: list[tuple[str, str, str, str]] = []
+        for i in range(48):
+            dom = f"colleague{i % 3}.org"
+            extra_specs.append(
+                (
+                    "email",
+                    f"Person {i} <person{i}@{dom}>",
+                    f"Project sync note #{i}",
+                    f"Hi Nikita,\n\nHere are the notes from our 1:1 meeting #{i}.\n\nBest,\nPerson {i}",
+                )
+            )
+        ping_domains = ["github.com", "linear.app", "linkedin.com", "slack.com", "figma.com", "notion.so", "gitlab.com", "jira.com", "trello.com", "asana.com"]
+        for i in range(50):
+            dom = ping_domains[i % len(ping_domains)]
+            extra_specs.append(
+                (
+                    "ping",
+                    f"Bot {i} <notifications@{dom}>",
+                    f"[ping] Activity notification #{i} on repository",
+                    f"@nikita mentioned you in issue #{100 + i} on {dom}.",
+                )
+            )
+        merchants = [
+            ("Amazon", "amazon.de"),
+            ("DHL", "dhl.de"),
+            ("Otto", "otto.de"),
+            ("MediaMarkt", "mediamarkt.de"),
+            ("IKEA", "ikea.com"),
+            ("HelloFresh", "hellofresh.de"),
+            ("Apple", "apple.com"),
+            ("PayPal", "paypal.com"),
+            ("Stripe", "stripe.com"),
+            ("Lieferando", "lieferando.de"),
+        ]
+        for i in range(49):
+            m_name, m_dom = merchants[i % len(merchants)]
+            extra_specs.append(
+                (
+                    "information",
+                    f"{m_name} <orders@{m_dom}>",
+                    f"Your {m_name} order #{300000 + i} has shipped",
+                    f"Thank you for your order! Order number: ORD-{300000 + i}. Status: shipped. Tracking number: JJD14999920001122{1000 + i}. Total: {49 + i}.99 EUR.",
+                )
+            )
+        promo_Senders = [
+            ("Adidas", "adidas.de"),
+            ("Nike", "nike.com"),
+            ("ASOS", "asos.com"),
+            ("Uniqlo", "uniqlo.com"),
+            ("H&M", "hm.com"),
+            ("Spotify", "spotify.com"),
+            ("BookBeat", "bookbeat.de"),
+            ("AboutYou", "aboutyou.de"),
+            ("Cyberport", "cyberport.de"),
+            ("Thalia", "thalia.de"),
+        ]
+        for i in range(48):
+            p_name, p_dom = promo_Senders[i % len(promo_Senders)]
+            extra_specs.append(
+                (
+                    "promotion",
+                    f"{p_name} Newsletter <deals@{p_dom}>",
+                    f"Exclusive 20% off {p_name} voucher inside",
+                    f"Save 20% off today at {p_name}! Use promo code: SAVE20DEAL{i} valid until {in_3_days_str}.\nUnsubscribe from newsletter.",
+                )
+            )
+
+        ground_truth: dict[str, tuple[str, bool | None]] = {
+            stored_key_ids[0]: ("email", None),
+            stored_key_ids[1]: ("email", None),
+            stored_key_ids[2]: ("information", True),
+            stored_key_ids[3]: ("promotion", True),
+            stored_key_ids[4]: ("promotion", True),
+        }
+
+        for idx, (true_lbl, from_h, subj_h, body_t) in enumerate(extra_specs, start=10):
+            raw_b = (
+                f"Message-ID: <m14-eval-{idx}@example.com>\r\n"
+                f"From: {from_h}\r\n"
+                f"To: nikita@gmx.net\r\n"
+                f"Subject: {subj_h}\r\n"
+                f"Date: Mon, 02 Nov 2026 11:{idx % 60:02d}:00 +0000\r\n"
+                f"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+                f"{body_t}\r\n"
+            ).encode("utf-8")
+            mid = self.runtime.mail._store_parsed_raw_email(
+                account_id=acct_id,
+                folder_name="INBOX",
+                role="inbox",
+                uid=idx,
+                pop_uidl="",
+                raw_bytes=raw_b,
+                seen=0,
+                answered=0,
+                flagged=0,
+            )
+            assert mid is not None
+            self.runtime.mail.pipeline.process_single_message(mid)
+            ext_ok = True if true_lbl in ("information", "promotion") else None
+            ground_truth[mid] = (true_lbl, ext_ok)
+
+        sample_res = self.runtime.mail.get_eval_sample(limit=200)
+        self.assertTrue(sample_res["ok"])
+        self.assertEqual(sample_res["total_sampled"], 200)
+
+        for item in sample_res["items"]:
+            mid = item["id"]
+            t_lbl, ext_ok = ground_truth[mid]
+            # Verify extraction actually populated order_number or voucher_code for info/promo
+            if t_lbl == "information":
+                ext_ok = bool(item["extracts"].get("order_number") and item["extracts"].get("status"))
+            elif t_lbl == "promotion":
+                ext_ok = bool(item["extracts"].get("voucher_code") and item["extracts"].get("discount_value"))
+            lbl_res = self.runtime.mail.record_eval_label(mid, t_lbl, extract_ok=ext_ok)
+            self.assertTrue(lbl_res["ok"])
+
+        # Eval labels must NEVER be added to `corrections` (excluded from training)
+        with self.runtime.mail.db_lock:
+            corr_cnt = self.runtime.mail._ensure_connection().execute(
+                "SELECT COUNT(*) AS c FROM corrections"
+            ).fetchone()["c"]
+            self.assertEqual(corr_cnt, 0, "Eval labels must be excluded from training/corrections")
+
+        report = self.runtime.mail.get_eval_report()
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["total_evaluated"], 200)
+        self.assertLessEqual(report["real_email_misfiled_as_promotion_pct"], 1.0)
+        self.assertGreaterEqual(report["promotion_recall_pct"], 90.0)
+        self.assertGreaterEqual(report["extraction_accuracy_pct"], 90.0)
+        self.assertTrue(report["gates_passed"])
+
+
 
 if __name__ == "__main__":
     unittest.main()

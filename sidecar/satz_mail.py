@@ -2587,3 +2587,436 @@ class SatzMailManager:
                 )
                 conn.commit()
             return {"ok": False, "error": err_str, "outbox_id": outbox_id, "status": "draft"}
+
+    # ── Milestone M14: Triage Set, Active Promo Codes, Digest & Eval Mode ──
+
+    def get_triage_set(self) -> dict[str, Any]:
+        """
+        Section 4.1 & 4.8 (M14): Returns the default context set for the Mail `chat` tab
+        and `For you` digest:
+        1) Unread `email` messages + `needs_reply` messages from the last 7 days
+        2) Order (`information`) updates from the last 7 days
+        3) Promo codes expiring in the next 7 days
+        Also builds `sources` (`id: mail:<message_id>`) and a formatted `overview` answer with `[n]` citations.
+        """
+        self.passwords._check_autolock()
+        if not self.passwords.unlocked:
+            return {
+                "ok": False,
+                "unlocked": False,
+                "emails_needing_attention": [],
+                "order_updates": [],
+                "expiring_promos": [],
+                "sources": [],
+                "overview": "",
+            }
+
+        now = time.time()
+        seven_days_ago = now - 7 * 86400.0
+        today_date = datetime.date.today()
+        today_iso = today_date.isoformat()
+        in_7d_iso = (today_date + datetime.timedelta(days=7)).isoformat()
+
+        with self.db_lock:
+            conn = self._ensure_connection()
+            # 1. Unread `email` + `needs_reply` in last 7 days
+            email_rows = conn.execute(
+                """
+                SELECT m.id, m.from_name, m.from_addr, m.subject, m.snippet, m.date, m.seen,
+                       COALESCE(a.needs_reply, 0) AS needs_reply,
+                       a.due_date AS due_date,
+                       COALESCE(a.ask, '') AS ask,
+                       COALESCE(p.text, m.body_text) AS new_text
+                FROM messages m
+                LEFT JOIN labels l ON l.message_id = m.id
+                LEFT JOIN actions a ON a.message_id = m.id
+                LEFT JOIN parts p ON p.message_id = m.id AND p.kind = 'new'
+                WHERE m.hidden = 0
+                  AND UPPER(m.folder) = 'INBOX'
+                  AND COALESCE(l.label, 'email') = 'email'
+                  AND m.date >= ?
+                  AND (m.seen = 0 OR COALESCE(a.needs_reply, 0) = 1)
+                ORDER BY COALESCE(a.needs_reply, 0) DESC, m.date DESC
+                LIMIT 10
+                """,
+                (seven_days_ago,),
+            ).fetchall()
+
+            # 2. Order (`information`) updates in last 7 days
+            order_rows = conn.execute(
+                """
+                SELECT m.id, m.from_name, m.from_addr, m.subject, m.snippet, m.date,
+                       COALESCE(p.text, m.body_text) AS new_text
+                FROM messages m
+                JOIN labels l ON l.message_id = m.id AND l.label = 'information'
+                LEFT JOIN parts p ON p.message_id = m.id AND p.kind = 'new'
+                WHERE m.hidden = 0 AND m.date >= ?
+                ORDER BY m.date DESC
+                LIMIT 8
+                """,
+                (seven_days_ago,),
+            ).fetchall()
+
+            order_updates: list[dict[str, Any]] = []
+            for r in order_rows:
+                mid = r["id"]
+                ext_rows = conn.execute(
+                    "SELECT field, value FROM extracts WHERE message_id = ?",
+                    (mid,),
+                ).fetchall()
+                ext = {er["field"]: er["value"] for er in ext_rows}
+                order_updates.append(
+                    {
+                        **dict(r),
+                        "merchant": ext.get("merchant") or r["from_name"] or r["from_addr"],
+                        "order_number": ext.get("order_number") or "",
+                        "status": ext.get("status") or "ordered",
+                        "tracking_number": ext.get("tracking_number") or "",
+                        "tracking_url": ext.get("tracking_url") or "",
+                        "total": ext.get("total") or "",
+                    }
+                )
+
+            # 3. Promo codes expiring in next 7 days (or active codes from recent promos)
+            promo_rows = conn.execute(
+                """
+                SELECT m.id, m.from_name, m.from_addr, m.subject, m.snippet, m.date,
+                       COALESCE(p.text, m.body_text) AS new_text
+                FROM messages m
+                JOIN labels l ON l.message_id = m.id AND l.label = 'promotion'
+                LEFT JOIN parts p ON p.message_id = m.id AND p.kind = 'new'
+                WHERE m.hidden = 0
+                ORDER BY m.date DESC
+                LIMIT 25
+                """
+            ).fetchall()
+
+            expiring_promos: list[dict[str, Any]] = []
+            for r in promo_rows:
+                mid = r["id"]
+                ext_rows = conn.execute(
+                    "SELECT field, value FROM extracts WHERE message_id = ?",
+                    (mid,),
+                ).fetchall()
+                ext = {er["field"]: er["value"] for er in ext_rows}
+                code = ext.get("voucher_code") or ""
+                expiry = ext.get("expiry") or ""
+                if not code:
+                    continue
+                is_expiring_soon = bool(
+                    expiry
+                    and re.match(r"^\d{4}-\d{2}-\d{2}$", expiry)
+                    and today_iso <= expiry <= in_7d_iso
+                )
+                if is_expiring_soon or (not expiry and len(expiring_promos) < 4):
+                    expiring_promos.append(
+                        {
+                            **dict(r),
+                            "company": ext.get("company") or r["from_name"] or r["from_addr"],
+                            "voucher_code": code,
+                            "discount_value": ext.get("discount_value") or "",
+                            "expiry": expiry,
+                        }
+                    )
+
+        emails_list = [dict(r) for r in email_rows]
+        sources: list[dict[str, Any]] = []
+        seen_sids: set[str] = set()
+        msg_to_cite_num: dict[str, int] = {}
+
+        for item in emails_list + order_updates + expiring_promos:
+            mid = item["id"]
+            sid = f"mail:{mid}"
+            if sid in seen_sids:
+                continue
+            seen_sids.add(sid)
+            cite_idx = len(sources) + 1
+            msg_to_cite_num[mid] = cite_idx
+            sources.append(
+                {
+                    "id": sid,
+                    "url": f"satzmail://message/{mid}",
+                    "title": f"{item.get('from_name') or item.get('from_addr')}: {item.get('subject')}",
+                    "domain": "mail",
+                    "text": f"From: {item.get('from_name') or ''} <{item.get('from_addr') or ''}>\nSubject: {item.get('subject') or ''}\n\n{item.get('new_text') or item.get('snippet') or ''}",
+                    "is_open_tab": True,
+                }
+            )
+
+        # Build Appendix A.5 default overview with `[n]` citations
+        lines: list[str] = []
+        lines.append(
+            f"Mail triage: {len(emails_list)} inbox message(s) needing attention, {len(order_updates)} order update(s), and {len(expiring_promos)} active/expiring promo code(s)."
+        )
+        if emails_list:
+            lines.append("\nInbox:")
+            for e in emails_list[:5]:
+                cnum = msg_to_cite_num.get(e["id"], 1)
+                sender = e.get("from_name") or e.get("from_addr")
+                ask = e.get("ask") or e.get("subject")
+                due = f" (due {e['due_date']})" if e.get("due_date") else ""
+                lines.append(f"- {sender}: {ask}{due} [{cnum}]")
+        if order_updates:
+            lines.append("\nOrders:")
+            for o in order_updates[:5]:
+                cnum = msg_to_cite_num.get(o["id"], 1)
+                ord_str = f" #{o['order_number']}" if o.get("order_number") else ""
+                lines.append(f"- {o['merchant']}{ord_str}: {o['status']} ({o['subject']}) [{cnum}]")
+        if expiring_promos:
+            lines.append("\nPromos:")
+            for p in expiring_promos[:5]:
+                cnum = msg_to_cite_num.get(p["id"], 1)
+                exp_str = f", expires {p['expiry']}" if p.get("expiry") else ""
+                val_str = f" ({p['discount_value']})" if p.get("discount_value") else ""
+                lines.append(f"- {p['company']}: code {p['voucher_code']}{val_str}{exp_str} [{cnum}]")
+
+        return {
+            "ok": True,
+            "unlocked": True,
+            "emails_needing_attention": emails_list,
+            "order_updates": order_updates,
+            "expiring_promos": expiring_promos,
+            "sources": sources,
+            "overview": "\n".join(lines),
+        }
+
+    def get_active_codes_for_domain(self, raw_domain: str) -> list[dict[str, Any]]:
+        """
+        Section 4.1 (M14): Returns non-expired promo codes matching a site tab's domain
+        so the site tab toolbar can display a `codes (N)` pill.
+        """
+        if not self.passwords.unlocked:
+            return []
+        dom = (raw_domain or "").strip().lower().removeprefix("www.")
+        if not dom:
+            return []
+        base_token = dom.split(".")[0]
+        today_iso = datetime.date.today().isoformat()
+
+        with self.db_lock:
+            conn = self._ensure_connection()
+            rows = conn.execute(
+                """
+                SELECT m.id, m.from_name, m.from_addr, m.subject, m.date
+                FROM messages m
+                JOIN labels l ON l.message_id = m.id AND l.label = 'promotion'
+                WHERE m.hidden = 0
+                ORDER BY m.date DESC
+                LIMIT 100
+                """
+            ).fetchall()
+
+            matched_codes: list[dict[str, Any]] = []
+            seen_codes: set[str] = set()
+            for r in rows:
+                mid = r["id"]
+                ext_rows = conn.execute(
+                    "SELECT field, value FROM extracts WHERE message_id = ?",
+                    (mid,),
+                ).fetchall()
+                ext = {er["field"]: er["value"] for er in ext_rows}
+                code = (ext.get("voucher_code") or "").strip()
+                if not code or code in seen_codes:
+                    continue
+                expiry = (ext.get("expiry") or "").strip()
+                if expiry and re.match(r"^\d{4}-\d{2}-\d{2}$", expiry) and expiry < today_iso:
+                    continue
+                sender_dom = (r["from_addr"].split("@")[-1] if "@" in r["from_addr"] else "").lower()
+                company = (ext.get("company") or r["from_name"] or sender_dom).lower()
+                if (
+                    dom in sender_dom
+                    or sender_dom.endswith(f".{dom}")
+                    or (len(base_token) >= 3 and (base_token in sender_dom or base_token in company))
+                ):
+                    seen_codes.add(code)
+                    matched_codes.append(
+                        {
+                            "code": code,
+                            "discount_value": ext.get("discount_value") or "",
+                            "expiry": expiry,
+                            "company": ext.get("company") or r["from_name"] or sender_dom,
+                            "message_id": mid,
+                        }
+                    )
+            return matched_codes
+
+    # ── Section 4.9: Eval Mode (200 Stratified Samples & Confusion Matrix Report) ──
+
+    def get_eval_sample(self, limit: int = 200) -> dict[str, Any]:
+        """
+        Section 4.9: Samples up to 200 messages from the last 90 days, stratified by sender
+        domain (max 5 per domain), and returns them with model predictions, extracted fields,
+        and any existing human `eval_labels`.
+        """
+        self.passwords._check_autolock()
+        if not self.passwords.unlocked:
+            return {"ok": False, "unlocked": False, "items": []}
+
+        cutoff = time.time() - 90 * 86400.0
+        with self.db_lock:
+            conn = self._ensure_connection()
+            rows = conn.execute(
+                """
+                SELECT m.id, m.from_name, m.from_addr, m.subject, m.snippet, m.date,
+                       COALESCE(p.text, m.body_text) AS new_text,
+                       COALESCE(l.label, 'email') AS pred_label,
+                       COALESCE(l.confidence, 0.0) AS pred_confidence,
+                       e.label AS human_label,
+                       e.extract_ok AS human_extract_ok
+                FROM messages m
+                LEFT JOIN parts p ON p.message_id = m.id AND p.kind = 'new'
+                LEFT JOIN labels l ON l.message_id = m.id
+                LEFT JOIN eval_labels e ON e.message_id = m.id
+                WHERE m.hidden = 0 AND UPPER(m.folder) = 'INBOX' AND m.date >= ?
+                ORDER BY m.date DESC
+                """,
+                (cutoff,),
+            ).fetchall()
+
+            domain_counts: dict[str, int] = {}
+            sampled: list[dict[str, Any]] = []
+            overflow: list[sqlite3.Row] = []
+
+            for r in rows:
+                addr = (r["from_addr"] or "").lower()
+                dom = addr.split("@")[-1] if "@" in addr else addr
+                if domain_counts.get(dom, 0) < 5:
+                    domain_counts[dom] = domain_counts.get(dom, 0) + 1
+                    sampled.append(dict(r))
+                    if len(sampled) >= limit:
+                        break
+                else:
+                    overflow.append(r)
+
+            # If dataset has fewer than `limit` after max-5-per-domain cap, fill from remaining messages
+            if len(sampled) < limit and overflow:
+                for r in overflow:
+                    sampled.append(dict(r))
+                    if len(sampled) >= limit:
+                        break
+
+            for item in sampled:
+                ext_rows = conn.execute(
+                    "SELECT field, value FROM extracts WHERE message_id = ?",
+                    (item["id"],),
+                ).fetchall()
+                item["extracts"] = {er["field"]: er["value"] for er in ext_rows}
+
+        return {
+            "ok": True,
+            "unlocked": True,
+            "total_sampled": len(sampled),
+            "labelled_count": sum(1 for x in sampled if x.get("human_label")),
+            "items": sampled,
+        }
+
+    def record_eval_label(
+        self,
+        message_id: str,
+        human_label: str,
+        extract_ok: bool | None = None,
+    ) -> dict[str, Any]:
+        """
+        Section 4.9: Stores human eval label (`email`, `ping`, `information`, `promotion`)
+        and `extract_ok` (`1` / `0` / `None`) in `eval_labels`.
+        Eval labels are NEVER written to `corrections` or used for classifier training.
+        """
+        if not self.passwords.unlocked:
+            return {"ok": False, "error": "Profile is locked."}
+        lbl = (human_label or "").strip().lower()
+        if lbl not in ("email", "ping", "information", "promotion"):
+            return {"ok": False, "error": f"Invalid label: {lbl}"}
+        ext_val: int | None = None
+        if extract_ok is not None:
+            ext_val = 1 if bool(extract_ok) else 0
+
+        with self.db_lock:
+            conn = self._ensure_connection()
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO eval_labels (message_id, label, extract_ok, at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (message_id, lbl, ext_val, time.time()),
+            )
+            conn.commit()
+        return {"ok": True, "message_id": message_id, "label": lbl, "extract_ok": ext_val}
+
+    def get_eval_report(self) -> dict[str, Any]:
+        """
+        Section 4.9: Computes over `eval_labels` joined with `labels`:
+        - 4x4 confusion matrix (`true_label -> pred_label -> count`)
+        - `real_email_misfiled_as_promotion_rate` (target <= 1.0%)
+        - `promotion_recall` (target >= 90.0%)
+        - `extraction_accuracy` (target >= 90.0%)
+        """
+        if not self.passwords.unlocked:
+            return {"ok": False, "error": "Profile is locked."}
+        all_labels = ("email", "ping", "information", "promotion")
+        matrix: dict[str, dict[str, int]] = {
+            t: {p: 0 for p in all_labels} for t in all_labels
+        }
+
+        with self.db_lock:
+            conn = self._ensure_connection()
+            rows = conn.execute(
+                """
+                SELECT e.message_id,
+                       e.label AS true_label,
+                       e.extract_ok AS extract_ok,
+                       COALESCE(l.label, 'email') AS pred_label
+                FROM eval_labels e
+                LEFT JOIN labels l ON l.message_id = e.message_id
+                """
+            ).fetchall()
+
+        total_evaluated = len(rows)
+        extract_checked = 0
+        extract_correct = 0
+
+        for r in rows:
+            t_lbl = r["true_label"] if r["true_label"] in all_labels else "email"
+            p_lbl = r["pred_label"] if r["pred_label"] in all_labels else "email"
+            matrix[t_lbl][p_lbl] += 1
+            if r["extract_ok"] is not None:
+                extract_checked += 1
+                if int(r["extract_ok"]) == 1:
+                    extract_correct += 1
+
+        true_emails_total = sum(matrix["email"].values())
+        emails_as_promo = matrix["email"]["promotion"]
+        email_as_promo_rate = (
+            (emails_as_promo / true_emails_total) * 100.0 if true_emails_total > 0 else 0.0
+        )
+
+        true_promos_total = sum(matrix["promotion"].values())
+        promos_detected = matrix["promotion"]["promotion"]
+        promo_recall = (
+            (promos_detected / true_promos_total) * 100.0 if true_promos_total > 0 else 100.0
+        )
+
+        extraction_accuracy = (
+            (extract_correct / extract_checked) * 100.0 if extract_checked > 0 else 100.0
+        )
+
+        correct_total = sum(matrix[k][k] for k in all_labels)
+        overall_accuracy = (
+            (correct_total / total_evaluated) * 100.0 if total_evaluated > 0 else 0.0
+        )
+
+        return {
+            "ok": True,
+            "total_evaluated": total_evaluated,
+            "overall_accuracy_pct": round(overall_accuracy, 2),
+            "real_email_misfiled_as_promotion_pct": round(email_as_promo_rate, 2),
+            "promotion_recall_pct": round(promo_recall, 2),
+            "extraction_accuracy_pct": round(extraction_accuracy, 2),
+            "extract_checked": extract_checked,
+            "extract_correct": extract_correct,
+            "confusion_matrix": matrix,
+            "gates_passed": bool(
+                email_as_promo_rate <= 1.0
+                and promo_recall >= 90.0
+                and extraction_accuracy >= 90.0
+            ),
+        }

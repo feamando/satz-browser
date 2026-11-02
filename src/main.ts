@@ -28,6 +28,7 @@ import {
   sidecarFetchDigest,
   sidecarFetchHealth,
   sidecarFetchKnowledge,
+  sidecarGetMailCodes,
   sidecarImportEnvFile,
   sidecarLockProfile,
   sidecarMatchPasswordForUrl,
@@ -651,6 +652,17 @@ function renderViewportRegion(): void {
         void selectConversation(id);
       },
       onOpenDigestUrl: (url) => {
+        if (url.startsWith("satzmail://message/")) {
+          const mid = url.replace("satzmail://message/", "").split("/")[0].trim();
+          const mailConv = state.conversations.find((c) => c.origin === "mail");
+          if (mailConv && mid) {
+            void (async () => {
+              await selectConversation(mailConv.id);
+              await openEmailMessageTab(mid, "mail");
+            })();
+            return;
+          }
+        }
         void startDirectBrowsing(url);
       },
       onChangeModel: (model) => {
@@ -794,6 +806,25 @@ function renderSiteTabViewport(viewport: HTMLElement): void {
     return;
   }
 
+  const tabDomain = extractDomain(tab.url);
+  if (
+    tabDomain &&
+    state.siteTabPromoCodes[tab.id] === undefined &&
+    state.sidecar.online
+  ) {
+    state.siteTabPromoCodes[tab.id] = [];
+    void (async () => {
+      const codes = await sidecarGetMailCodes(tabDomain);
+      state.siteTabPromoCodes[tab.id] = codes;
+      if (codes.length > 0 && state.activeTabId === tab.id) {
+        renderViewportRegion();
+      }
+    })();
+  }
+  const activePromoCodes = state.siteTabPromoCodes[tab.id] ?? [];
+  const showCodesPopover =
+    state.openCodesPopoverTabId === tab.id && activePromoCodes.length > 0;
+
   viewport.innerHTML = `
     <div class="chat-view">
       <div class="viewport-primary">
@@ -808,6 +839,19 @@ function renderSiteTabViewport(viewport: HTMLElement): void {
             type="text"
             value="${escapeHtml(tab.url)}"
           />
+          ${
+            activePromoCodes.length > 0
+              ? `
+          <button
+            data-codes-pill-tab="${escapeHtml(tab.id)}"
+            class="${showCodesPopover ? "active" : ""}"
+            title="Active promo codes from mail for ${escapeHtml(tabDomain)}"
+          >
+            [codes (${activePromoCodes.length})]
+          </button>
+          `
+              : ""
+          }
           ${
             state.tabCanFillLogin[tab.id]
               ? `
@@ -824,6 +868,25 @@ function renderSiteTabViewport(viewport: HTMLElement): void {
             [chat rail ${MOD_LABEL}+j]
           </button>
         </div>
+        ${
+          showCodesPopover
+            ? `
+        <div class="kb-card">
+          <div class="rail-row">
+            <span class="muted">promo codes for ${escapeHtml(tabDomain)}:</span>
+            <div>
+              ${activePromoCodes
+                .map(
+                  (c) =>
+                    `<button data-copy-promo-code="${escapeHtml(String(c.code ?? ""))}">[copy ${escapeHtml(String(c.code ?? ""))}${c.discount_value ? ` · ${escapeHtml(String(c.discount_value))}` : ""}${c.expiry ? ` · exp ${escapeHtml(String(c.expiry))}` : ""}]</button>`
+                )
+                .join(" ")}
+            </div>
+          </div>
+        </div>
+        `
+            : ""
+        }
         <div id="webview-slot-${escapeHtml(tab.id)}" class="webview-slot">
           loading ${escapeHtml(tab.url)}...
         </div>
@@ -950,6 +1013,27 @@ function bindToolbarEvents(viewport: HTMLElement): void {
     });
   });
 
+  viewport.querySelectorAll("[data-codes-pill-tab]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tabId = (btn as HTMLElement).getAttribute("data-codes-pill-tab");
+      if (!tabId) return;
+      state.openCodesPopoverTabId =
+        state.openCodesPopoverTabId === tabId ? null : tabId;
+      renderViewportRegion();
+    });
+  });
+
+  viewport.querySelectorAll("[data-copy-promo-code]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const code = el.getAttribute("data-copy-promo-code") || "";
+      if (code && navigator.clipboard) {
+        void navigator.clipboard.writeText(code);
+        el.textContent = `[copied ${code}]`;
+      }
+    });
+  });
+
   if (resizeObserver) {
     viewport.querySelectorAll(".webview-slot").forEach((slot) => {
       resizeObserver?.observe(slot);
@@ -969,6 +1053,13 @@ function getChatActions() {
     },
     onToggleWeb: () => {
       state.webSearchEnabled = !state.webSearchEnabled;
+      renderViewportRegion();
+    },
+    onToggleMail: () => {
+      if (state.activeDetail?.conversation.origin === "mail") {
+        return;
+      }
+      state.mailContextEnabled = !state.mailContextEnabled;
       renderViewportRegion();
     },
     onClickCitation: (citationIndex: number, sourceId: string | null) => {
@@ -1192,6 +1283,15 @@ async function handleCitationClick(
   sourceId: string | null
 ): Promise<void> {
   if (!state.activeDetail) return;
+
+  if (sourceId && sourceId.startsWith("mail:")) {
+    const mid = sourceId.slice(5).trim();
+    if (mid) {
+      await openEmailMessageTab(mid, "mail");
+      return;
+    }
+  }
+
   const activeTabSources = getActiveTabSources(state.activeDetail);
   const byActiveTab =
     activeTabSources.find(
@@ -1208,7 +1308,34 @@ async function handleCitationClick(
   const historicalSource =
     state.activeDetail.sources.find((s) => s.id === sourceId) ??
     state.activeDetail.sources[citationIndex - 1];
-  if (!historicalSource) return;
+  if (!historicalSource) {
+    const triageMatch =
+      state.mailTriageSources.find((s) => s.id === sourceId) ??
+      state.mailTriageSources[citationIndex - 1];
+    if (triageMatch && triageMatch.id.startsWith("mail:")) {
+      await openEmailMessageTab(
+        triageMatch.id.slice(5).trim(),
+        triageMatch.title || "mail"
+      );
+    }
+    return;
+  }
+
+  if (
+    historicalSource.id.startsWith("mail:") ||
+    historicalSource.url.startsWith("satzmail://message/")
+  ) {
+    const mid = historicalSource.id.startsWith("mail:")
+      ? historicalSource.id.slice(5).trim()
+      : historicalSource.url
+          .replace("satzmail://message/", "")
+          .split("/")[0]
+          .trim();
+    if (mid) {
+      await openEmailMessageTab(mid, historicalSource.title || "mail");
+      return;
+    }
+  }
 
   const openTab = state.activeDetail.tabs.find(
     (t) =>
@@ -1334,16 +1461,23 @@ async function handleSendChatMessage(text: string): Promise<void> {
     }));
 
     const convSummary = state.activeDetail?.conversation.summary ?? "";
+    const isMailConv = state.activeDetail?.conversation.origin === "mail";
+    const mailEnabled = Boolean(isMailConv || state.mailContextEnabled);
+    const initialSources = activeTabSources.map((s) => ({
+      id: s.sourceId,
+      url: s.url,
+      title: s.title,
+      domain: s.domain,
+      is_open_tab: true,
+    }));
+    if (isMailConv && initialSources.length === 0 && state.mailTriageSources.length > 0) {
+      initialSources.push(...state.mailTriageSources);
+    }
+
     const streamRes = await sidecarStreamChat(
       state.selectedModel,
       historyPayload,
-      activeTabSources.map((s) => ({
-        id: s.sourceId,
-        url: s.url,
-        title: s.title,
-        domain: s.domain,
-        is_open_tab: true,
-      })),
+      initialSources,
       state.webSearchEnabled,
       (delta) => {
         appendStreamingDelta(delta);
@@ -1359,7 +1493,8 @@ async function handleSendChatMessage(text: string): Promise<void> {
         for (const st of stats) {
           state.sourceStats[st.id] = st;
         }
-      }
+      },
+      mailEnabled
     );
 
     if (streamRes.source_stats) {
