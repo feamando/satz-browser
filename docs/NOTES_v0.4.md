@@ -128,5 +128,33 @@ Owner: Nikita Gorshkov · Date: 2026-10-27 · Target: Windows 11 (4090 box) firs
   - Added `tabs.kind` column (`'site' | 'mail' | 'compose'`, default `'site'`) and `ensure_mail_conversation()` (`origin = 'mail'`, `pinned = 1`, protected against unpin, archive, and delete).
   - Verified by `cargo test` (`db::tests::test_tabs_kind_migration_and_pinned_mail_conversation`) and `pytest` (`test_m11_mail_accounts_imap_pop3_sync_peek_and_vault_prefix`).
 
+---
+
+## 6. Milestone 12 (M12): Mail Processing Pipeline
+
+- **4-Part Email Splitter (`sidecar/satz_mail_pipeline.py`):**
+  - Implemented `split_email_parts(body_text, raw_html, gemma_split_fn)` splitting messages into `new`, `quote`, `signature`, and `footer` across English and German emails:
+    - HTML quote containers: Gmail `div.gmail_quote` and Outlook `div#divRplyFwdMsg` / `div#appendonsend`.
+    - Quote header markers: `On ... wrote:`, `Am ... schrieb ...:`, `-----Original Message-----`, `-----Ursprüngliche Nachricht-----`, EN/DE `From:/Von: ... Sent:/Gesendet: ...` header blocks, and `>` quoted blocks.
+    - Signature delimiters: RFC 3676 `-- `, EN/DE closings (`Best regards`, `Kind regards`, `Thanks`, `Mit freundlichen Grüßen`, `Viele Grüße`, `Beste Grüße`, `VG`, `LG`, `MfG`), and mobile device signatures (`Sent from my iPhone`, `Von meinem iPhone gesendet`).
+    - Newsletter footers: `unsubscribe`, `abmelden`, `newsletter abbestellen`, `Impressum`, `Datenschutz`, `Privacy Policy`, `Terms of Service`.
+    - Ambiguous body fallback: calls Gemma (`gemma_split_fn`) when the pre-quote body exceeds `4,000` chars and contains multiple greetings.
+  - Verified against 20 deterministic fixtures (10 English + 10 German, including Gmail HTML replies, Outlook HTML replies, and EN/DE newsletters) in `test_m12_mail_pipeline_split_20_fixtures_extract_classify_300_and_brain_person_threshold`.
+- **4-Label Classifier, Cold-Start Gemma Bootstrap & Automatic Retraining (`sidecar/satz_mail_pipeline.py`):**
+  - 4 labels: `0 email`, `1 ping`, `2 information`, `3 promotion` over `[FROM] <from> [SUBJECT] <subject> [BODY] <new_text[:1000]>`.
+  - Promotion protection threshold (`apply_classification_thresholds`): `promotion` requires confidence `>= 0.90`; a `promotion` prediction at `0.85` confidence lands in the `inbox` as `email`. Other labels require `>= 0.75`.
+  - Cold start: with no trained `mail_model/active`, Gemma labels the priority queue (newest 300 messages first). Once `>= 50` labelled samples exist, trains `distilbert-base-multilingual-cased` into `profiles/<id>/mail_model/v1` and promotes it to `mail_model/active`.
+  - User corrections (`POST /mail/message/<id>/label` / `record_user_correction`) write to `corrections` and `labels(source='user')` and trigger a retrain after every `20` unused corrections (`v1 -> v2`, keeping previous version for rollback).
+- **Rule-Based + Hertz Extraction (`sidecar/satz_mail_pipeline.py`):**
+  - `ping`: `PING_PLATFORM_MAP` lookup over 26 sender domains with parent-domain fallback (`notifications@github.com -> GitHub`).
+  - `information`: EN + DE regex rules for `order_number`, `tracking_number` (UPS `1Z...`, DHL `JJD...`, numeric 12-22 digits), `tracking_url`, `merchant`, `status` (`delivered`, `out for delivery`, `shipped`, `ordered`, `cancelled`, `refunded`), and `total`, plus `is_valid_extracted_code` filtering and Hertz reader fallback (`confidence >= 0.6`). Verified on Amazon (`302-1234567-7654321`), DHL (`JJD000390001234567890`), and Zalando (`1040506070`) fixtures.
+  - `promotion`: EN + DE regex rules for `voucher_code`, `discount_value`, `expiry` (normalized to `YYYY-MM-DD`), and `company`, plus Hertz fallback. Verified on 3 EN/DE promo fixtures (`AUTUMN20`, `HERBST15`, `WINTER30`).
+- **Deterministic Brain & Knowledge Store Linking (`sidecar/satz_mail_pipeline.py`, `sidecar/satz_brain.py`):**
+  - Added `order` (`Entities/Orders`, Tier 1) and `promotion` (`Entities/Promotions`, Tier 2) entity directories to `SatzBrainManager`.
+  - `person` entities are created **only** after the user has replied to that sender or received at least `2` `email`-labelled messages from that sender (verified: 1st email from `clara@studiob.de` creates `0` person entities; 2nd email creates `1` person entity with signature `role`, `company`, `phone`, and `works_for` link).
+  - `organization` entities skip `FREE_MAIL_DOMAINS` and automated senders (`noreply@`, `no-reply@`, `notifications@`).
+  - `Store.add_passages` indexes `new` text for `email` and `information` messages under `conversation_id = 'mail'`, while excluding `promotion` and `ping` messages from the knowledge store.
+
+
 
 

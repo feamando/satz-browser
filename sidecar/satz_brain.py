@@ -39,13 +39,15 @@ ENTITY_TYPE_DIRS: dict[str, str] = {
     "address": "Entities/Places",
     "organization": "Entities/Organizations",
     "account": "Entities/Accounts",
+    "order": "Entities/Orders",
+    "promotion": "Entities/Promotions",
     "project": "Projects",
     "note": "Notes",
     "fact": "Notes",
     "decision": "Decisions",
 }
 
-TIER1_TYPES = {"account", "person", "place", "address", "project"}
+TIER1_TYPES = {"account", "person", "place", "address", "project", "order"}
 
 STORE_INTENT_RE = re.compile(
     r"\b(store|save|remember|record|keep|add\s+to\s+(?:the\s+)?(?:knowledge\s*base|brain|memory)|log\s+this|note\s+down)\b",
@@ -506,6 +508,9 @@ class SatzBrain:
                 self._brain_md_mtime = time.time()
             self._brain_md_cache = content
             return content
+
+    def list_entities(self) -> list[dict[str, Any]]:
+        return list(self.get_brain_summary().get("entities") or [])
 
     def get_brain_summary(self) -> dict[str, Any]:
         with self.lock:

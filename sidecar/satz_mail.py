@@ -263,6 +263,9 @@ class SatzMailManager:
         self._send_timers: dict[str, threading.Timer] = {}
 
         self._ensure_connection()
+        from satz_mail_pipeline import SatzMailPipeline
+
+        self.pipeline = SatzMailPipeline(self.runtime, self)
 
     # ── SQLite Connection & Schema (Section 4.3) ─────────────────────────
     def _current_mail_db_path(self) -> Path:
@@ -297,6 +300,8 @@ class SatzMailManager:
             self.stop_all_sync_threads()
             self._auth_stopped_accounts.clear()
             self._ensure_connection()
+            if self.pipeline is not None:
+                self.pipeline._load_active_model_if_exists()
             if self.passwords.unlocked:
                 self.start_sync_threads_for_unlocked_profile()
 

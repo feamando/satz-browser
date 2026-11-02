@@ -39,6 +39,12 @@ export function renderStatusLine(): void {
       ? `<button id="status-errors-btn" class="rail-menu-btn msg-error-badge">[${errCount} error${errCount === 1 ? "" : "s"}]</button>`
       : "";
 
+  const mailStatus = state.sidecar.mail;
+  const mailProcessingHtml =
+    mailStatus?.is_processing
+      ? `<span>mail [processing ${mailStatus.processing_done}/${mailStatus.processing_total}]</span>`
+      : "";
+
   container.innerHTML = `
     <div class="status-segment">
       <span>model: <span class="status-item">${escapeHtml(state.selectedModel)}</span> ${modelStatus}</span>
@@ -48,6 +54,7 @@ export function renderStatusLine(): void {
     </div>
     <div class="status-segment">
       ${errBtnHtml}
+      ${mailProcessingHtml}
       <span>kb queue: <span class="status-item">${queueLen}</span>${learnState}</span>
     </div>
   `;

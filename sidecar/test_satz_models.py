@@ -901,6 +901,387 @@ class TestSatzSidecar(unittest.TestCase):
         self.assertEqual(pop_sync2["synced_count"], 0, "POP3 UIDL dedupe must skip already-fetched UIDL")
         self.assertFalse(any(e["op"] == "dele" for e in pop3_log))
 
+    def test_m12_mail_pipeline_split_20_fixtures_extract_classify_300_and_brain_person_threshold(self):
+        from satz_mail_pipeline import (
+            apply_classification_thresholds,
+            extract_information_fields,
+            extract_promotion_fields,
+            split_email_parts,
+        )
+
+        # ── 1. Split fixtures: 10 English + 10 German (including Gmail, Outlook, newsletter) ──
+        en_fixtures: list[tuple[str, str, str]] = [
+            # EN 1: Standard `On ... wrote:` reply
+            (
+                "Sounds good, let's lock in Tuesday at 10:00.\n\nOn Mon, Oct 26, 2026 at 4:15 PM Alex <alex@acme.io> wrote:\n> Can we meet Tuesday?",
+                "",
+                "Sounds good, let's lock in Tuesday at 10:00.",
+            ),
+            # EN 2: Gmail HTML `div.gmail_quote` reply
+            (
+                "I uploaded the Q4 slides.\n\nOn Tue, Oct 27, 2026 at 9:00 AM Sarah wrote:\n> Please share the deck.",
+                '<div>I uploaded the Q4 slides.</div><div class="gmail_quote">On Tue, Oct 27, 2026 at 9:00 AM Sarah wrote:<blockquote>Please share the deck.</blockquote></div>',
+                "I uploaded the Q4 slides.",
+            ),
+            # EN 3: Outlook HTML `div#appendonsend` + `div#divRplyFwdMsg`
+            (
+                "Approved for release.\n\nFrom: Dev Team\nSent: Tuesday, October 27, 2026 8:00 AM\nTo: Nikita\nSubject: Release",
+                '<div>Approved for release.</div><div id="appendonsend"></div><hr><div id="divRplyFwdMsg"><b>From:</b> Dev Team<br><b>Sent:</b> Tuesday</div>',
+                "Approved for release.",
+            ),
+            # EN 4: Standard `-- ` RFC 3676 signature delimiter
+            (
+                "Here is the updated benchmark table.\n\n-- \nMaya Chen\nStaff Engineer\n+1 415 555 0199",
+                "",
+                "Here is the updated benchmark table.",
+            ),
+            # EN 5: English closing `Best regards,`
+            (
+                "We will ship the patch by Friday.\n\nBest regards,\nLiam O'Connor\nVP Engineering",
+                "",
+                "We will ship the patch by Friday.",
+            ),
+            # EN 6: `Sent from my iPhone` mobile signature
+            (
+                "Running 5 minutes late to the call.\n\nSent from my iPhone",
+                "",
+                "Running 5 minutes late to the call.",
+            ),
+            # EN 7: `-----Original Message-----` Outlook plain text
+            (
+                "Thanks, I confirmed the wire transfer.\n\n-----Original Message-----\nFrom: Finance <finance@acme.com>\nSent: Monday",
+                "",
+                "Thanks, I confirmed the wire transfer.",
+            ),
+            # EN 8: English newsletter with unsubscribe footer
+            (
+                "Planck 3.0 release notes are now live on our blog.\n\nTo unsubscribe from this list, click here.\nPrivacy Policy | Terms of Service",
+                "",
+                "Planck 3.0 release notes are now live on our blog.",
+            ),
+            # EN 9: `Kind regards,` + `> ` quoted block
+            (
+                "Let's keep the 30% user score cap.\n\nKind regards,\nElena\n\n> Should we raise the cap?\n> Let me know.",
+                "",
+                "Let's keep the 30% user score cap.",
+            ),
+            # EN 10: `Thanks,` closing with role & phone
+            (
+                "The contract PDF is attached for your review.\n\nThanks,\nDavid Park\nLegal Counsel",
+                "",
+                "The contract PDF is attached for your review.",
+            ),
+        ]
+
+        de_fixtures: list[tuple[str, str, str]] = [
+            # DE 1: `Am ... schrieb ...:` German reply header
+            (
+                "Perfekt, wir sehen uns am Donnerstag um 14 Uhr.\n\nAm 26.10.2026 um 16:20 schrieb Lukas Weber <lukas@berlin.de>:\n> Passt Donnerstag?",
+                "",
+                "Perfekt, wir sehen uns am Donnerstag um 14 Uhr.",
+            ),
+            # DE 2: `Mit freundlichen Grüßen` closing
+            (
+                "Anbei erhalten Sie die aktuelle Rechnung für Oktober.\n\nMit freundlichen Grüßen\nHannah Richter\nBuchhaltung",
+                "",
+                "Anbei erhalten Sie die aktuelle Rechnung für Oktober.",
+            ),
+            # DE 3: `Viele Grüße` closing
+            (
+                "Die Messwerte für Hertz sehen sehr gut aus.\n\nViele Grüße\nJonas",
+                "",
+                "Die Messwerte für Hertz sehen sehr gut aus.",
+            ),
+            # DE 4: `Beste Grüße` closing
+            (
+                "Ich habe das Repository soeben aktualisiert.\n\nBeste Grüße,\nMarkus Klein",
+                "",
+                "Ich habe das Repository soeben aktualisiert.",
+            ),
+            # DE 5: `VG` shorthand closing
+            (
+                "Kurzes Update: Der Build läuft wieder grün.\n\nVG\nTobi",
+                "",
+                "Kurzes Update: Der Build läuft wieder grün.",
+            ),
+            # DE 6: `LG` shorthand closing
+            (
+                "Danke für die schnelle Rückmeldung!\n\nLG\nClara",
+                "",
+                "Danke für die schnelle Rückmeldung!",
+            ),
+            # DE 7: `Von meinem iPhone gesendet`
+            (
+                "Bin gleich im Büro.\n\nVon meinem iPhone gesendet",
+                "",
+                "Bin gleich im Büro.",
+            ),
+            # DE 8: `-----Ursprüngliche Nachricht-----`
+            (
+                "Wir übernehmen die Änderungen in Sprint 12.\n\n-----Ursprüngliche Nachricht-----\nVon: Projektteam\nGesendet: Montag",
+                "",
+                "Wir übernehmen die Änderungen in Sprint 12.",
+            ),
+            # DE 9: German Outlook header block (`Von: ... Gesendet: ... An: ... Betreff: ...`)
+            (
+                "Bitte das Budget bis Freitag freigeben.\n\nVon: Controlling <ctrl@firma.de>\nGesendet: Dienstag, 27. Oktober 2026\nAn: Nikita\nBetreff: Budget Q4",
+                "",
+                "Bitte das Budget bis Freitag freigeben.",
+            ),
+            # DE 10: German newsletter with `Abbestellen` + `Impressum` footer
+            (
+                "Unsere Herbstkollektion ist ab sofort verfügbar.\n\nNewsletter abbestellen | Impressum | Datenschutz | AGB",
+                "",
+                "Unsere Herbstkollektion ist ab sofort verfügbar.",
+            ),
+        ]
+
+        self.assertEqual(len(en_fixtures), 10)
+        self.assertEqual(len(de_fixtures), 10)
+
+        for idx, (body, raw_html, expected_new) in enumerate(en_fixtures + de_fixtures, start=1):
+            parts = split_email_parts(body, raw_html=raw_html)
+            self.assertEqual(
+                parts["new"],
+                expected_new,
+                f"Split fixture #{idx} failed: got {parts['new']!r}, expected {expected_new!r}",
+            )
+
+        # ── 2. Rule extraction fixtures: Amazon, DHL, Zalando orders + 3 promo emails ──
+        amazon_ext = extract_information_fields(
+            subject="Your Amazon.de order #302-1234567-7654321 has shipped",
+            new_text="Your package is on the way. Order #302-1234567-7654321. Total: EUR 89.99. Track at https://www.amazon.de/progress-tracker/package/ref=123",
+            from_name="Amazon.de",
+            from_addr="shipment-tracking@amazon.de",
+        )
+        self.assertEqual(amazon_ext["order_number"][0], "302-1234567-7654321")
+        self.assertEqual(amazon_ext["status"][0], "shipped")
+        self.assertIn("89.99", amazon_ext["total"][0])
+
+        dhl_ext = extract_information_fields(
+            subject="Ihr DHL Paket ist unterwegs - Sendungsnummer JJD000390001234567890",
+            new_text="Guten Tag, Ihr Paket wurde versendet. Sendungsnummer: JJD000390001234567890. Verfolgen: https://www.dhl.de/de/privatkunden.html?piececode=JJD000390001234567890",
+            from_name="DHL Paket",
+            from_addr="noreply@dhl.de",
+        )
+        self.assertEqual(dhl_ext["tracking_number"][0], "JJD000390001234567890")
+        self.assertEqual(dhl_ext["status"][0], "shipped")
+        self.assertIn("dhl.de", dhl_ext["tracking_url"][0])
+
+        zalando_ext = extract_information_fields(
+            subject="Vielen Dank für deine Bestellung bei Zalando",
+            new_text="Bestellbestätigung: Bestellnummer: 1040506070. Summe: 129,95 €. Deine Bestellung wird vorbereitet.",
+            from_name="Zalando",
+            from_addr="service@zalando.de",
+        )
+        self.assertEqual(zalando_ext["order_number"][0], "1040506070")
+        self.assertEqual(zalando_ext["status"][0], "ordered")
+        self.assertIn("129,95", zalando_ext["total"][0])
+
+        promo1 = extract_promotion_fields(
+            subject="Save 20% off everything this weekend!",
+            new_text="Use promo code: AUTUMN20 at checkout. Valid until 2026-11-15.",
+            from_name="Nike Store",
+            from_addr="news@nike.com",
+        )
+        self.assertEqual(promo1["voucher_code"][0], "AUTUMN20")
+        self.assertEqual(promo1["discount_value"][0], "20%")
+        self.assertEqual(promo1["expiry"][0], "2026-11-15")
+
+        promo2 = extract_promotion_fields(
+            subject="Dein 15€ Rabatt bei Zalando",
+            new_text="Sichere dir 15€ Rabatt auf deinen nächsten Einkauf! Gutscheincode: HERBST15. Gültig bis 30.11.2026.",
+            from_name="Zalando Newsletter",
+            from_addr="newsletter@zalando.de",
+        )
+        self.assertEqual(promo2["voucher_code"][0], "HERBST15")
+        self.assertIn("15", promo2["discount_value"][0])
+        self.assertEqual(promo2["expiry"][0], "2026-11-30")
+
+        promo3 = extract_promotion_fields(
+            subject="Flash Sale: 30% Rabatt heute",
+            new_text="Code:WINTER30 für 30% Rabatt im Online-Shop. Expires 12/05/2026.",
+            from_name="Adidas",
+            from_addr="promo@adidas.de",
+        )
+        self.assertEqual(promo3["voucher_code"][0], "WINTER30")
+        self.assertEqual(promo3["discount_value"][0], "30%")
+        self.assertEqual(promo3["expiry"][0], "2026-05-12")
+
+        # ── 3. Promotion at 0.85 confidence lands in the inbox (`email`) ──
+        eff_label, kept_in_inbox = apply_classification_thresholds("promotion", 0.85)
+        self.assertEqual(eff_label, "email")
+        self.assertTrue(kept_in_inbox)
+
+        eff_promo_high, _ = apply_classification_thresholds("promotion", 0.93)
+        self.assertEqual(eff_promo_high, "promotion")
+
+        # ── 4. Cold start: 300 messages get labels from Gemma, model trains at 50; Brain person after 2nd email ──
+        self.runtime.mail.pipeline.auto_wake = False
+
+        # Seed a mail account
+        with self.runtime.mail.db_lock:
+            conn = self.runtime.mail._ensure_connection()
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO accounts (
+                    id, label, email, protocol, in_host, in_port, in_security,
+                    smtp_host, smtp_port, smtp_security, vault_prefix, sync_days
+                ) VALUES ('acct-m12', 'Test Mail', 'nikita@satz.local', 'imap', 'imap.local', 993, 'ssl', 'smtp.local', 587, 'starttls', 'TEST', 30)
+                """
+            )
+            conn.commit()
+
+        gemma_calls: list[str] = []
+        trained_versions: list[tuple[str, int]] = []
+
+        def fake_gemma_label(from_str: str, subject: str, list_unsub: str, new_text: str) -> str:
+            gemma_calls.append(subject)
+            if "Order" in subject:
+                return "information"
+            if "Sale" in subject:
+                return "promotion"
+            if "GitHub" in from_str:
+                return "ping"
+            return "email"
+
+        def fake_trainer(samples: list[tuple[str, str]], out_dir: Path, version: str) -> None:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "version.txt").write_text(version, encoding="utf-8")
+            trained_versions.append((version, len(samples)))
+
+        self.runtime.mail.pipeline.gemma_label_fn = fake_gemma_label
+        self.runtime.mail.pipeline.trainer_fn = fake_trainer
+
+        # First test Brain person threshold: 1st email from clara@studiob.de -> NO person entity yet
+        raw_clara_1 = (
+            b"Message-ID: <clara-1@studiob.de>\r\n"
+            b"From: Clara Weiss <clara@studiob.de>\r\n"
+            b"To: nikita@satz.local\r\n"
+            b"Subject: Design review notes\r\n"
+            b"Date: Tue, 27 Oct 2026 09:00:00 +0000\r\n\r\n"
+            b"Here are the typography notes from today.\r\n\r\n"
+            b"-- \r\n"
+            b"Clara Weiss\r\n"
+            b"Lead Designer\r\n"
+            b"Studio B GmbH\r\n"
+            b"+49 30 1234567\r\n"
+        )
+        mid_clara_1 = self.runtime.mail._store_parsed_raw_email(
+            account_id="acct-m12",
+            folder_name="INBOX",
+            role="inbox",
+            uid=1,
+            pop_uidl="",
+            raw_bytes=raw_clara_1,
+            seen=0,
+            answered=0,
+            flagged=0,
+        )
+        self.assertIsNotNone(mid_clara_1)
+        assert mid_clara_1 is not None
+        self.runtime.mail.pipeline.process_single_message(mid_clara_1)
+
+        entities_after_1 = self.runtime.brain.list_entities()
+        person_slugs_1 = [e["slug"] for e in entities_after_1 if e["type"] == "person"]
+        self.assertEqual(
+            len(person_slugs_1),
+            0,
+            "Brain must NOT create a person entity after only 1 email without user reply",
+        )
+
+        # 2nd email from clara@studiob.de -> Brain creates `person` entity + `organization` entity
+        raw_clara_2 = (
+            b"Message-ID: <clara-2@studiob.de>\r\n"
+            b"From: Clara Weiss <clara@studiob.de>\r\n"
+            b"To: nikita@satz.local\r\n"
+            b"Subject: Follow-up on monochrome palette\r\n"
+            b"Date: Tue, 27 Oct 2026 10:00:00 +0000\r\n\r\n"
+            b"I updated the contrast tokens as discussed.\r\n\r\n"
+            b"-- \r\n"
+            b"Clara Weiss\r\n"
+            b"Lead Designer\r\n"
+            b"Studio B GmbH\r\n"
+            b"+49 30 1234567\r\n"
+        )
+        mid_clara_2 = self.runtime.mail._store_parsed_raw_email(
+            account_id="acct-m12",
+            folder_name="INBOX",
+            role="inbox",
+            uid=2,
+            pop_uidl="",
+            raw_bytes=raw_clara_2,
+            seen=0,
+            answered=0,
+            flagged=0,
+        )
+        assert mid_clara_2 is not None
+        self.runtime.mail.pipeline.process_single_message(mid_clara_2)
+
+        entities_after_2 = self.runtime.brain.list_entities()
+        persons_2 = [e for e in entities_after_2 if e["type"] == "person"]
+        self.assertEqual(len(persons_2), 1, "Brain must create person entity after 2nd email from sender")
+        self.assertEqual(persons_2[0]["attributes"].get("email"), "clara@studiob.de")
+        self.assertEqual(persons_2[0]["attributes"].get("role"), "Lead Designer")
+
+        # Now ingest 298 more messages (total 300) and run pipeline queue
+        batch_ids: list[str] = []
+        for i in range(3, 301):
+            if i % 4 == 0:
+                subj = f"Your Order #{100000 + i} has shipped"
+                sender = f"Shop <orders@shop{i % 10}.de>"
+                body = f"Order #{100000 + i} is on the way."
+            elif i % 4 == 1:
+                subj = f"Autumn Sale {i}% off"
+                sender = f"Promo <deals@brand{i % 10}.com>"
+                body = f"Use promo code: SAVE{100 + i} for 20% off."
+            elif i % 4 == 2:
+                subj = f"[org/repo] Issue #{i}"
+                sender = "GitHub <notifications@github.com>"
+                body = f"New comment on issue #{i}."
+            else:
+                subj = f"Project sync #{i}"
+                sender = f"Colleague {i} <peer{i}@company.io>"
+                body = f"Let's review milestone #{i} tomorrow."
+
+            raw_m = (
+                f"Message-ID: <bulk-{i}@satz.local>\r\n"
+                f"From: {sender}\r\n"
+                f"To: nikita@satz.local\r\n"
+                f"Subject: {subj}\r\n"
+                f"Date: Tue, 27 Oct 2026 11:00:00 +0000\r\n\r\n"
+                f"{body}\r\n"
+            ).encode("utf-8")
+            mid = self.runtime.mail._store_parsed_raw_email(
+                account_id="acct-m12",
+                folder_name="INBOX",
+                role="inbox",
+                uid=i,
+                pop_uidl="",
+                raw_bytes=raw_m,
+                seen=0,
+                answered=0,
+                flagged=0,
+            )
+            assert mid is not None
+            batch_ids.append(mid)
+
+        self.runtime.mail.pipeline.enqueue_messages(batch_ids)
+        processed_count = self.runtime.mail.pipeline.process_all_queued_sync()
+        self.assertEqual(processed_count, 298)
+        self.assertEqual(len(gemma_calls), 300)
+        self.assertTrue(len(trained_versions) >= 1, "Model must train once 50 cold-start labels exist")
+        self.assertEqual(trained_versions[0][0], "v1")
+        self.assertGreaterEqual(trained_versions[0][1], 50)
+        self.assertEqual(self.runtime.mail.pipeline.model_version, "v1")
+
+        # Verify 20 user corrections trigger retraining to v2
+        for idx, mid in enumerate(batch_ids[:20]):
+            res_corr = self.runtime.mail.pipeline.record_user_correction(mid, "email")
+            if idx == 19:
+                self.assertTrue(res_corr["retrained"])
+        self.assertEqual(self.runtime.mail.pipeline.model_version, "v2")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2415,6 +2415,17 @@ def make_sidecar_server(
             if self.path == "/mail/settings":
                 return self._json({"ok": True, "settings": runtime.mail.update_mail_settings(data)})
 
+            if self.path.startswith("/mail/message/") and self.path.endswith("/label"):
+                parts = [p for p in self.path.split("/") if p]
+                if len(parts) == 4 and parts[0] == "mail" and parts[1] == "message" and parts[3] == "label":
+                    mid = parts[2]
+                    new_label = str(data.get("label") or "").strip().lower()
+                    try:
+                        res = runtime.mail.pipeline.record_user_correction(mid, new_label)
+                        return self._json(res)
+                    except Exception as e:
+                        return self._json({"ok": False, "error": str(e)}, 400)
+
             if self.path == "/chat/summarize":
                 messages = data.get("messages") or []
                 prev_summary = str(data.get("summary") or "")
