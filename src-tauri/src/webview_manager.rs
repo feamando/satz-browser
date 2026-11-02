@@ -544,6 +544,44 @@ const DOM_CAPTURE_JS: &str = r#"(() => {
         parts.push('[VISIBLE LIST / INBOX ROWS (TOP = LATEST)]\n' + rowLines.join('\n'));
       }
     }
+
+    const findings = [];
+    const seenImgs = new Set();
+    const imgEls = Array.from(document.querySelectorAll('article img, [data-testid*="product" i] img, [class*="product" i] img, [class*="card" i] img, main img, img'));
+    for (let i = 0; i < imgEls.length && findings.length < 8; i++) {
+      const img = imgEls[i];
+      const src = img.currentSrc || img.src || img.getAttribute('data-src') || img.getAttribute('srcset')?.split(' ')[0] || '';
+      if (!src || !src.startsWith('http') || seenImgs.has(src)) continue;
+      const lowerSrc = src.toLowerCase();
+      if (lowerSrc.includes('sprite') || lowerSrc.includes('logo') || lowerSrc.includes('icon') || lowerSrc.includes('pixel') || lowerSrc.endsWith('.svg')) continue;
+      const rect = img.getBoundingClientRect ? img.getBoundingClientRect() : { width: img.naturalWidth || 0, height: img.naturalHeight || 0 };
+      const w = Math.max(rect.width || 0, img.naturalWidth || 0, img.width || 0);
+      const h = Math.max(rect.height || 0, img.naturalHeight || 0, img.height || 0);
+      if (w > 0 && h > 0 && (w < 85 || h < 85)) continue;
+      const card = img.closest('article, [data-testid*="product" i], [class*="product" i], [class*="card" i], li, a') || img.parentElement;
+      const linkEl = img.closest('a[href]') || (card ? card.querySelector('a[href]') : null);
+      const href = linkEl && linkEl.href ? linkEl.href : location.href;
+      let cardTxt = card && card.innerText ? card.innerText.replace(/\s+/g, ' ').trim() : '';
+      const altTxt = (img.alt || img.title || '').replace(/\s+/g, ' ').trim();
+      const titleTxt = (altTxt && altTxt.length > 4 ? altTxt : cardTxt).slice(0, 140);
+      if (!titleTxt && w < 120) continue;
+      const priceMatch = cardTxt.match(/(?:€|\$|£|EUR|USD|CHF)\s?\d+(?:[.,]\d{2})?|\d+(?:[.,]\d{2})?\s?(?:€|\$|£|EUR|USD|CHF)/i);
+      const priceTxt = priceMatch ? priceMatch[0].trim() : '';
+      seenImgs.add(src);
+      findings.push({
+        image_url: src,
+        title: titleTxt || document.title || location.hostname,
+        price: priceTxt,
+        page_url: href
+      });
+    }
+    if (findings.length > 0) {
+      const fLines = findings.map((f, idx) =>
+        `[ITEM ${idx + 1}] ${f.title}${f.price ? ' (' + f.price + ')' : ''} | link: ${f.page_url} | image: ${f.image_url}`
+      );
+      parts.push('[EXTRACTED PAGE ITEMS & IMAGES]\n' + fLines.join('\n'));
+    }
+
     const mainEl = document.querySelector('[role="main"], main, article');
     if (mainEl && mainEl.innerText) {
       const mainTxt = mainEl.innerText.trim();
@@ -568,7 +606,8 @@ const DOM_CAPTURE_JS: &str = r#"(() => {
       title: document.title,
       has_password_field: hasVisiblePass,
       visible_text: parts.join('\n\n').slice(0, 120000),
-      html: document.documentElement ? document.documentElement.outerHTML.slice(0, 1500000) : ''
+      html: document.documentElement ? document.documentElement.outerHTML.slice(0, 1500000) : '',
+      findings: findings
     });
   } catch (e) {
     return JSON.stringify({
@@ -576,7 +615,8 @@ const DOM_CAPTURE_JS: &str = r#"(() => {
       title: document.title,
       has_password_field: false,
       visible_text: document.body ? (document.body.innerText || '').slice(0, 100000) : '',
-      html: ''
+      html: '',
+      findings: []
     });
   }
 })()"#;
@@ -796,7 +836,7 @@ fn trigger_dom_capture_with_completion<R: tauri::Runtime>(
     {
         let _ = webview;
         std::thread::spawn(move || {
-            post_ingest_to_sidecar(&app, &tab_id, &fallback_url, "", None, None);
+            post_ingest_to_sidecar(&app, &tab_id, &fallback_url, "", None, None, None);
             if let Some(tx) = done_tx {
                 let _ = tx.send(());
             }
@@ -804,8 +844,109 @@ fn trigger_dom_capture_with_completion<R: tauri::Runtime>(
     }
 }
 
-/// Section 3.1 (M9):
-/// Re-captures ONLY the visible tab(s), plus any open tab whose URL changed since its last capture.
+/// Navigates a tab's live WebView2 (or spawns an off-screen WebView2 if the user is on the `[1 chat]` tab),
+/// waits up to `timeout_ms` for the page + SPA content to render, and captures its DOM + findings into `/ingest`.
+pub fn navigate_and_capture_tab_impl(
+    app: &AppHandle,
+    db: &DbState,
+    wv_state: &WebviewManagerState,
+    tab_id: &str,
+    raw_url: &str,
+    wait_ms: u64,
+) -> Result<String, String> {
+    let parsed_url = normalize_url(raw_url)?;
+    let normalized_str = parsed_url.to_string();
+    {
+        wv_state
+            .tab_urls
+            .lock()
+            .unwrap()
+            .insert(tab_id.to_string(), normalized_str.clone());
+    }
+    let _ = db.record_tab_navigation_or_title(tab_id, Some(&normalized_str), None);
+
+    let label = tab_webview_label(tab_id);
+    if let Some(existing_wv) = app.get_webview(&label) {
+        let _ = existing_wv.navigate(parsed_url);
+    } else if let Some(window) = app.get_window("main") {
+        let tid_load = tab_id.to_string();
+        let tid_title = tab_id.to_string();
+        let app_load = app.clone();
+        let app_title = app.clone();
+
+        let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed_url))
+            .on_page_load(move |wv, payload| {
+                let url_str = payload.url().to_string();
+                if let Some(st) = app_load.try_state::<WebviewManagerState>() {
+                    st.tab_urls
+                        .lock()
+                        .unwrap()
+                        .insert(tid_load.clone(), url_str.clone());
+                }
+                if payload.event() == PageLoadEvent::Finished {
+                    if let Some(d) = app_load.try_state::<DbState>() {
+                        let _ = d.record_tab_navigation_or_title(&tid_load, Some(&url_str), None);
+                    }
+                    if !url_str.starts_with("satzmail://") {
+                        trigger_dom_capture_and_ingest(
+                            app_load.clone(),
+                            wv.clone(),
+                            tid_load.clone(),
+                            url_str.clone(),
+                        );
+                    }
+                }
+            })
+            .on_document_title_changed(move |wv, title| {
+                let current_url = wv.url().ok().map(|u| u.to_string());
+                if let Some(d) = app_title.try_state::<DbState>() {
+                    let _ = d.record_tab_navigation_or_title(
+                        &tid_title,
+                        current_url.as_deref(),
+                        Some(&title),
+                    );
+                }
+                let cur_u = current_url.unwrap_or_default();
+                if !cur_u.starts_with("satzmail://") {
+                    trigger_dom_capture_and_ingest(
+                        app_title.clone(),
+                        wv.clone(),
+                        tid_title.clone(),
+                        cur_u,
+                    );
+                }
+            });
+
+        if let Ok(child_wv) = window.add_child(
+            builder,
+            LogicalPosition::new(0.0, 0.0),
+            LogicalSize::new(1180.0, 820.0),
+        ) {
+            #[cfg(windows)]
+            attach_child_webview_accelerators(app.clone(), &child_wv);
+            let is_vis = wv_state.visible_tabs.lock().unwrap().contains(tab_id);
+            if !is_vis {
+                let _ = child_wv.hide();
+            }
+        }
+    }
+
+    let wait_dur = Duration::from_millis(wait_ms.clamp(600, 6000));
+    std::thread::sleep(wait_dur);
+
+    if let Some(wv) = app.get_webview(&label) {
+        let cur_url = wv
+            .url()
+            .ok()
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| normalized_str.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        trigger_dom_capture_with_completion(app.clone(), wv, tab_id.to_string(), cur_url, Some(tx));
+        let _ = rx.recv_timeout(Duration::from_millis(1200));
+    }
+
+    Ok(normalized_str)
+}
 /// All other open tabs (including tabs suspended by the LRU cap) use their cached capture.
 /// Waits on all receivers against one shared deadline of 800 ms total.
 pub fn capture_open_tabs_for_conversation(
@@ -873,6 +1014,7 @@ fn handle_captured_dom_json<R: tauri::Runtime>(
                 .unwrap_or(false);
             let visible_text = parsed.get("visible_text").and_then(|v| v.as_str());
             let html = parsed.get("html").and_then(|v| v.as_str());
+            let findings = parsed.get("findings").cloned();
 
             if let Some(wv_state) = app.try_state::<WebviewManagerState>() {
                 use std::collections::hash_map::DefaultHasher;
@@ -923,11 +1065,11 @@ fn handle_captured_dom_json<R: tauri::Runtime>(
                 },
             );
 
-            post_ingest_to_sidecar(app, tab_id, url, title, visible_text, html);
+            post_ingest_to_sidecar(app, tab_id, url, title, visible_text, html, findings);
             return;
         }
     }
-    post_ingest_to_sidecar(app, tab_id, fallback_url, "", None, None);
+    post_ingest_to_sidecar(app, tab_id, fallback_url, "", None, None, None);
 }
 
 fn post_ingest_to_sidecar<R: tauri::Runtime>(
@@ -937,6 +1079,7 @@ fn post_ingest_to_sidecar<R: tauri::Runtime>(
     title: &str,
     visible_text: Option<&str>,
     html: Option<&str>,
+    findings: Option<serde_json::Value>,
 ) {
     let source = if let Some(db) = app.try_state::<DbState>() {
         db.get_latest_source_for_tab(tab_id).ok().flatten()
@@ -969,6 +1112,7 @@ fn post_ingest_to_sidecar<R: tauri::Runtime>(
         "title": if title.is_empty() { &src.title } else { title },
         "visible_text": capped_visible,
         "html": capped_html,
+        "findings": findings,
     });
 
     let (port, token) = sidecar_port_and_token(app);

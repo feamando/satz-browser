@@ -16,8 +16,8 @@ use tauri::{
 use tauri::{AppHandle, Manager, RunEvent, State};
 use webview_manager::{
     autofill_tab_credentials_impl, capture_open_tabs_for_conversation, close_tab_webview,
-    control_tab_webview_impl, navigate_tab_webview_impl, sync_tab_webviews_impl, TabBoundsSpec,
-    WebviewManagerState,
+    control_tab_webview_impl, navigate_and_capture_tab_impl, navigate_tab_webview_impl,
+    sync_tab_webviews_impl, TabBoundsSpec, WebviewManagerState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +216,33 @@ async fn navigate_tab(
     url: String,
 ) -> Result<BrowserTab, String> {
     let normalized = navigate_tab_webview_impl(&app, &wv_state, &tab_id, &url)?;
+    let res = db
+        .record_tab_navigation_or_title(&tab_id, Some(&normalized), None)
+        .map_err(|e| e.to_string())?;
+    res.map(|(tab, _)| tab)
+        .ok_or_else(|| "tab not found".to_string())
+}
+
+#[tauri::command]
+async fn navigate_and_capture_tab(
+    app: AppHandle,
+    tab_id: String,
+    url: String,
+    wait_ms: Option<u64>,
+) -> Result<BrowserTab, String> {
+    let app_clone = app.clone();
+    let tid = tab_id.clone();
+    let target_url = url.clone();
+    let wait = wait_ms.unwrap_or(2200);
+    let normalized = tauri::async_runtime::spawn_blocking(move || {
+        let db = app_clone.state::<DbState>();
+        let wv = app_clone.state::<WebviewManagerState>();
+        navigate_and_capture_tab_impl(&app_clone, &db, &wv, &tid, &target_url, wait)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    let db = app.state::<DbState>();
     let res = db
         .record_tab_navigation_or_title(&tab_id, Some(&normalized), None)
         .map_err(|e| e.to_string())?;
@@ -765,6 +792,7 @@ pub fn run() {
             close_tab,
             reorder_tabs,
             navigate_tab,
+            navigate_and_capture_tab,
             control_tab,
             sync_tab_webviews,
             capture_open_tabs,

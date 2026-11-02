@@ -502,6 +502,12 @@ class SatzSidecarRuntime:
                     self.store.db.execute(
                         f"ALTER TABLE satz_bookmarks ADD COLUMN {col_name} {col_def}"
                     )
+            existing_src_cols = {
+                r["name"]
+                for r in self.store.db.execute("PRAGMA table_info('satz_sources')").fetchall()
+            }
+            if "findings_json" not in existing_src_cols:
+                self.store.db.execute("ALTER TABLE satz_sources ADD COLUMN findings_json TEXT")
             # Purge any historical source rows where unclosed <style> blocks polluted trafilatura fallback with raw CSS
             self.store.db.execute(
                 "DELETE FROM satz_sources WHERE text LIKE '%.J-J5-Ji{%' OR text LIKE '%{position:relative;display:%'"
@@ -699,6 +705,7 @@ class SatzSidecarRuntime:
         html: str | None,
         dwell_seconds: float = 0.0,
         visible_text: str | None = None,
+        findings: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         from src.planck3.web import domain_of, extract_jsonld, extract_main_text
 
@@ -706,6 +713,7 @@ class SatzSidecarRuntime:
         capture_mode = "dom"
         text = ""
         extra_lines: list[str] = []
+        extracted_findings: list[dict[str, Any]] = list(findings or [])
 
         clean_visible = ""
         if visible_text and visible_text.strip():
@@ -725,6 +733,8 @@ class SatzSidecarRuntime:
             else:
                 trafilatura_text = raw_traf
             extra_lines = extract_jsonld(html)
+            if not extracted_findings:
+                extracted_findings = self._extract_findings_from_html(html, url, effective_title if 'effective_title' in locals() else title)
 
         # Authenticated web apps (e.g. mail.google.com, dashboards, SPAs) always have their live
         # visible text captured directly from the WebView2 DOM (`clean_visible`). Always place
@@ -747,6 +757,8 @@ class SatzSidecarRuntime:
                 if page.get("html"):
                     text = extract_main_text(page["html"], url)
                     extra_lines = extract_jsonld(page["html"])
+                    if not extracted_findings:
+                        extracted_findings = self._extract_findings_from_html(page["html"], url, title)
             except Exception as fe:
                 self.record_error("web_fetch", f"{url}: {fe}")
 
@@ -764,11 +776,22 @@ class SatzSidecarRuntime:
                     if existing and existing["text"]:
                         text = existing["text"]
 
+                if not extracted_findings:
+                    existing_f = self.store.db.execute(
+                        "SELECT findings_json FROM satz_sources WHERE source_id = ?",
+                        (source_id,),
+                    ).fetchone()
+                    if existing_f and existing_f["findings_json"]:
+                        try:
+                            extracted_findings = json.loads(existing_f["findings_json"])
+                        except Exception:
+                            extracted_findings = []
+
                 self.store.db.execute(
                     """
                     INSERT OR REPLACE INTO satz_sources
-                    (source_id, conversation_id, url, domain, title, text, extra_json, capture_mode, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (source_id, conversation_id, url, domain, title, text, extra_json, findings_json, capture_mode, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         source_id,
@@ -778,6 +801,7 @@ class SatzSidecarRuntime:
                         effective_title,
                         text,
                         json.dumps(extra_lines, ensure_ascii=False),
+                        json.dumps(extracted_findings[:8], ensure_ascii=False),
                         capture_mode,
                         now,
                     ),
@@ -797,7 +821,15 @@ class SatzSidecarRuntime:
             self.store.db.commit()
 
         queued = False
-        if not self.pause_learning and text and len(text) >= 20:
+        is_bot_block = bool(
+            text
+            and (
+                "Access Denied" in text[:400]
+                or "You don't have permission to access" in text[:400]
+                or "Enable JavaScript and cookies to continue" in text[:400]
+            )
+        )
+        if not self.pause_learning and text and len(text) >= 20 and not is_bot_block:
             self.ingest_queue.put(
                 {
                     "conversation_id": conversation_id or "default",
@@ -815,9 +847,96 @@ class SatzSidecarRuntime:
             "source_id": source_id,
             "capture_mode": capture_mode,
             "text_chars": len(text),
+            "findings_count": len(extracted_findings[:8]),
             "queued": queued,
             "queue_len": self.ingest_queue.qsize(),
         }
+
+    def _extract_findings_from_html(
+        self,
+        html: str,
+        page_url: str,
+        page_title: str = "",
+    ) -> list[dict[str, Any]]:
+        """
+        Extracts relevant visual/image findings (og:image, twitter:image, product/article images)
+        from raw HTML as a fallback when live WebView2 DOM findings are not provided.
+        """
+        if not html:
+            return []
+        findings: list[dict[str, Any]] = []
+        seen_imgs: set[str] = set()
+
+        def _add_finding(raw_img: str, item_title: str, price_str: str = "", link_url: str = ""):
+            if not raw_img:
+                return
+            img_clean = raw_img.strip()
+            if img_clean.startswith("data:") or any(
+                bad in img_clean.lower()
+                for bad in ("sprite", "logo", "favicon", "icon", "avatar", "pixel", "1x1", " tracking", ".svg")
+            ):
+                return
+            resolved_img = urllib.parse.urljoin(page_url or "", img_clean)
+            if not resolved_img.startswith(("http://", "https://")) or resolved_img in seen_imgs:
+                return
+            seen_imgs.add(resolved_img)
+            resolved_link = urllib.parse.urljoin(page_url or "", link_url.strip()) if link_url else (page_url or resolved_img)
+            findings.append(
+                {
+                    "image_url": resolved_img,
+                    "title": (item_title or page_title or page_url or "View item").strip()[:120],
+                    "price": price_str.strip()[:32],
+                    "page_url": resolved_link,
+                }
+            )
+
+        # 1. Check meta og:image / twitter:image
+        for meta_m in re.finditer(
+            r'<meta\b[^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\'][^>]*content=["\']([^"\']+)["\']',
+            html,
+            re.IGNORECASE,
+        ):
+            _add_finding(meta_m.group(1), page_title or page_url)
+            if len(findings) >= 8:
+                return findings
+
+        # 2. Check <img ...> tags with alt text
+        for img_m in re.finditer(r"<img\b([^>]+)>", html, re.IGNORECASE):
+            attrs = img_m.group(1)
+            src_m = re.search(r'\b(?:src|data-src)=["\']([^"\']+)["\']', attrs, re.IGNORECASE)
+            alt_m = re.search(r'\balt=["\']([^"\']+)["\']', attrs, re.IGNORECASE)
+            if not src_m:
+                continue
+            alt_txt = (alt_m.group(1).strip() if alt_m else "")
+            if len(alt_txt) < 4 and not findings:
+                continue
+            _add_finding(src_m.group(1), alt_txt or page_title or page_url)
+            if len(findings) >= 8:
+                break
+
+        return findings[:8]
+
+    def get_source_findings(self, source_id: str, url: str) -> list[dict[str, Any]]:
+        with self.store_lock:
+            row = None
+            if source_id:
+                row = self.store.db.execute(
+                    "SELECT findings_json FROM satz_sources WHERE source_id = ?",
+                    (source_id,),
+                ).fetchone()
+            if (row is None or not row["findings_json"]) and url:
+                row = self.store.db.execute(
+                    "SELECT findings_json FROM satz_sources WHERE url = ? ORDER BY updated_at DESC LIMIT 1",
+                    (url,),
+                ).fetchone()
+            if row and row["findings_json"]:
+                try:
+                    parsed = json.loads(row["findings_json"])
+                    if isinstance(parsed, list):
+                        return parsed[:8]
+                except Exception:
+                    pass
+        return []
 
     def _ingest_worker_loop(self):
         from src.planck3.candidates import main_entity, rank_passages
@@ -1284,6 +1403,8 @@ class SatzSidecarRuntime:
         raw_sources = (res.get("depth") or {}).get("sources") or ex.get("sources") or []
         seen_urls: set[str] = set()
         sources_out = []
+        answer_findings: list[dict[str, Any]] = []
+        seen_finding_imgs: set[str] = set()
         for s in raw_sources:
             u = s.get("url")
             if not u or u in seen_urls:
@@ -1296,6 +1417,11 @@ class SatzSidecarRuntime:
                     "domain": s.get("domain") or "",
                 }
             )
+            for fd in self.get_source_findings(u, u):
+                fimg = str(fd.get("image_url") or "")
+                if fimg and fimg not in seen_finding_imgs and len(answer_findings) < 8:
+                    seen_finding_imgs.add(fimg)
+                    answer_findings.append(fd)
             if len(sources_out) >= 6:
                 break
 
@@ -1305,6 +1431,7 @@ class SatzSidecarRuntime:
             "band": band_str,
             "confidence10": conf10,
             "sources": sources_out,
+            "findings": answer_findings,
             "explain": ex,
         }
 
@@ -1436,6 +1563,15 @@ class SatzSidecarRuntime:
             if not text:
                 continue
 
+            # Skip unauthenticated bot-block error pages ("Access Denied" / Akamai Reference #)
+            # from headless web fetches so they don't pollute live WebView2 tab context
+            if not is_open_tab and (
+                "Access Denied" in text[:400]
+                or "You don't have permission to access" in text[:400]
+                or "Enable JavaScript and cookies to continue" in text[:400]
+            ):
+                continue
+
             if url:
                 seen_urls.add(url)
 
@@ -1526,6 +1662,7 @@ class SatzSidecarRuntime:
 
             cite_num = len(used_source_ids) + 1
             used_source_ids.append(sid)
+            src_findings = src.get("findings") if isinstance(src.get("findings"), list) else self.get_source_findings(sid, url)
             hydrated_sources.append(
                 {
                     "id": sid,
@@ -1538,6 +1675,7 @@ class SatzSidecarRuntime:
                     "chars_sent": len(snippet),
                     "was_cut": was_cut,
                     "is_open_tab": is_open_tab,
+                    "findings": src_findings,
                 }
             )
             tab_tag = "LIVE OPEN BROWSER TAB" if is_open_tab else "WEB SOURCE"
@@ -1579,7 +1717,12 @@ class SatzSidecarRuntime:
                 for hp in stored_hits:
                     hurl = str(hp.get("url") or "")
                     htext = neutralize_brain_directives_in_source(str(hp.get("text") or "").strip())
-                    if not htext or (hurl and hurl in seen_urls):
+                    if (
+                        not htext
+                        or (hurl and hurl in seen_urls)
+                        or "Access Denied" in htext[:300]
+                        or "You don't have permission to access" in htext[:300]
+                    ):
                         continue
                     hdom = str(hp.get("domain") or domain_of(hurl) or "local")
                     htitle = str(hp.get("title") or hurl)
@@ -1797,8 +1940,19 @@ class SatzSidecarRuntime:
             )
         )
 
+        # Check if an open live WebView2 tab already navigated to a search/catalogue page with real items
+        has_live_search_tab = False
+        for s in combined_sources:
+            if s.get("is_open_tab", True):
+                s_url = str(s.get("url") or "").lower()
+                if any(qtok in s_url for qtok in ("?q=", "&q=", "catalogue", "/s?k=", "search_query=", "_nkw=", "/search")):
+                    s_txt, _ = self.get_source_text(str(s.get("id") or ""), str(s.get("url") or ""))
+                    if len(s_txt) >= 300:
+                        has_live_search_tab = True
+                        break
+
         should_run_web = (web_enabled and not (is_personal_or_tab_query and len(combined_sources) > 0)) or (
-            is_site_discovery_query and not is_personal_or_tab_query
+            is_site_discovery_query and not is_personal_or_tab_query and not has_live_search_tab
         )
 
         yield {
@@ -1984,6 +2138,30 @@ class SatzSidecarRuntime:
         # Section 3.3 (M10): Deterministic citation verification over sentences with [n]
         cite_res = check_citations(cleaned_final, hydrated_sources)
 
+        # Collect visual/image findings across all hydrated sources (live open tabs first, then web)
+        collected_findings: list[dict[str, Any]] = []
+        seen_finding_imgs: set[str] = set()
+        for hs in hydrated_sources:
+            for fd in hs.get("findings") or []:
+                if not isinstance(fd, dict):
+                    continue
+                img_u = str(fd.get("image_url") or "").strip()
+                if not img_u or img_u in seen_finding_imgs:
+                    continue
+                seen_finding_imgs.add(img_u)
+                collected_findings.append(
+                    {
+                        "image_url": img_u,
+                        "title": str(fd.get("title") or hs.get("title") or "").strip()[:120],
+                        "price": str(fd.get("price") or "").strip()[:32],
+                        "page_url": str(fd.get("page_url") or hs.get("url") or img_u).strip(),
+                    }
+                )
+                if len(collected_findings) >= 8:
+                    break
+            if len(collected_findings) >= 8:
+                break
+
         ms = int((time.perf_counter() - t0) * 1000)
         done_payload: dict[str, Any] = {
             "done": True,
@@ -1995,6 +2173,8 @@ class SatzSidecarRuntime:
             "annotated_text": cite_res["annotated_text"],
             "source_stats": source_stats_list,
         }
+        if collected_findings:
+            done_payload["findings"] = collected_findings
         if cited_web_sources:
             done_payload["cited_sources"] = cited_web_sources
         if stored_entities:
@@ -2346,6 +2526,7 @@ def make_sidecar_server(
                     html=data.get("html"),
                     dwell_seconds=float(data.get("dwell_seconds") or 0.0),
                     visible_text=data.get("visible_text"),
+                    findings=data.get("findings") if isinstance(data.get("findings"), list) else None,
                 )
                 return self._json(res)
 

@@ -11,6 +11,7 @@ import type {
   ConversationOrigin,
   ConversationStatus,
   DigestEntry,
+  FindingItem,
   KnowledgeSummary,
   LocalModelId,
   MailAccountItem,
@@ -333,6 +334,26 @@ export async function apiNavigateTab(
   url: string
 ): Promise<BrowserTab> {
   return await invoke<BrowserTab>("navigate_tab", { tabId, url });
+}
+
+export async function apiNavigateAndCaptureTab(
+  tabId: string,
+  url: string,
+  waitMs = 2400
+): Promise<BrowserTab | null> {
+  try {
+    return await invoke<BrowserTab>("navigate_and_capture_tab", {
+      tabId,
+      url,
+      waitMs,
+    });
+  } catch {
+    try {
+      return await invoke<BrowserTab>("navigate_tab", { tabId, url });
+    } catch {
+      return null;
+    }
+  }
 }
 
 export async function apiControlTab(
@@ -891,6 +912,7 @@ export async function sidecarRunAnswer(
   answer: string;
   band: string;
   sources: Array<{ id?: string; url: string; title: string; domain?: string }>;
+  findings?: FindingItem[];
 }> {
   const res = await sidecarFetch("/answer", {
     method: "POST",
@@ -962,6 +984,7 @@ export async function sidecarStreamChat(
   citations_flagged?: number;
   annotated_text?: string;
   source_stats?: SourceStatEntry[];
+  findings?: FindingItem[];
   error?: string;
 }> {
   const res = await sidecarFetch("/chat", {
@@ -991,6 +1014,7 @@ export async function sidecarStreamChat(
   let citationsFlagged: number | undefined;
   let annotatedText: string | undefined;
   let sourceStats: SourceStatEntry[] | undefined;
+  let findings: FindingItem[] | undefined;
   let streamError: string | undefined;
 
   while (true) {
@@ -1019,6 +1043,7 @@ export async function sidecarStreamChat(
           citations_flagged?: number;
           annotated_text?: string;
           source_stats?: SourceStatEntry[];
+          findings?: FindingItem[];
         };
         if (payload.source_stats && Array.isArray(payload.source_stats)) {
           sourceStats = payload.source_stats;
@@ -1045,6 +1070,9 @@ export async function sidecarStreamChat(
           if (payload.source_stats) {
             sourceStats = payload.source_stats;
           }
+          if (payload.findings && Array.isArray(payload.findings)) {
+            findings = payload.findings;
+          }
         }
       } catch {
         // Ignore malformed SSE line
@@ -1060,6 +1088,7 @@ export async function sidecarStreamChat(
     citations_flagged: citationsFlagged,
     annotated_text: annotatedText,
     source_stats: sourceStats,
+    findings,
     error: streamError,
   };
 }

@@ -12,6 +12,7 @@ import {
   apiGetConversation,
   apiListBookmarks,
   apiListConversations,
+  apiNavigateAndCaptureTab,
   apiNavigateTab,
   apiOpenTab,
   apiPinConversation,
@@ -75,6 +76,7 @@ import {
   getActiveTabSources,
   MOD_LABEL,
   normalizeUrl,
+  resolveLiveNavigationTarget,
   state,
 } from "./state";
 import { renderStatusLine } from "./status";
@@ -1387,7 +1389,53 @@ async function handleSendChatMessage(text: string): Promise<void> {
   renderViewportRegion();
 
   try {
-    // Capture live rendered DOM + visible_text from all open WebView2 tabs right before querying models
+    // 1. Check if the user prompt requests finding/searching/browsing a site or web query.
+    // If so, actively navigate the live WebView2 tab (or open a tab if on [1 chat]) and capture its rendered DOM + images.
+    const navTarget = resolveLiveNavigationTarget(
+      text,
+      state.activeDetail?.tabs ?? [],
+      state.activeTabId,
+      state.webSearchEnabled
+    );
+    if (navTarget) {
+      updateStreamingStatus(
+        `navigating live browser tab to ${navTarget.targetUrl}...`,
+        "navigating"
+      );
+      if (navTarget.existingTabId) {
+        const addrInput = document.getElementById(
+          `address-input-${navTarget.existingTabId}`
+        ) as HTMLInputElement | null;
+        if (addrInput) {
+          addrInput.value = navTarget.targetUrl;
+        }
+        await apiNavigateAndCaptureTab(
+          navTarget.existingTabId,
+          navTarget.targetUrl,
+          2500
+        );
+      } else {
+        const prevActiveTabId = state.activeTabId;
+        const openedTab = await apiOpenTab(
+          convId,
+          navTarget.targetUrl,
+          navTarget.label
+        );
+        state.activeDetail = await apiGetConversation(convId);
+        state.activeTabId = prevActiveTabId;
+        renderTabStripRegion();
+        await apiNavigateAndCaptureTab(
+          openedTab.id,
+          navTarget.targetUrl,
+          2600
+        );
+      }
+      state.activeDetail = await apiGetConversation(convId);
+      renderTabStripRegion();
+    }
+
+    // 2. Capture live rendered DOM + visible_text from all open WebView2 tabs right before querying models
+    updateStreamingStatus("capturing live open tab DOM...", "capturing");
     await apiCaptureOpenTabs(convId);
     state.activeDetail = await apiGetConversation(convId);
     const activeTabSources = getActiveTabSources(state.activeDetail);
@@ -1406,6 +1454,9 @@ async function handleSendChatMessage(text: string): Promise<void> {
         state.selectedModel,
         JSON.stringify(result.sources.map((s) => s.url))
       );
+      if (result.findings && result.findings.length > 0) {
+        state.messageFindings[savedMsg.id] = result.findings;
+      }
       state.activeDetail = await apiGetConversation(convId);
       if (state.activeDetail) {
         const msgObj = state.activeDetail.messages.find(
@@ -1413,6 +1464,9 @@ async function handleSendChatMessage(text: string): Promise<void> {
         );
         if (msgObj) {
           msgObj.cited_sources = result.sources;
+          if (state.messageFindings[savedMsg.id]) {
+            msgObj.findings = state.messageFindings[savedMsg.id];
+          }
         }
       }
       renderViewportRegion();
@@ -1524,13 +1578,24 @@ async function handleSendChatMessage(text: string): Promise<void> {
     if (streamRes.proposals && streamRes.proposals.length > 0) {
       state.messageProposals[savedMsg.id] = streamRes.proposals;
     }
+    if (streamRes.findings && streamRes.findings.length > 0) {
+      state.messageFindings[savedMsg.id] = streamRes.findings;
+    }
     state.activeDetail = await apiGetConversation(convId);
-    if (state.activeDetail && state.messageProposals[savedMsg.id]) {
+    if (state.activeDetail) {
       const msgObj = state.activeDetail.messages.find(
         (m) => m.id === savedMsg.id
       );
       if (msgObj) {
-        msgObj.proposals = state.messageProposals[savedMsg.id];
+        if (state.messageProposals[savedMsg.id]) {
+          msgObj.proposals = state.messageProposals[savedMsg.id];
+        }
+        if (state.messageFindings[savedMsg.id]) {
+          msgObj.findings = state.messageFindings[savedMsg.id];
+        }
+        if (streamRes.cited_sources && streamRes.cited_sources.length > 0) {
+          msgObj.cited_sources = streamRes.cited_sources;
+        }
       }
     }
 

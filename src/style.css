@@ -605,6 +605,64 @@ button.inverse,
   color: var(--bg);
 }
 
+.msg-findings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+.msg-findings-header {
+  font-size: 11px;
+}
+
+.msg-findings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+  gap: 8px;
+}
+
+.msg-finding-card {
+  border: 1px solid var(--border);
+  background-color: var(--bg);
+  display: flex;
+  flex-direction: column;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.msg-finding-card:hover {
+  border-color: var(--fg);
+  background-color: var(--hover);
+}
+
+.msg-finding-img {
+  width: 100%;
+  height: 120px;
+  object-fit: cover;
+  background-color: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: block;
+}
+
+.msg-finding-meta {
+  padding: 5px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+}
+
+.msg-finding-title {
+  color: var(--fg);
+}
+
+.msg-finding-price {
+  color: var(--muted);
+  font-weight: 700;
+}
+
 .chat-composer {
   border-top: 1px solid var(--border);
   background-color: var(--surface);

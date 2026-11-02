@@ -54,6 +54,13 @@ export interface SourceStatEntry {
   was_cut: boolean;
 }
 
+export interface FindingItem {
+  image_url: string;
+  title: string;
+  price?: string;
+  page_url: string;
+}
+
 export interface SidecarErrorEntry {
   ts: number;
   scope: string;
@@ -74,6 +81,7 @@ export interface ChatMessage {
   citation_check?: CitationCheckEntry[];
   cited_sources?: Array<{ url: string; title: string; domain?: string }>;
   proposals?: BrainProposalItem[];
+  findings?: FindingItem[];
 }
 
 export interface BrainProposalItem {

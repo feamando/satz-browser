@@ -1874,6 +1874,80 @@ class TestSatzSidecar(unittest.TestCase):
         self.assertGreaterEqual(report["extraction_accuracy_pct"], 90.0)
         self.assertTrue(report["gates_passed"])
 
+    def test_live_tab_findings_ingestion_and_chat_append(self):
+        """
+        Verifies that live WebView2 tab findings (product/article images, titles, prices, links)
+        are ingested via /ingest, persisted in satz_sources, and returned in hydrated_sources
+         while filtering out unauthenticated 'Access Denied' web error pages.
+        """
+        ingest_res = self.runtime.ingest_page(
+            conversation_id="conv-zalando",
+            source_id="tab-zalando-1",
+            url="https://en.zalando.de/catalogue/?q=hats",
+            title="Hats & Caps online | Zalando",
+            html="<html><body><h1>Hats & Caps</h1></body></html>",
+            visible_text=(
+                "Hats & Caps online | Zalando\n"
+                "[EXTRACTED PAGE ITEMS & IMAGES]:\n"
+                "- Carhartt WIP Watch Hat Beanie | €24.95 | link: https://en.zalando.de/carhartt-beanie.html | image: https://img01.ztat.net/article/carhartt-hat.jpg\n"
+                "- Polo Ralph Lauren Classic Cap | €49.95 | link: https://en.zalando.de/polo-cap.html | image: https://img01.ztat.net/article/polo-cap.jpg"
+            ),
+            findings=[
+                {
+                    "image_url": "https://img01.ztat.net/article/carhartt-hat.jpg",
+                    "title": "Carhartt WIP Watch Hat Beanie",
+                    "price": "€24.95",
+                    "page_url": "https://en.zalando.de/carhartt-beanie.html",
+                },
+                {
+                    "image_url": "https://img01.ztat.net/article/polo-cap.jpg",
+                    "title": "Polo Ralph Lauren Classic Cap",
+                    "price": "€49.95",
+                    "page_url": "https://en.zalando.de/polo-cap.html",
+                },
+            ],
+        )
+        self.assertTrue(ingest_res["ok"])
+        self.assertEqual(ingest_res["findings_count"], 2)
+
+        # Also ingest a blocked unauthenticated web source ("Access Denied")
+        self.runtime.ingest_page(
+            conversation_id="conv-zalando",
+            source_id="web-blocked-1",
+            url="https://en.zalando.de/mens-hats/",
+            title="Access Denied",
+            html=None,
+            visible_text="Access Denied You don't have permission to access http://en.zalando.de/mens-hats/ on this server. Reference #18.852a",
+        )
+
+        ctx_str, used_ids, hydrated = self.runtime.assemble_chat_context(
+            "find me some hats on zalando",
+            [
+                {
+                    "id": "tab-zalando-1",
+                    "url": "https://en.zalando.de/catalogue/?q=hats",
+                    "title": "Hats & Caps online | Zalando",
+                    "domain": "en.zalando.de",
+                    "is_open_tab": True,
+                },
+                {
+                    "id": "web-blocked-1",
+                    "url": "https://en.zalando.de/mens-hats/",
+                    "title": "Access Denied",
+                    "domain": "en.zalando.de",
+                    "is_open_tab": False,
+                },
+            ],
+        )
+        self.assertEqual(used_ids, ["tab-zalando-1"])
+        self.assertNotIn("Access Denied", ctx_str)
+        self.assertIn("Carhartt WIP Watch Hat Beanie", ctx_str)
+        self.assertEqual(len(hydrated), 1)
+        self.assertEqual(len(hydrated[0]["findings"]), 2)
+        self.assertEqual(
+            hydrated[0]["findings"][0]["image_url"],
+            "https://img01.ztat.net/article/carhartt-hat.jpg",
+        )
 
 
 if __name__ == "__main__":

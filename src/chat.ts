@@ -1,5 +1,10 @@
 import { escapeHtml, getActiveTabSources, state } from "./state";
-import type { BrainProposalItem, CitationCheckEntry, LocalModelId } from "./types";
+import type {
+  BrainProposalItem,
+  CitationCheckEntry,
+  FindingItem,
+  LocalModelId,
+} from "./types";
 
 const LOCAL_MODELS: LocalModelId[] = [
   "gemma-4-e4b",
@@ -153,7 +158,8 @@ export function renderChatPanel(
                     m.proposals ?? state.messageProposals[m.id],
                     m.citation_check,
                     m.citations_ok,
-                    m.citations_flagged
+                    m.citations_flagged,
+                    m.findings ?? state.messageFindings[m.id]
                   )
                 )
                 .join("")
@@ -308,7 +314,8 @@ function renderMessageBlock(
   proposals?: BrainProposalItem[],
   citationCheck?: CitationCheckEntry[],
   citationsOk?: number | null,
-  citationsFlagged?: number | null
+  citationsFlagged?: number | null,
+  findings?: FindingItem[]
 ): string {
   let sourceIds: string[] = [];
   if (sourceIdsJson) {
@@ -397,6 +404,40 @@ function renderMessageBlock(
     `
       : "";
 
+  const findingsHtml =
+    findings && findings.length > 0
+      ? `
+      <div class="msg-findings-section">
+        <div class="muted msg-findings-header">captured visual findings (${findings.length}):</div>
+        <div class="msg-findings-grid">
+          ${findings
+            .map(
+              (f) => `
+            <div
+              class="msg-finding-card"
+              data-open-tab-url="${escapeHtml(f.page_url || f.image_url)}"
+              data-open-tab-title="${escapeHtml(f.title)}"
+              title="${escapeHtml(f.title)}${f.price ? ` · ${escapeHtml(f.price)}` : ""}"
+            >
+              <img
+                class="msg-finding-img"
+                src="${escapeHtml(f.image_url)}"
+                alt="${escapeHtml(f.title)}"
+                loading="lazy"
+              />
+              <div class="msg-finding-meta">
+                <div class="msg-finding-title truncate">${escapeHtml(f.title)}</div>
+                ${f.price ? `<div class="msg-finding-price">${escapeHtml(f.price)}</div>` : ""}
+              </div>
+            </div>
+          `
+            )
+            .join("")}
+        </div>
+      </div>
+    `
+      : "";
+
   return `
     <div class="msg-block ${isErrorMsg ? "msg-error-block" : ""}">
       <div class="msg-header">
@@ -404,6 +445,7 @@ function renderMessageBlock(
         <span>${modelLabel}${srcCountLabel}${escapeHtml(citeStatsLabel)}</span>
       </div>
       <div class="msg-body">${formattedBody}</div>
+      ${findingsHtml}
       ${proposalsHtml}
       ${retryButtonHtml}
       ${openAsTabButtons}

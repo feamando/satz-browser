@@ -5,6 +5,7 @@ import type {
   Conversation,
   ConversationDetail,
   DigestEntry,
+  FindingItem,
   KnowledgeSummary,
   LocalModelId,
   MailAccountItem,
@@ -51,6 +52,7 @@ export interface AppState {
   tabHasPasswordField: Record<string, boolean>;
   tabCanFillLogin: Record<string, boolean>;
   messageProposals: Record<string, BrainProposalItem[]>;
+  messageFindings: Record<string, FindingItem[]>;
   revealedPasswords: Record<string, string>;
   sourceStats: Record<string, SourceStatEntry>;
   showErrorLog: boolean;
@@ -150,6 +152,7 @@ export const state: AppState = {
   tabHasPasswordField: {},
   tabCanFillLogin: {},
   messageProposals: {},
+  messageFindings: {},
   revealedPasswords: {},
   sourceStats: {},
   showErrorLog: false,
@@ -313,4 +316,241 @@ export function getActiveTabSources(
       url: tab.url,
     };
   });
+}
+
+export interface LiveNavigationTarget {
+  targetUrl: string;
+  existingTabId: string | null;
+  label: string;
+}
+
+function getOriginFromUrl(rawUrl: string): string {
+  try {
+    const u = new URL(normalizeUrl(rawUrl));
+    return u.origin;
+  } catch {
+    return "";
+  }
+}
+
+function buildSiteSearchUrl(
+  siteKey: string,
+  query: string,
+  matchedOrigin: string
+): string {
+  const q = encodeURIComponent(query.trim());
+  const key = siteKey.toLowerCase().replace(/^www\./, "");
+  if (key.includes("zalando")) {
+    const base = matchedOrigin.includes("zalando")
+      ? matchedOrigin
+      : "https://en.zalando.de";
+    return `${base}/catalogue/?q=${q}`;
+  }
+  if (key.includes("amazon")) {
+    const base = matchedOrigin.includes("amazon")
+      ? matchedOrigin
+      : "https://www.amazon.com";
+    return `${base}/s?k=${q}`;
+  }
+  if (key.includes("ebay")) {
+    const base = matchedOrigin.includes("ebay")
+      ? matchedOrigin
+      : "https://www.ebay.com";
+    return `${base}/sch/i.html?_nkw=${q}`;
+  }
+  if (key.includes("github")) {
+    return `https://github.com/search?q=${q}`;
+  }
+  if (key.includes("youtube")) {
+    return `https://www.youtube.com/results?search_query=${q}`;
+  }
+  if (key.includes("wikipedia")) {
+    return `https://en.wikipedia.org/w/index.php?search=${q}`;
+  }
+  if (key.includes("reddit")) {
+    return `https://www.reddit.com/search/?q=${q}`;
+  }
+  if (key.includes("asos")) {
+    const base = matchedOrigin.includes("asos")
+      ? matchedOrigin
+      : "https://www.asos.com";
+    return `${base}/search/?q=${q}`;
+  }
+  if (key.includes("otto")) {
+    return `https://www.otto.de/suche/${q}/`;
+  }
+  if (key.includes("ikea")) {
+    const base = matchedOrigin.includes("ikea")
+      ? matchedOrigin
+      : "https://www.ikea.com/de/de";
+    return `${base}/search/?q=${q}`;
+  }
+  if (key.includes("mediamarkt")) {
+    return `https://www.mediamarkt.de/de/search.html?query=${q}`;
+  }
+  if (key.includes("booking")) {
+    return `https://www.booking.com/searchresults.html?ss=${q}`;
+  }
+  if (key.includes("hackernews") || key.includes("ycombinator")) {
+    return `https://hn.algolia.com/?q=${q}`;
+  }
+  if (key.includes("google")) {
+    return `https://www.google.com/search?q=${q}`;
+  }
+  if (key.includes("bing")) {
+    return `https://www.bing.com/search?q=${q}`;
+  }
+  if (key.includes("duckduckgo")) {
+    return `https://duckduckgo.com/?q=${q}`;
+  }
+  if (matchedOrigin) {
+    return `${matchedOrigin}/search?q=${q}`;
+  }
+  if (key.includes(".")) {
+    return `https://${key}/search?q=${q}`;
+  }
+  return `https://duckduckgo.com/?q=${encodeURIComponent(`${siteKey} ${query}`.trim())}`;
+}
+
+export function resolveLiveNavigationTarget(
+  prompt: string,
+  openTabs: BrowserTab[],
+  activeTabId: string,
+  webSearchEnabled = false
+): LiveNavigationTarget | null {
+  const trimmed = prompt.trim();
+  if (!trimmed) return null;
+
+  // Never navigate away when asking about mail, inbox, brain, or summarizing the current page as-is
+  if (
+    /\b(my\s+(?:latest\s+)?(?:email|emails|inbox|mail|account|calendar|messages|address|order|package)|(?:summarize|summary\s+of|explain|translate)\s+(?:this|the)\s+(?:page|tab|article|email|site)|what\s+do\s+i\s+need\s+to\s+deal\s+with|draft\s+a\s+reply|store\s+(?:this|the)|save\s+(?:this|the)|in\s+my\s+brain)\b/i.test(
+      trimmed
+    )
+  ) {
+    return null;
+  }
+
+  const siteTabs = openTabs.filter(
+    (t) =>
+      t.is_open &&
+      t.kind !== "mail" &&
+      t.kind !== "compose" &&
+      !t.url.startsWith("satzmail://") &&
+      !t.url.startsWith("about:")
+  );
+  const activeSiteTab =
+    siteTabs.find((t) => t.id === activeTabId) ?? siteTabs[0] ?? null;
+
+  // 1. Pattern: "find/search/look for/show me <query> on/at/in/from <site>"
+  const onSiteMatch = trimmed.match(
+    /^(?:can\s+you\s+|please\s+)?(?:find(?:\s+me)?(?:\s+some)?|search(?:\s+for)?|look\s+(?:up|for)|show(?:\s+me)?(?:\s+some)?|get(?:\s+me)?(?:\s+some)?|browse(?:\s+for)?)\s+(.+?)\s+(?:on|at|in|from)\s+([a-zA-Z0-9.-]+)\s*[?.!]*$/i
+  );
+  if (onSiteMatch) {
+    const rawQuery = onSiteMatch[1]
+      .replace(/^(?:some|any|a\s+few|good|best|new)\s+/i, "")
+      .trim();
+    const rawSite = onSiteMatch[2].trim().toLowerCase();
+    const matchingTab =
+      siteTabs.find((t) => extractDomain(t.url).toLowerCase().includes(rawSite)) ??
+      activeSiteTab;
+    const matchedOrigin = matchingTab ? getOriginFromUrl(matchingTab.url) : "";
+    const targetUrl = buildSiteSearchUrl(rawSite, rawQuery || trimmed, matchedOrigin);
+    return {
+      targetUrl,
+      existingTabId: matchingTab ? matchingTab.id : null,
+      label: `${rawSite}: ${rawQuery}`,
+    };
+  }
+
+  // 2. Pattern: "search <site> for <query>" or "go to <site> and find <query>"
+  const siteFirstMatch = trimmed.match(
+    /^(?:can\s+you\s+|please\s+)?(?:search|check|go\s+to|open|visit)\s+([a-zA-Z0-9.-]+)\s+(?:for|and\s+(?:find|search\s+for|look\s+for|show\s+me))\s+(.+?)\s*[?.!]*$/i
+  );
+  if (siteFirstMatch) {
+    const rawSite = siteFirstMatch[1].trim().toLowerCase();
+    const rawQuery = siteFirstMatch[2]
+      .replace(/^(?:some|any|a\s+few)\s+/i, "")
+      .trim();
+    const matchingTab =
+      siteTabs.find((t) => extractDomain(t.url).toLowerCase().includes(rawSite)) ??
+      activeSiteTab;
+    const matchedOrigin = matchingTab ? getOriginFromUrl(matchingTab.url) : "";
+    const targetUrl = buildSiteSearchUrl(rawSite, rawQuery || trimmed, matchedOrigin);
+    return {
+      targetUrl,
+      existingTabId: matchingTab ? matchingTab.id : null,
+      label: `${rawSite}: ${rawQuery}`,
+    };
+  }
+
+  // 3. Pattern: User has an open site tab (or mentions a known site) and asks "find me some hats", "search for winter jackets", "show me ..."
+  const discoveryMatch = trimmed.match(
+    /^(?:can\s+you\s+|please\s+)?(?:find(?:\s+me)?(?:\s+some)?|search(?:\s+for)?|look\s+(?:up|for)|show(?:\s+me)?(?:\s+some)?|browse(?:\s+for)?)\s+(.+?)\s*[?.!]*$/i
+  );
+  if (discoveryMatch) {
+    let rawQuery = discoveryMatch[1]
+      .replace(/^(?:some|any|a\s+few)\s+/i, "")
+      .trim();
+
+    // Check if a known brand/site is mentioned anywhere inside rawQuery
+    const knownSites = [
+      "zalando",
+      "amazon",
+      "ebay",
+      "github",
+      "youtube",
+      "wikipedia",
+      "reddit",
+      "asos",
+      "otto",
+      "ikea",
+      "mediamarkt",
+      "booking",
+    ];
+    const mentionedSite = knownSites.find((ks) =>
+      new RegExp(`\\b${ks}\\b`, "i").test(rawQuery)
+    );
+    if (mentionedSite) {
+      rawQuery = rawQuery
+        .replace(new RegExp(`\\b(?:on|at|in|from)?\\s*${mentionedSite}\\b`, "gi"), "")
+        .trim();
+      const matchingTab =
+        siteTabs.find((t) =>
+          extractDomain(t.url).toLowerCase().includes(mentionedSite)
+        ) ?? activeSiteTab;
+      const matchedOrigin = matchingTab ? getOriginFromUrl(matchingTab.url) : "";
+      const targetUrl = buildSiteSearchUrl(
+        mentionedSite,
+        rawQuery || discoveryMatch[1],
+        matchedOrigin
+      );
+      return {
+        targetUrl,
+        existingTabId: matchingTab ? matchingTab.id : null,
+        label: `${mentionedSite}: ${rawQuery || discoveryMatch[1]}`,
+      };
+    }
+
+    if (activeSiteTab) {
+      const dom = extractDomain(activeSiteTab.url);
+      const origin = getOriginFromUrl(activeSiteTab.url);
+      const targetUrl = buildSiteSearchUrl(dom, rawQuery, origin);
+      return {
+        targetUrl,
+        existingTabId: activeSiteTab.id,
+        label: `${dom}: ${rawQuery}`,
+      };
+    }
+
+    if (webSearchEnabled || siteTabs.length === 0) {
+      const targetUrl = `https://duckduckgo.com/?q=${encodeURIComponent(rawQuery)}`;
+      return {
+        targetUrl,
+        existingTabId: null,
+        label: `search: ${rawQuery}`,
+      };
+    }
+  }
+
+  return null;
 }
