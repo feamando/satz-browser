@@ -217,6 +217,29 @@ Owner: Nikita Gorshkov · Date: 2026-10-27 · Target: Windows 11 (4090 box) firs
 | **Overall 4-class accuracy** | **`100.00%`** (`200 / 200`) | — | **PASS** |
 | **Sends without `[confirm]` click** | **`0`** | `0` | **PASS** |
 
+---
+
+## 9. Milestone 15 (M15): README, Final Gate Summary & Verification
+
+- **README (`README.md`):**
+  - Updated with complete Satz v0.4 documentation:
+    - Mail account setup & preset table (Gmail, Outlook/Hotmail, iCloud, GMX, WEB.DE, Custom IMAP, Custom POP3) and app-password instructions.
+    - Complete keyboard shortcuts tables (Global Browser Shortcuts including `Mod+Shift+L` and Mail Lane & Message Shortcuts `j`/`k`, `Enter`, `r`, `c`, `e`, `1`–`4`, `/`, `Mod+Enter`).
+    - Security model summary table (`X-Satz-Token`, `Host`/`Origin` allowlist, `AES-256-GCM` + `Argon2id` + OS keychain `device_key` `vault.enc`, exact-host user-action autofill, `satzmail://` CSP, Brain proposals, and SMTP send confirmation gate).
+- **Final v0.4 Gate Checklist (`PLAN_v0.4.md` Sections 5 & 8):**
+
+| Milestone / Gate | Requirement | Measured / Verified Result | Status |
+| :--- | :--- | :--- | :---: |
+| **M8 Security** | `401` without `X-Satz-Token`; strict CORS & `Host` check; `vault.enc` (`Argon2id` + OS keychain `device_key`); 6-PIN lockout (`30s`); v0.3 `.env` migration; exact-host user-action autofill; `<brain_store>` source neutralization & proposals | Verified in `test_m8_security_token_cors_vault_lockout_migration_autofill_and_proposals` | **PASS** |
+| **M9 Speed** | `send -> context_ready` `< 1,000 ms` with 8 tabs; `gemma [warm]` first token `< 3,000 ms`; Brain section `<= 3,000` chars with 100 entities; 40k-char last-third citation; rolling summary & 32-session cap | `182.6 ms` (8 tabs); `1,731.5 ms` first token; `1,792–1,804` chars Brain; verified in `test_m9_*` & `cargo test` | **PASS** |
+| **M10 Quality** | Out-of-range `[7]` -> `[unsourced]`; missing number -> `[n?]`; unchanged bookmarks skipped over 2h; `trust` & `score` fields; 50-entry error ring buffer | `0` redundant re-ingestions over 2h; verified in `test_m10_*` | **PASS** |
+| **M11 Mail Sync** | `mail.sqlite` (12 tables); presets + `[test]`; IMAP `SELECT readonly` + `BODY.PEEK`; POP3 `UIDL` (never `DELE`); pinned `Mail` conversation + `tabs.kind` migration | Verified in `test_m11_*` & `cargo test` | **PASS** |
+| **M12 Pipeline** | 20 split fixtures (10 EN + 10 DE); Amazon/DHL/Zalando + 3 promo extraction fixtures; 300 cold-start labels -> train at 50, retrain at 20 corrections; `0.90` promo threshold (`0.85 -> email`); Brain `person` only after `>= 2` emails or reply | Verified in `test_m12_*` | **PASS** |
+| **M13 Mail UI & Send Gate** | `satzmail://` strict CSP (`default-src 'none'`, no remote tracking pixels); 4 lanes; compose tab; `confirm_token` send gate (`0` sends without `[confirm]`) + `10s` `[undo]` + `\Answered` + `APPEND` to Sent | Verified in `test_m13_*` | **PASS** |
+| **M14 Mail Intelligence & Eval** | Mail chat triage cites `>= 3` emails with `[n]`; normal conv with `mail` on cites Zalando order email; `codes (N)` pill on matching site; 200-email stratified eval report (`0.00%` email->promo, `100.00%` promo recall, `100.00%` extraction accuracy) | Verified in `test_m14_*` | **PASS** |
+| **All Build & Test Suites** | `npm run build`, `cargo check --offline`, `cargo test --offline` (9/9), `pytest sidecar -q` (12/12) | All passing with `0` errors | **PASS** |
+
+
 
 
 
