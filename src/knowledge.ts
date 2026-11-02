@@ -1,3 +1,7 @@
+import {
+  bindMailAccountsEvents,
+  renderMailAccountsSectionHtml,
+} from "./mail";
 import { escapeHtml, formatRelativeTime, state } from "./state";
 
 export interface KnowledgeActions {
@@ -21,6 +25,7 @@ export interface KnowledgeActions {
   onDeletePassword?: (service: string) => void;
   onRevealPassword?: (service: string, field: string, pin: string) => void;
   onAutofillActiveTab?: () => void;
+  onMailChanged?: () => Promise<void>;
   onCloseKnowledgeView: () => void;
 }
 
@@ -223,6 +228,8 @@ export function renderKnowledgeView(
         `
         }
       </div>
+
+      ${renderMailAccountsSectionHtml()}
 
       <div class="knowledge-section">
         <div class="panel-header">
@@ -470,5 +477,11 @@ export function renderKnowledgeView(
         actions.onDeleteBrainEntity(slug);
       }
     });
+  });
+
+  bindMailAccountsEvents(container, async () => {
+    if (actions.onMailChanged) {
+      await actions.onMailChanged();
+    }
   });
 }

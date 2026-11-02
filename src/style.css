@@ -934,3 +934,139 @@ button.inverse,
 .status-item {
   color: var(--fg);
 }
+
+/* Mail Lanes & Accounts (M11-M14) */
+.kb-section {
+  border: 1px solid var(--border);
+  background-color: var(--surface);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kb-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+
+.kb-status-banner {
+  border: 1px solid var(--fg);
+  background-color: var(--bg);
+  color: var(--fg);
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.kb-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.kb-table th,
+.kb-table td {
+  border: 1px solid var(--border);
+  padding: 5px 8px;
+  text-align: left;
+}
+
+.kb-table th {
+  color: var(--muted);
+  background-color: var(--bg);
+}
+
+.kb-card {
+  border: 1px solid var(--border);
+  background-color: var(--bg);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kb-card-header {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.kb-form-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.kb-input {
+  flex: 1;
+  min-width: 120px;
+  border: 1px solid var(--border);
+  background-color: var(--bg);
+  color: var(--fg);
+  padding: 3px 6px;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.mail-lane-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  background-color: var(--surface);
+}
+
+.mail-lane-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.mail-lane-row:last-child {
+  border-bottom: none;
+}
+
+.mail-lane-row:hover,
+.mail-lane-row.selected {
+  background-color: var(--hover);
+}
+
+.mail-lane-row.mail-unseen .mail-col-from,
+.mail-lane-row.mail-unseen .mail-col-subject {
+  color: var(--fg);
+}
+
+.mail-col-from {
+  width: 190px;
+  min-width: 190px;
+  color: var(--muted);
+}
+
+.mail-col-subject {
+  flex: 1;
+  min-width: 0;
+}
+
+.mail-col-time {
+  width: 72px;
+  min-width: 72px;
+  text-align: right;
+  font-size: 11px;
+}
+
+.source-cut-badge,
+.citation-flagged {
+  border: 1px solid var(--fg);
+  padding: 0 4px;
+  font-size: 10px;
+}
+

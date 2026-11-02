@@ -1,5 +1,6 @@
-export type ConversationOrigin = "chat" | "direct";
+export type ConversationOrigin = "chat" | "direct" | "mail";
 export type ConversationStatus = "active" | "archived";
+export type TabKind = "site" | "mail" | "compose";
 
 export interface Conversation {
   id: string;
@@ -22,6 +23,7 @@ export interface BrowserTab {
   is_open: boolean;
   suspended?: boolean;
   created_at: string;
+  kind?: TabKind;
 }
 
 export interface SourceItem {
@@ -147,6 +149,88 @@ export interface SidecarHealth {
   ingest_queue_len: number;
   pause_learning: boolean;
   errors?: SidecarErrorEntry[];
+  mail?: MailStatusSummary | null;
+}
+
+export interface MailPreset {
+  id: string;
+  label: string;
+  protocol: "imap" | "pop3";
+  in_host: string;
+  in_port: number;
+  in_security: "ssl" | "starttls";
+  smtp_host: string;
+  smtp_port: number;
+  smtp_security: "ssl" | "starttls";
+}
+
+export interface MailAccountItem {
+  id: string;
+  label: string;
+  email: string;
+  protocol: "imap" | "pop3";
+  in_host: string;
+  in_port: number;
+  in_security: string;
+  smtp_host: string;
+  smtp_port: number;
+  smtp_security: string;
+  vault_prefix: string;
+  sync_days: number;
+  last_sync_at: number;
+  last_error: string;
+  auth_failed?: boolean;
+  message_count?: number;
+}
+
+export interface MailLaneCounts {
+  inbox_unread: number;
+  pings: number;
+  orders: number;
+  promos: number;
+}
+
+export interface MailStatusSummary {
+  unlocked: boolean;
+  accounts_count: number;
+  inbox_unread: number;
+  counts?: MailLaneCounts;
+  processing_done: number;
+  processing_total: number;
+  is_processing?: boolean;
+  model_version: string;
+  labelled_count?: number;
+  last_retrain_at?: number;
+}
+
+export interface MailMessageRow {
+  id: string;
+  account_id: string;
+  thread_id: string;
+  from_name: string;
+  from_addr: string;
+  subject: string;
+  snippet: string;
+  date: number;
+  seen: number;
+  answered?: number;
+  flagged?: number;
+  has_attachments?: number;
+  label?: string;
+  confidence?: number;
+  needs_reply?: number;
+  due_date?: string | null;
+  ask?: string;
+  platform?: string;
+}
+
+export interface MailLaneResponse {
+  unlocked: boolean;
+  lane: "inbox" | "pings" | "orders" | "promos";
+  rows: Array<Record<string, unknown>>;
+  groups?: Array<Record<string, unknown>>;
+  next_cursor?: number | null;
+  counts: MailLaneCounts;
 }
 
 export interface DigestEntry {

@@ -13,10 +13,15 @@ import type {
   DigestEntry,
   KnowledgeSummary,
   LocalModelId,
+  MailAccountItem,
+  MailLaneResponse,
+  MailPreset,
+  MailStatusSummary,
   SidecarHealth,
   SourceItem,
   SourceStatEntry,
   TabBoundsSpec,
+  TabKind,
 } from "./types";
 
 let sidecarBaseUrl = "";
@@ -62,12 +67,19 @@ async function sidecarFetch(
 function mapConversationRow(raw: Record<string, unknown>): Conversation {
   // v1 -> v2 migration mapping: map legacy intent_title to title
   const mappedTitle = String(raw.title ?? raw.intent_title ?? "untitled");
+  const rawOrigin = String(raw.origin ?? "chat");
+  const origin: ConversationOrigin =
+    rawOrigin === "mail"
+      ? "mail"
+      : rawOrigin === "direct"
+        ? "direct"
+        : "chat";
   return {
     id: String(raw.id ?? ""),
     title: mappedTitle,
     status: (raw.status === "archived" ? "archived" : "active") as ConversationStatus,
     pinned: Boolean(raw.pinned),
-    origin: (raw.origin === "direct" ? "direct" : "chat") as ConversationOrigin,
+    origin,
     created_at: String(raw.created_at ?? ""),
     last_active_at: String(raw.last_active_at ?? raw.created_at ?? ""),
     source_count:
@@ -123,6 +135,7 @@ function normalizeConversationDetail(
     title: String(t.title ?? t.url ?? ""),
     is_open: t.is_open !== undefined ? Boolean(t.is_open) : true,
     created_at: String(t.created_at ?? conv.created_at),
+    kind: (t.kind === "mail" || t.kind === "compose" ? t.kind : "site") as TabKind,
   }));
 
   const rawSources = (raw.sources ?? []) as Array<Record<string, unknown>>;
@@ -292,15 +305,22 @@ export async function apiSetConversationSummary(
   }
 }
 
+export async function apiEnsureMailConversation(): Promise<Conversation> {
+  const row = await invoke<Record<string, unknown>>("ensure_mail_conversation");
+  return mapConversationRow(row);
+}
+
 export async function apiOpenTab(
   conversationId: string,
   url: string,
-  title?: string
+  title?: string,
+  kind?: TabKind
 ): Promise<BrowserTab> {
   return await invoke<BrowserTab>("open_tab", {
     conversationId,
     url,
     title: title ?? null,
+    kind: kind ?? null,
   });
 }
 
@@ -426,6 +446,7 @@ export async function sidecarFetchHealth(): Promise<SidecarHealth> {
       ingest_queue_len: data.ingest_queue_len ?? 0,
       pause_learning: Boolean(data.pause_learning),
       errors: Array.isArray(data.errors) ? data.errors : [],
+      mail: data.mail ?? null,
     };
   } catch {
     return {
@@ -1033,4 +1054,144 @@ export async function sidecarStreamChat(
     source_stats: sourceStats,
     error: streamError,
   };
+}
+
+export async function sidecarGetMailAccounts(): Promise<{
+  unlocked: boolean;
+  accounts: MailAccountItem[];
+  presets: MailPreset[];
+  settings?: Record<string, unknown>;
+}> {
+  try {
+    const res = await sidecarFetch("/mail/accounts");
+    if (!res.ok) {
+      return { unlocked: false, accounts: [], presets: [] };
+    }
+    return await res.json();
+  } catch {
+    return { unlocked: false, accounts: [], presets: [] };
+  }
+}
+
+export async function sidecarTestMailAccount(
+  payload: Record<string, unknown>
+): Promise<{ ok: boolean; error?: string; stage?: string }> {
+  try {
+    const res = await sidecarFetch("/mail/accounts/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarAddMailAccount(
+  payload: Record<string, unknown>
+): Promise<{
+  ok: boolean;
+  account_id?: string;
+  vault_prefix?: string;
+  accounts?: MailAccountItem[];
+  error?: string;
+}> {
+  try {
+    const res = await sidecarFetch("/mail/accounts/add", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarRemoveMailAccount(
+  accountId: string
+): Promise<{
+  ok: boolean;
+  accounts?: MailAccountItem[];
+  error?: string;
+}> {
+  try {
+    const res = await sidecarFetch("/mail/accounts/remove", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account_id: accountId }),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarSyncMail(
+  accountId?: string
+): Promise<{ ok: boolean; synced_count?: number; error?: string }> {
+  try {
+    const res = await sidecarFetch("/mail/sync", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(accountId ? { account_id: accountId } : {}),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarGetMailLane(
+  name: "inbox" | "pings" | "orders" | "promos" = "inbox",
+  cursor = 0
+): Promise<MailLaneResponse> {
+  try {
+    const res = await sidecarFetch(
+      `/mail/lane?name=${encodeURIComponent(name)}&cursor=${cursor}`
+    );
+    if (!res.ok) {
+      return {
+        unlocked: false,
+        lane: name,
+        rows: [],
+        counts: { inbox_unread: 0, pings: 0, orders: 0, promos: 0 },
+      };
+    }
+    return await res.json();
+  } catch {
+    return {
+      unlocked: false,
+      lane: name,
+      rows: [],
+      counts: { inbox_unread: 0, pings: 0, orders: 0, promos: 0 },
+    };
+  }
+}
+
+export async function sidecarGetMailStatus(): Promise<MailStatusSummary> {
+  try {
+    const res = await sidecarFetch("/mail/status");
+    if (!res.ok) {
+      return {
+        unlocked: false,
+        accounts_count: 0,
+        inbox_unread: 0,
+        processing_done: 0,
+        processing_total: 0,
+        model_version: "cold",
+      };
+    }
+    return await res.json();
+  } catch {
+    return {
+      unlocked: false,
+      accounts_count: 0,
+      inbox_unread: 0,
+      processing_done: 0,
+      processing_total: 0,
+      model_version: "cold",
+    };
+  }
 }

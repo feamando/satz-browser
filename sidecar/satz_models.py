@@ -328,6 +328,7 @@ class SatzSidecarRuntime:
             sys.path.insert(0, str(self.sgs_root))
 
         from satz_brain import SatzBrain
+        from satz_mail import SatzMailManager
         from satz_passwords import ProfilePasswordManager
 
         # Import SGS modules after adding sgs_root to sys.path
@@ -348,6 +349,7 @@ class SatzSidecarRuntime:
         self.store = Store(self.store_path)
         self.passwords = ProfilePasswordManager(self.store_path.parent)
         self.brain = SatzBrain(self.passwords.get_profile_brain_dir(), sgs_root=self.sgs_root)
+        self.mail = SatzMailManager(self)
         self._init_satz_tables()
 
         sgs_cache_dir = self.sgs_root / "data" / "planck3_cache"
@@ -413,6 +415,8 @@ class SatzSidecarRuntime:
         from satz_brain import SatzBrain
 
         self.brain = SatzBrain(self.passwords.get_profile_brain_dir(), sgs_root=self.sgs_root)
+        if hasattr(self, "mail") and self.mail is not None:
+            self.mail.rebind_profile()
 
     def start_gemma_preload(self) -> None:
         """
@@ -599,6 +603,7 @@ class SatzSidecarRuntime:
             "ingest_queue_len": self.ingest_queue.qsize(),
             "pause_learning": self.pause_learning,
             "errors": self.get_errors(),
+            "mail": self.mail.get_status() if hasattr(self, "mail") and self.mail else None,
         }
 
     # ── Lazy Model Loaders ───────────────────────────────────────────────
@@ -2170,14 +2175,26 @@ def make_sidecar_server(
             if not self._has_valid_token():
                 return self._json({"error": "unauthorized"}, 401)
 
-            if self.path == "/digest":
+            parsed_url = urllib.parse.urlsplit(self.path)
+            route_path = parsed_url.path
+            query_params = dict(urllib.parse.parse_qsl(parsed_url.query))
+
+            if route_path == "/digest":
                 return self._json(runtime.get_digest())
-            if self.path == "/knowledge":
+            if route_path == "/knowledge":
                 return self._json(runtime.get_knowledge_summary())
-            if self.path == "/profile/status":
+            if route_path == "/profile/status":
                 return self._json(runtime.passwords.list_profiles())
-            if self.path == "/passwords":
+            if route_path == "/passwords":
                 return self._json(runtime.passwords.get_active_vault_summary())
+            if route_path == "/mail/accounts":
+                return self._json(runtime.mail.list_accounts())
+            if route_path == "/mail/lane":
+                lane_name = query_params.get("name", "inbox")
+                cursor_val = int(query_params.get("cursor", "0") or 0)
+                return self._json(runtime.mail.get_lane(name=lane_name, cursor=cursor_val))
+            if route_path == "/mail/status":
+                return self._json(runtime.mail.get_status())
             return self._json({"error": "not found"}, 404)
 
         def do_POST(self):
@@ -2370,6 +2387,33 @@ def make_sidecar_server(
             if self.path == "/errors/clear":
                 runtime.clear_errors()
                 return self._json({"ok": True, "errors": []})
+
+            if self.path == "/mail/accounts/add":
+                try:
+                    return self._json(runtime.mail.add_account(data))
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/mail/accounts/test":
+                try:
+                    return self._json(runtime.mail.test_account(data))
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/mail/accounts/remove":
+                try:
+                    return self._json(runtime.mail.remove_account(str(data.get("account_id") or "")))
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/mail/sync":
+                account_id = str(data.get("account_id") or "").strip()
+                if account_id:
+                    return self._json(runtime.mail.sync_account_once(account_id))
+                return self._json(runtime.mail.sync_all_accounts_once())
+
+            if self.path == "/mail/settings":
+                return self._json({"ok": True, "settings": runtime.mail.update_mail_settings(data)})
 
             if self.path == "/chat/summarize":
                 messages = data.get("messages") or []

@@ -27,19 +27,44 @@ export function renderTabStrip(actions: TabStripActions): void {
   }
 
   const openTabs = detail.tabs.filter((t) => t.is_open);
+  const isMailConv = detail.conversation.origin === "mail";
   const isChatActive = state.activeTabId === "chat" && !state.compareMode;
+  const counts = state.mailCounts;
+
+  const mailLaneTabsHtml = isMailConv
+    ? `
+      <div class="tab-item ${!state.compareMode && state.activeTabId === "lane:inbox" ? "active" : ""}" data-lane-tab="inbox">
+        <span>[ inbox${counts.inbox_unread > 0 ? ` ${counts.inbox_unread}` : ""} ]</span>
+      </div>
+      <div class="tab-item ${!state.compareMode && state.activeTabId === "lane:pings" ? "active" : ""}" data-lane-tab="pings">
+        <span>[ pings${counts.pings > 0 ? ` ${counts.pings}` : ""} ]</span>
+      </div>
+      <div class="tab-item ${!state.compareMode && state.activeTabId === "lane:orders" ? "active" : ""}" data-lane-tab="orders">
+        <span>[ orders${counts.orders > 0 ? ` ${counts.orders}` : ""} ]</span>
+      </div>
+      <div class="tab-item ${!state.compareMode && state.activeTabId === "lane:promos" ? "active" : ""}" data-lane-tab="promos">
+        <span>[ promos${counts.promos > 0 ? ` ${counts.promos}` : ""} ]</span>
+      </div>
+    `
+    : "";
 
   container.innerHTML = `
     <div class="tab-strip-left">
       <div class="tab-item ${isChatActive ? "active" : ""}" data-tab-id="chat">
         <span>[ chat ]</span>
       </div>
+      ${mailLaneTabsHtml}
       ${openTabs
         .map((tab, idx) => {
           const isActive =
             !state.compareMode && state.activeTabId === tab.id;
           const isSelectedForCompare = state.compareTabIds.includes(tab.id);
-          const domain = extractDomain(tab.url);
+          const domain =
+            tab.kind === "mail"
+              ? "mail"
+              : tab.kind === "compose"
+                ? "compose"
+                : extractDomain(tab.url);
           const shortTitle = (tab.title || domain).slice(0, 22);
           return `
             <div
@@ -69,6 +94,15 @@ export function renderTabStrip(actions: TabStripActions): void {
 
   container.querySelector('[data-tab-id="chat"]')?.addEventListener("click", () => {
     actions.onSelectTab("chat");
+  });
+
+  container.querySelectorAll("[data-lane-tab]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const lane = (el as HTMLElement).getAttribute("data-lane-tab");
+      if (lane) {
+        actions.onSelectTab(`lane:${lane}`);
+      }
+    });
   });
 
   container.querySelectorAll("[data-site-tab-id]").forEach((el) => {
@@ -122,7 +156,8 @@ export async function syncWebviewsNow(): Promise<void> {
   if (
     !detail ||
     state.showKnowledgeView ||
-    (!state.compareMode && state.activeTabId === "chat")
+    (!state.compareMode &&
+      (state.activeTabId === "chat" || state.activeTabId.startsWith("lane:")))
   ) {
     await apiSyncTabWebviews([]);
     return;
@@ -134,7 +169,7 @@ export async function syncWebviewsNow(): Promise<void> {
     for (const tabId of state.compareTabIds.slice(0, 4)) {
       const tab = detail.tabs.find((t) => t.id === tabId && t.is_open);
       const slot = document.getElementById(`webview-slot-${tabId}`);
-      if (tab && slot) {
+      if (tab && tab.kind !== "compose" && slot) {
         const rect = slot.getBoundingClientRect();
         visible.push({
           tab_id: tab.id,
@@ -151,7 +186,7 @@ export async function syncWebviewsNow(): Promise<void> {
       (t) => t.id === state.activeTabId && t.is_open
     );
     const slot = document.getElementById(`webview-slot-${state.activeTabId}`);
-    if (tab && slot) {
+    if (tab && tab.kind !== "compose" && slot) {
       const rect = slot.getBoundingClientRect();
       visible.push({
         tab_id: tab.id,

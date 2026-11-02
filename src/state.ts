@@ -7,6 +7,9 @@ import type {
   DigestEntry,
   KnowledgeSummary,
   LocalModelId,
+  MailAccountItem,
+  MailLaneCounts,
+  MailPreset,
   SidecarHealth,
   SourceStatEntry,
 } from "./types";
@@ -50,6 +53,15 @@ export interface AppState {
   revealedPasswords: Record<string, string>;
   sourceStats: Record<string, SourceStatEntry>;
   showErrorLog: boolean;
+  mailAccounts: MailAccountItem[];
+  mailPresets: MailPreset[];
+  mailCounts: MailLaneCounts;
+  mailInboxRows: Array<Record<string, unknown>>;
+  mailActiveLane: "inbox" | "pings" | "orders" | "promos";
+  mailLaneRows: Array<Record<string, unknown>>;
+  mailLaneGroups: Array<Record<string, unknown>>;
+  mailSelectedRowIdx: number;
+  mailStatusMessage: string;
 }
 
 export const state: AppState = {
@@ -102,6 +114,15 @@ export const state: AppState = {
   revealedPasswords: {},
   sourceStats: {},
   showErrorLog: false,
+  mailAccounts: [],
+  mailPresets: [],
+  mailCounts: { inbox_unread: 0, pings: 0, orders: 0, promos: 0 },
+  mailInboxRows: [],
+  mailActiveLane: "inbox",
+  mailLaneRows: [],
+  mailLaneGroups: [],
+  mailSelectedRowIdx: 0,
+  mailStatusMessage: "",
 };
 
 export function escapeHtml(str: string): string {

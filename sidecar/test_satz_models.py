@@ -16,6 +16,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -632,6 +633,273 @@ class TestSatzSidecar(unittest.TestCase):
         self.assertIn("trust", kb["top_domains"][0])
         if kb["top_topics"]:
             self.assertIn("score", kb["top_topics"][0])
+
+    def test_m11_mail_accounts_imap_pop3_sync_peek_and_vault_prefix(self):
+        # Create and unlock profile
+        self.runtime.passwords.create_profile("MailUser", "654321")
+        self.runtime._refresh_active_profile_brain()
+
+        imap_log: list[dict[str, Any]] = []
+        smtp_log: list[dict[str, Any]] = []
+        pop3_log: list[dict[str, Any]] = []
+
+        inbox_messages: dict[int, bytes] = {
+            101: (
+                b"Message-ID: <msg101@example.com>\r\n"
+                b"From: Anna Schmidt <anna@partner.de>\r\n"
+                b"To: nikita@gmail.com\r\n"
+                b"Subject: Lisbon conference dates\r\n"
+                b"Date: Tue, 27 Oct 2026 09:15:00 +0000\r\n"
+                b"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+                b"Hi Nikita, can we confirm the Lisbon flight dates by Friday?\r\n"
+            ),
+            102: (
+                b"Message-ID: <msg102@example.com>\r\n"
+                b"From: Marcus Weber <marcus@agency.io>\r\n"
+                b"To: nikita@gmail.com\r\n"
+                b"Subject: Q4 Budget Deck\r\n"
+                b"Date: Tue, 27 Oct 2026 11:30:00 +0000\r\n"
+                b"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+                b"Attached is the Q4 budget review for your feedback.\r\n"
+            ),
+        }
+        sent_messages: dict[int, bytes] = {
+            50: (
+                b"Message-ID: <sent50@gmail.com>\r\n"
+                b"In-Reply-To: <msg100@example.com>\r\n"
+                b"From: Nikita <nikita@gmail.com>\r\n"
+                b"To: anna@partner.de\r\n"
+                b"Subject: Re: Initial notes\r\n"
+                b"Date: Mon, 26 Oct 2026 16:00:00 +0000\r\n"
+                b"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+                b"Thanks Anna, received.\r\n"
+            ),
+        }
+
+        class FakeIMAP:
+            def __init__(self, host: str, port: int, security: str):
+                self.host = host
+                self.port = port
+                self.security = security
+                self.selected_folder = "INBOX"
+                self.readonly = False
+
+            def login(self, user: str, pwd: str):
+                if pwd != "app-pass-secret-123":
+                    raise RuntimeError("b'[AUTHENTICATIONFAILED] Invalid credentials (Failure)'")
+                imap_log.append({"op": "login", "user": user, "host": self.host})
+                return "OK", [b"Logged in"]
+
+            def list(self):
+                return "OK", [
+                    b'(\\HasNoChildren) "/" "INBOX"',
+                    b'(\\HasNoChildren \\Sent) "/" "[Gmail]/Sent Mail"',
+                ]
+
+            def select(self, folder: str, readonly: bool = False):
+                clean = folder.strip('"')
+                self.selected_folder = clean
+                self.readonly = readonly
+                imap_log.append({"op": "select", "folder": clean, "readonly": readonly})
+                return "OK", [b"2"]
+
+            def response(self, code: str):
+                if code == "UIDVALIDITY":
+                    return "UIDVALIDITY", [b"998877"]
+                return code, [None]
+
+            def uid(self, command: str, *args: Any):
+                cmd = command.upper()
+                store = inbox_messages if self.selected_folder.upper() == "INBOX" else sent_messages
+                if cmd == "SEARCH":
+                    crit = " ".join(str(a) for a in args if a is not None)
+                    imap_log.append({"op": "search", "folder": self.selected_folder, "criteria": crit})
+                    uids = sorted(store.keys())
+                    return "OK", [" ".join(str(u) for u in uids).encode("ascii")]
+                if cmd == "FETCH":
+                    uid_int = int(args[0])
+                    spec = str(args[1])
+                    imap_log.append(
+                        {
+                            "op": "fetch",
+                            "folder": self.selected_folder,
+                            "uid": uid_int,
+                            "spec": spec,
+                            "readonly": self.readonly,
+                        }
+                    )
+                    raw = store.get(uid_int, b"")
+                    hdr, _, body = raw.partition(b"\r\n\r\n")
+                    return "OK", [
+                        (f"{uid_int} (UID {uid_int} FLAGS () BODY[HEADER] {{{len(hdr)}}})".encode("ascii"), hdr),
+                        (b"BODY[TEXT]", body),
+                    ]
+                return "OK", []
+
+            def logout(self):
+                return "BYE", [b"Logout"]
+
+        class FakeSMTP:
+            def __init__(self, host: str, port: int, security: str):
+                self.host = host
+                self.port = port
+                self.security = security
+
+            def login(self, user: str, pwd: str):
+                if pwd != "app-pass-secret-123":
+                    raise RuntimeError("535 5.7.8 Username and Password not accepted")
+                smtp_log.append({"op": "login", "user": user, "host": self.host, "port": self.port})
+
+            def quit(self):
+                pass
+
+        class FakePOP3:
+            def __init__(self, host: str, port: int, security: str):
+                self.host = host
+
+            def user(self, u: str):
+                pop3_log.append({"op": "user", "user": u})
+
+            def pass_(self, p: str):
+                if p != "pop-secret":
+                    raise RuntimeError("-ERR [AUTH] Invalid login")
+                pop3_log.append({"op": "pass"})
+
+            def stat(self):
+                return (1, 240)
+
+            def uidl(self):
+                return ("+OK", [b"1 pop-uidl-001"], 16)
+
+            def retr(self, num: int):
+                pop3_log.append({"op": "retr", "num": num})
+                lines = [
+                    b"Message-ID: <pop1@gmx.net>",
+                    b"From: GMX Team <info@gmx.net>",
+                    b"To: nikita@gmx.net",
+                    b"Subject: Welcome via POP3",
+                    b"Date: Tue, 27 Oct 2026 12:00:00 +0000",
+                    b"",
+                    b"POP3 body text left on server.",
+                ]
+                return ("+OK", lines, 180)
+
+            def dele(self, num: int):
+                pop3_log.append({"op": "dele", "num": num})
+                raise AssertionError("POP3 sync must NEVER call DELE (leave on server forced)")
+
+            def quit(self):
+                pass
+
+        self.runtime.mail.imap_factory = FakeIMAP
+        self.runtime.mail.smtp_factory = FakeSMTP
+        self.runtime.mail.pop3_factory = FakePOP3
+
+        # 1. [test] passes with valid app password and returns exact server error on bad password
+        bad_test = self.runtime.mail.test_account(
+            {
+                "preset": "gmail",
+                "email": "nikita@gmail.com",
+                "password": "wrong-password",
+            }
+        )
+        self.assertFalse(bad_test["ok"])
+        self.assertIn("AUTHENTICATIONFAILED", bad_test["error"])
+
+        ok_test = self.runtime.mail.test_account(
+            {
+                "preset": "gmail",
+                "email": "nikita@gmail.com",
+                "password": "app-pass-secret-123",
+            }
+        )
+        self.assertTrue(ok_test["ok"])
+        self.assertTrue(ok_test["incoming_ok"])
+        self.assertTrue(ok_test["outgoing_ok"])
+
+        # 2. Add Gmail account (start_sync=False so we step sync deterministically)
+        add_res = self.runtime.mail.add_account(
+            {
+                "preset": "gmail",
+                "label": "Gmail",
+                "email": "nikita@gmail.com",
+                "password": "app-pass-secret-123",
+                "vault_prefix": "GMAIL",
+                "start_sync": False,
+            }
+        )
+        self.assertTrue(add_res["ok"])
+        acct_id = add_res["account_id"]
+
+        # Verify password is in vault.enc and NOT in mail.sqlite
+        mail_db_bytes = self.runtime.passwords.get_profile_mail_db_path().read_bytes()
+        self.assertNotIn(b"app-pass-secret-123", mail_db_bytes)
+        vault_map = self.runtime.passwords.get_unlocked_credentials_map()
+        self.assertEqual(vault_map.get("GMAIL_PASSWORD"), "app-pass-secret-123")
+        self.assertEqual(vault_map.get("GMAIL_IMAP_HOST"), "imap.gmail.com")
+        self.assertEqual(vault_map.get("GMAIL_SMTP_HOST"), "smtp.gmail.com")
+
+        # 3. First sync of 30 days completes; PEEK + readonly=True used everywhere
+        sync1 = self.runtime.mail.sync_account_once(acct_id)
+        self.assertTrue(sync1["ok"])
+        self.assertEqual(sync1["synced_count"], 3)  # 2 INBOX + 1 Sent
+        for entry in imap_log:
+            if entry["op"] == "select":
+                self.assertTrue(entry["readonly"], "Sync SELECT must be readonly=True")
+            if entry["op"] == "fetch":
+                self.assertIn("BODY.PEEK", entry["spec"], "Sync FETCH must use BODY.PEEK")
+
+        lane = self.runtime.mail.get_lane("inbox")
+        self.assertEqual(len(lane["rows"]), 2)
+        self.assertEqual(lane["counts"]["inbox_unread"], 2)
+        subjects = [r["subject"] for r in lane["rows"]]
+        self.assertIn("Lisbon conference dates", subjects)
+        self.assertIn("Q4 Budget Deck", subjects)
+
+        # 4. New email arrives (UID 103) -> incremental sync (`UID > last_uid`) picks it up
+        inbox_messages[103] = (
+            b"Message-ID: <msg103@example.com>\r\n"
+            b"From: Jordan Reyes <jordan.reyes@example.com>\r\n"
+            b"To: nikita@gmail.com\r\n"
+            b"Subject: Product strategy sync\r\n"
+            b"Date: Tue, 27 Oct 2026 14:00:00 +0000\r\n"
+            b"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+            b"Let's review the launch roadmap tomorrow morning.\r\n"
+        )
+        sync2 = self.runtime.mail.sync_account_once(acct_id)
+        self.assertTrue(sync2["ok"])
+        self.assertEqual(sync2["synced_count"], 1)
+        lane2 = self.runtime.mail.get_lane("inbox")
+        self.assertEqual(len(lane2["rows"]), 3)
+        self.assertEqual(lane2["counts"]["inbox_unread"], 3)
+
+        # 5. `extract_with_profile_credentials` reads from `mail.sqlite` instead of raw 8-email IMAP
+        cred_extract = self.runtime.passwords.extract_with_profile_credentials("https://mail.google.com/mail/u/0/")
+        self.assertIsNotNone(cred_extract)
+        assert cred_extract is not None
+        self.assertEqual(cred_extract["mode"], "mail_sqlite")
+        self.assertIn("Product strategy sync", cred_extract["text"])
+
+        # 6. POP3 account sync uses UIDL for dedupe and never calls DELE
+        pop_add = self.runtime.mail.add_account(
+            {
+                "preset": "custom_pop3",
+                "label": "GMX POP3",
+                "email": "nikita@gmx.net",
+                "password": "pop-secret",
+                "in_host": "pop.gmx.net",
+                "in_port": 995,
+                "smtp_host": "mail.gmx.net",
+                "smtp_port": 587,
+                "start_sync": False,
+            }
+        )
+        pop_sync1 = self.runtime.mail.sync_account_once(pop_add["account_id"])
+        self.assertTrue(pop_sync1["ok"])
+        self.assertEqual(pop_sync1["synced_count"], 1)
+        pop_sync2 = self.runtime.mail.sync_account_once(pop_add["account_id"])
+        self.assertEqual(pop_sync2["synced_count"], 0, "POP3 UIDL dedupe must skip already-fetched UIDL")
+        self.assertFalse(any(e["op"] == "dele" for e in pop3_log))
 
 
 if __name__ == "__main__":

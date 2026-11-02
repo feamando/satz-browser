@@ -51,6 +51,7 @@ import {
 } from "./chat";
 import { bindKeyboardShortcuts } from "./keys";
 import { renderKnowledgeView } from "./knowledge";
+import { refreshMailState, renderMailLaneView } from "./mail";
 import { renderRail } from "./rail";
 import { renderSourcesPanel } from "./sources";
 import { renderStartScreen } from "./start";
@@ -252,11 +253,18 @@ function handleMenuShortcut(cmd: string): void {
 async function pollSidecarState(): Promise<void> {
   state.sidecar = await sidecarFetchHealth();
   if (state.sidecar.online) {
+    if (state.sidecar.mail?.counts) {
+      state.mailCounts = state.sidecar.mail.counts;
+    }
     void sidecarSyncBookmarks(state.bookmarks);
     if (!state.knowledge.profile) {
       const kb = await sidecarFetchKnowledge();
       if (kb) {
         state.knowledge = kb;
+        if (kb.profile?.unlocked) {
+          await refreshMailState();
+          await refreshLists();
+        }
         renderRailRegion();
       }
     }
@@ -431,6 +439,7 @@ function renderRailRegion(): void {
       if (state.showKnowledgeView) {
         const kb = await sidecarFetchKnowledge();
         if (kb) state.knowledge = kb;
+        await refreshMailState();
       }
       renderAllRegions();
     },
@@ -442,6 +451,15 @@ function renderTabStripRegion(): void {
     onSelectTab: (tabId) => {
       state.compareMode = false;
       state.activeTabId = tabId;
+      if (tabId.startsWith("lane:")) {
+        const laneName = tabId.slice(5) as "inbox" | "pings" | "orders" | "promos";
+        state.mailActiveLane = laneName;
+        void (async () => {
+          await refreshMailState();
+          renderWorkspaceRegions();
+        })();
+        return;
+      }
       renderWorkspaceRegions();
     },
     onToggleCompareCandidate: (tabId) => {
@@ -501,6 +519,8 @@ function renderViewportRegion(): void {
           : `error: ${res.error ?? "failed to create profile (ensure PIN is 6 digits)"}`;
         const kb = await sidecarFetchKnowledge();
         if (kb) state.knowledge = kb;
+        await refreshMailState();
+        await refreshLists();
         renderAllRegions();
       },
       onUnlockProfile: async (profileId, pin) => {
@@ -511,6 +531,8 @@ function renderViewportRegion(): void {
           : `error: ${res.error ?? "invalid 6-digit PIN"}`;
         const kb = await sidecarFetchKnowledge();
         if (kb) state.knowledge = kb;
+        await refreshMailState();
+        await refreshLists();
         renderAllRegions();
       },
       onLockProfile: async () => {
@@ -519,6 +541,7 @@ function renderViewportRegion(): void {
         state.profileStatusMessage = "profile locked. encrypted vault unloaded.";
         const kb = await sidecarFetchKnowledge();
         if (kb) state.knowledge = kb;
+        await refreshMailState();
         renderAllRegions();
       },
       onDeleteProfile: async (profileId, pin) => {
@@ -590,6 +613,10 @@ function renderViewportRegion(): void {
           renderViewportRegion();
         }
       },
+      onMailChanged: async () => {
+        await refreshLists();
+        renderAllRegions();
+      },
       onCloseKnowledgeView: () => {
         state.showKnowledgeView = false;
         renderAllRegions();
@@ -626,6 +653,34 @@ function renderViewportRegion(): void {
 
   if (state.compareMode && state.compareTabIds.length >= 2) {
     renderCompareViewport(viewport);
+    scheduleWebviewLayoutSync();
+    return;
+  }
+
+  if (state.activeTabId.startsWith("lane:")) {
+    renderMailLaneView(viewport, {
+      onOpenEmailMessage: (messageId, subject) => {
+        void (async () => {
+          if (!state.activeDetail) return;
+          const tab = await apiOpenTab(
+            state.activeDetail.conversation.id,
+            `satzmail://message/${messageId}`,
+            subject,
+            "mail"
+          );
+          state.activeDetail = await apiGetConversation(
+            state.activeDetail.conversation.id
+          );
+          state.activeTabId = tab.id;
+          await refreshLists();
+          renderAllRegions();
+        })();
+      },
+      onRefreshState: async () => {
+        await refreshLists();
+        renderAllRegions();
+      },
+    });
     scheduleWebviewLayoutSync();
     return;
   }
@@ -915,7 +970,12 @@ async function selectConversation(conversationId: string): Promise<void> {
   state.activeDetail = detail;
   if (detail) {
     const openTabs = detail.tabs.filter((t) => t.is_open);
-    if (detail.conversation.origin === "direct" && openTabs.length > 0) {
+    if (detail.conversation.origin === "mail") {
+      state.mailActiveLane = "inbox";
+      await refreshMailState();
+      state.activeTabId = "lane:inbox";
+      state.agentRailOpen = true;
+    } else if (detail.conversation.origin === "direct" && openTabs.length > 0) {
       state.activeTabId = openTabs[0].id;
       state.agentRailOpen = false;
     } else {

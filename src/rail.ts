@@ -158,11 +158,11 @@ export function renderRail(actions: RailActions): void {
       <button
         id="rail-open-knowledge-btn"
         class="${state.showKnowledgeView ? "active" : ""}"
-        title="Open Satz Brain Knowledge Base, User Profiles (6-digit PIN), and .env Password Vault"
+        title="Open Satz Brain Knowledge Base, User Profiles (6-digit PIN), Mail Accounts, and Encrypted Vault"
       >
         [${state.knowledge.profile?.unlocked && state.knowledge.profile?.active_profile ? `profile: ${escapeHtml(state.knowledge.profile.active_profile.name)} · kb` : "knowledge · profile"}]
       </button>
-      <span>v0.3</span>
+      <span>v0.4</span>
     </div>
   `;
 
@@ -174,11 +174,17 @@ function renderConversationRow(
   isActive: boolean,
   isPinned: boolean
 ): string {
-  const prefix = isPinned ? "* " : "  ";
+  const isMail = c.origin === "mail";
+  const prefix = isPinned || isMail ? "* " : "  ";
   const srcCount = c.source_count ?? 0;
   const relTime = formatRelativeTime(c.last_active_at || c.created_at);
-  const menuOpen = state.openMenuConvId === c.id;
-  const isRenaming = state.renamingConvId === c.id;
+  const menuOpen = !isMail && state.openMenuConvId === c.id;
+  const isRenaming = !isMail && state.renamingConvId === c.id;
+  const inboxUnread =
+    state.mailCounts.inbox_unread || state.sidecar.mail?.inbox_unread || 0;
+  const displayTitle = isMail
+    ? `mail (${inboxUnread})`
+    : c.title;
 
   return `
     <div>
@@ -186,11 +192,15 @@ function renderConversationRow(
         ${
           isRenaming
             ? `<input id="rail-rename-input-${escapeHtml(c.id)}" class="rail-rename-input" type="text" value="${escapeHtml(c.title)}" />`
-            : `<span class="rail-row-title">${prefix}${escapeHtml(c.title)}</span>`
+            : `<span class="rail-row-title">${prefix}${escapeHtml(displayTitle)}</span>`
         }
         <span class="rail-row-meta rail-row-src-count">${srcCount} src</span>
         <span class="rail-row-time">${escapeHtml(relTime)}</span>
-        <button class="rail-menu-btn" data-menu-conv-id="${escapeHtml(c.id)}">...</button>
+        ${
+          isMail
+            ? `<span class="rail-row-meta muted">pin</span>`
+            : `<button class="rail-menu-btn" data-menu-conv-id="${escapeHtml(c.id)}">...</button>`
+        }
       </div>
       ${
         menuOpen

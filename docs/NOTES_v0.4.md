@@ -108,4 +108,25 @@ Owner: Nikita Gorshkov · Date: 2026-10-27 · Target: Windows 11 (4090 box) firs
   - Removed hardcoded repo path fallback in `src-tauri/src/lib.rs`; `resolve_repo_root` resolves strictly from settings or executable/working ancestors.
   - Replaced silent `except Exception` blocks in fetch and indexer loops with `self.record_error(scope, err)` into a 50-entry ring buffer (`collections.deque(maxlen=50)`). Authenticated `GET /health` returns `"errors"`, and the status bar renders `[N errors]` with click-to-view overlay and `[clear]`.
 
+---
+
+## 5. Milestone 11 (M11): Mail Sync & Storage
+
+- **Per-Profile `mail.sqlite` Storage (`sidecar/satz_mail.py`):**
+  - Created `profiles/<id>/mail.sqlite` (WAL mode) with all 12 tables from Section 4.3 (`accounts`, `folders`, `messages`, `parts`, `labels`, `extracts`, `actions`, `corrections`, `eval_labels`, `outbox`, `attachments`, `messages_fts` FTS5 over `subject`, `from_name`, `from_addr`, `new_text`, plus `mail_settings`).
+  - Rebinds automatically on profile create/unlock/lock (`runtime._refresh_active_profile_brain()` -> `mail.rebind_profile()`). Locking the profile stops all account sync threads and hides mail lanes.
+- **Accounts, Presets, Vault Credentials & `[test]` (`sidecar/satz_mail.py`, `sidecar/satz_passwords.py`, `src/mail.ts`, `src/knowledge.ts`):**
+  - Added presets for Gmail, Outlook / Hotmail, iCloud, GMX, WEB.DE, Custom IMAP, and Custom POP3.
+  - Adding an account stores `<PREFIX>_USERNAME`, `<PREFIX>_PASSWORD`, `<PREFIX>_IMAP_HOST`, and `<PREFIX>_SMTP_HOST` in `vault.enc` and stores only `vault_prefix` in `accounts` (never the password in `mail.sqlite`).
+  - `POST /mail/accounts/test` logs in to both incoming (IMAP `SELECT INBOX` readonly or POP3 `STAT`) and outgoing (`smtplib` `EHLO` + `AUTH`, no message sent) and returns the exact server error on failure.
+- **IMAP & POP3 Background Sync (`sidecar/satz_mail.py`):**
+  - IMAP sync (`_sync_imap_account`): syncs `INBOX` and discovered Sent folder (`\Sent` flag in `LIST` or name match) for the last 30 days (`sync_days`), max 2,000 messages, newest first. Uses `SELECT(..., readonly=True)` and `BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.20000>` everywhere so syncing never marks mail as `\Seen`. Polls every 2 minutes for `UID > last_uid` with a `UIDVALIDITY` check.
+  - POP3 sync (`_sync_pop3_account`): uses `UIDL` for deduplication and never calls `DELE` ("leave on server" forced).
+  - Auth errors stop that account's sync and mark `[auth failed]`; network errors back off per account (doubling from `60s`, max `30 min`).
+  - Replaced the 8-email raw IMAP snippet path in `sidecar/satz_passwords.py` (`extract_with_profile_credentials`) with `mail.sqlite` reads (`mode = "mail_sqlite"`) once an account exists for that service.
+- **Pinned `Mail` Conversation & `tabs.kind` Schema Migration (`src-tauri/src/db.rs`, `src/rail.ts`, `src/tabs.ts`):**
+  - Added `tabs.kind` column (`'site' | 'mail' | 'compose'`, default `'site'`) and `ensure_mail_conversation()` (`origin = 'mail'`, `pinned = 1`, protected against unpin, archive, and delete).
+  - Verified by `cargo test` (`db::tests::test_tabs_kind_migration_and_pinned_mail_conversation`) and `pytest` (`test_m11_mail_accounts_imap_pop3_sync_peek_and_vault_prefix`).
+
+
 
