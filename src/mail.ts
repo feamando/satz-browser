@@ -1,14 +1,25 @@
 import {
   apiEnsureMailConversation,
   sidecarAddMailAccount,
+  sidecarConfirmMailSend,
+  sidecarDraftMailReply,
   sidecarGetMailAccounts,
   sidecarGetMailLane,
+  sidecarGetMailMessage,
+  sidecarHideMailMessage,
+  sidecarLabelMailMessage,
+  sidecarOpenMailMessage,
+  sidecarPrepareMailSend,
   sidecarRemoveMailAccount,
+  sidecarSaveMailAttachment,
+  sidecarSearchMail,
   sidecarSyncMail,
   sidecarTestMailAccount,
+  sidecarUndoMailSend,
+  sidecarUpdateMailSettings,
 } from "./api";
-import { escapeHtml, formatRelativeTime, state } from "./state";
-import type { MailPreset } from "./types";
+import { escapeHtml, formatRelativeTime, MOD_LABEL, state } from "./state";
+import type { BrowserTab, MailPreset } from "./types";
 
 const DEFAULT_PRESETS: MailPreset[] = [
   {
@@ -92,6 +103,16 @@ const DEFAULT_PRESETS: MailPreset[] = [
 
 export interface MailViewActions {
   onOpenEmailMessage: (messageId: string, subject: string) => void;
+  onOpenComposeTab: (seed?: {
+    to?: string;
+    cc?: string;
+    subject?: string;
+    body?: string;
+    in_reply_to?: string;
+    references?: string;
+    reply_to_message_id?: string;
+  }) => void;
+  onOpenSiteUrl: (url: string, title: string) => void;
   onRefreshState: () => Promise<void>;
 }
 
@@ -401,7 +422,8 @@ export function renderMailLaneView(
   actions: MailViewActions
 ): void {
   const lane = state.mailActiveLane;
-  const rows = state.mailLaneRows;
+  const rows = state.mailSearchRows ?? state.mailLaneRows;
+  const groups = state.mailLaneGroups ?? [];
   const unlocked = Boolean(state.knowledge.profile?.unlocked);
 
   if (!unlocked) {
@@ -416,60 +438,240 @@ export function renderMailLaneView(
     return;
   }
 
-  const rowsHtml =
-    rows.length === 0
-      ? `<div class="muted">no messages in ${escapeHtml(lane)} lane yet.</div>`
-      : rows
-          .map((r, idx) => {
-            const id = String(r.id ?? r.latest_message_id ?? "");
-            const fromStr = String(
-              r.from_name || r.from_addr || r.merchant || r.company || "unknown"
-            );
-            const subj = String(
-              r.subject || r.order_number || r.domain || "(no subject)"
-            );
-            const snip = String(r.snippet || r.status || "");
-            const ts = Number(r.date ?? r.last_update ?? 0);
-            const timeLabel =
-              ts > 0 ? formatRelativeTime(String(Math.floor(ts))) : "";
-            const unseen = Number(r.seen ?? 1) === 0;
-            const needsReply = Number(r.needs_reply ?? 0) === 1;
-            const dueDate = r.due_date ? String(r.due_date) : "";
-            const isSelected = idx === state.mailSelectedRowIdx;
+  let bodyHtml = "";
 
-            return `
-              <div
-                class="mail-lane-row ${unseen ? "mail-unseen" : ""} ${isSelected ? "selected" : ""}"
-                data-mail-msg-id="${escapeHtml(id)}"
-                data-mail-msg-subject="${escapeHtml(subj)}"
-              >
-                <span class="mail-col-from truncate">${unseen ? "* " : "  "}${escapeHtml(fromStr)}</span>
-                <span class="mail-col-subject truncate">
-                  ${needsReply ? `<span class="source-cut-badge">reply</span> ` : ""}
-                  ${dueDate ? `<span class="source-cut-badge">due ${escapeHtml(dueDate.slice(5))}</span> ` : ""}
-                  ${escapeHtml(subj)}
-                  <span class="muted"> · ${escapeHtml(snip)}</span>
-                </span>
-                <span class="mail-col-time muted">${escapeHtml(timeLabel)}</span>
-              </div>
-            `;
-          })
-          .join("");
+  if (state.mailSearchRows !== null) {
+    bodyHtml =
+      rows.length === 0
+        ? `<div class="muted">no messages matched "${escapeHtml(state.mailSearchQuery)}".</div>`
+        : renderInboxRowsHtml(rows);
+  } else if (lane === "inbox") {
+    bodyHtml =
+      rows.length === 0
+        ? `<div class="muted">no messages in inbox lane yet.</div>`
+        : renderInboxRowsHtml(rows);
+  } else if (lane === "pings") {
+    bodyHtml =
+      groups.length === 0
+        ? `<div class="muted">no platform notifications in pings lane yet.</div>`
+        : groups
+            .map((g) => {
+              const plat = String(g.platform ?? "Other");
+              const cnt = Number(g.count ?? 0);
+              const authorsObj = (g.authors ?? {}) as Record<string, number>;
+              const authorSummary = Object.entries(authorsObj)
+                .slice(0, 4)
+                .map(([a, n]) => `${escapeHtml(a)} (${n})`)
+                .join(", ");
+              const items = (g.items ?? []) as Array<Record<string, unknown>>;
+              return `
+                <div class="kb-card">
+                  <div class="kb-card-header">
+                    <span>${escapeHtml(plat)} · ${cnt} ping${cnt === 1 ? "" : "s"}</span>
+                    <span class="muted">${authorSummary}</span>
+                  </div>
+                  <div class="mail-lane-list">
+                    ${renderInboxRowsHtml(items)}
+                  </div>
+                </div>
+              `;
+            })
+            .join("");
+  } else if (lane === "orders") {
+    bodyHtml =
+      rows.length === 0
+        ? `<div class="muted">no order or shipping updates in orders lane yet.</div>`
+        : rows
+            .map((card, idx) => {
+              const merchant = String(card.merchant ?? "Merchant");
+              const orderNo = String(card.order_number ?? "");
+              const status = String(card.status ?? "ordered");
+              const trackingNo = String(card.tracking_number ?? "");
+              const trackingUrl = String(card.tracking_url ?? "");
+              const total = String(card.total ?? "");
+              const latestId = String(card.latest_message_id ?? "");
+              const emails = (card.emails ?? []) as Array<Record<string, unknown>>;
+              const isSelected = idx === state.mailSelectedRowIdx;
+              return `
+                <div
+                  class="kb-card ${isSelected ? "selected" : ""}"
+                  data-mail-msg-id="${escapeHtml(latestId)}"
+                  data-mail-msg-subject="${escapeHtml(`${merchant} ${orderNo}`)}"
+                >
+                  <div class="kb-card-header">
+                    <span>${escapeHtml(merchant)}${orderNo ? ` · #${escapeHtml(orderNo)}` : ""}</span>
+                    <span>
+                      <span class="source-cut-badge">${escapeHtml(status)}</span>
+                      ${total ? ` <span class="muted">${escapeHtml(total)}</span>` : ""}
+                    </span>
+                  </div>
+                  ${
+                    trackingNo || trackingUrl
+                      ? `<div class="rail-row">
+                          <span class="muted">tracking: ${escapeHtml(trackingNo || "link")}</span>
+                          ${
+                            trackingUrl
+                              ? `<button data-open-site-url="${escapeHtml(trackingUrl)}">[track package]</button>`
+                              : ""
+                          }
+                        </div>`
+                      : ""
+                  }
+                  <div class="mail-lane-list">
+                    ${emails
+                      .map((em) => {
+                        const eid = String(em.id ?? "");
+                        const esubj = String(em.subject ?? "");
+                        const ets = Number(em.date ?? 0);
+                        return `
+                          <div
+                            class="mail-lane-row"
+                            data-mail-msg-id="${escapeHtml(eid)}"
+                            data-mail-msg-subject="${escapeHtml(esubj)}"
+                          >
+                            <span class="mail-col-from muted">${escapeHtml(String(em.status || status))}</span>
+                            <span class="mail-col-subject truncate">${escapeHtml(esubj)}</span>
+                            <span class="mail-col-time muted">${ets > 0 ? escapeHtml(formatRelativeTime(String(Math.floor(ets)))) : ""}</span>
+                          </div>
+                        `;
+                      })
+                      .join("")}
+                  </div>
+                </div>
+              `;
+            })
+            .join("");
+  } else if (lane === "promos") {
+    bodyHtml =
+      rows.length === 0
+        ? `<div class="muted">no promotions or discount codes in promos lane yet.</div>`
+        : rows
+            .map((comp) => {
+              const company = String(comp.company ?? "Company");
+              const domain = String(comp.domain ?? "");
+              const activeCodes = (comp.active_codes ?? []) as Array<Record<string, unknown>>;
+              const expiredCodes = (comp.expired_codes ?? []) as Array<Record<string, unknown>>;
+              const emails = (comp.emails ?? []) as Array<Record<string, unknown>>;
+              return `
+                <div class="kb-card">
+                  <div class="kb-card-header">
+                    <span>${escapeHtml(company)} <span class="muted">(${escapeHtml(domain)})</span></span>
+                    <span class="muted">${activeCodes.length} active code${activeCodes.length === 1 ? "" : "s"}</span>
+                  </div>
+                  ${
+                    activeCodes.length > 0
+                      ? `<div class="kb-form-row">
+                          ${activeCodes
+                            .map((c) => {
+                              const codeStr = String(c.code ?? "");
+                              const valStr = String(c.discount_value ?? "");
+                              const expStr = String(c.expiry ?? "");
+                              return `
+                                <span class="rail-row">
+                                  <span><strong>${escapeHtml(codeStr)}</strong>${valStr ? ` (${escapeHtml(valStr)})` : ""}${expStr ? ` · exp ${escapeHtml(expStr)}` : ""}</span>
+                                  <button data-copy-promo-code="${escapeHtml(codeStr)}">[copy]</button>
+                                </span>
+                              `;
+                            })
+                            .join("")}
+                        </div>`
+                      : ""
+                  }
+                  ${
+                    expiredCodes.length > 0
+                      ? `<div class="muted">expired: ${expiredCodes
+                          .map((c) => escapeHtml(String(c.code ?? "")))
+                          .join(", ")}</div>`
+                      : ""
+                  }
+                  <div class="mail-lane-list">
+                    ${emails
+                      .map((em) => {
+                        const eid = String(em.id ?? "");
+                        const esubj = String(em.subject ?? "");
+                        const ets = Number(em.date ?? 0);
+                        return `
+                          <div
+                            class="mail-lane-row"
+                            data-mail-msg-id="${escapeHtml(eid)}"
+                            data-mail-msg-subject="${escapeHtml(esubj)}"
+                          >
+                            <span class="mail-col-from muted">${escapeHtml(company)}</span>
+                            <span class="mail-col-subject truncate">${escapeHtml(esubj)}</span>
+                            <span class="mail-col-time muted">${ets > 0 ? escapeHtml(formatRelativeTime(String(Math.floor(ets)))) : ""}</span>
+                          </div>
+                        `;
+                      })
+                      .join("")}
+                  </div>
+                </div>
+              `;
+            })
+            .join("");
+  }
 
   container.innerHTML = `
     <div class="knowledge-view">
       <div class="kb-header">
-        <span>mail · ${escapeHtml(lane)} (${rows.length})</span>
+        <span>mail · ${escapeHtml(lane)} (${rows.length}) · keys: j/k move, Enter open, r reply, c compose, e hide, 1-4 move, / search</span>
         <div>
+          <input
+            id="mail-search-input"
+            class="kb-input"
+            type="text"
+            placeholder="search mail [/]..."
+            value="${escapeHtml(state.mailSearchQuery)}"
+          />
+          ${
+            state.mailSearchRows !== null
+              ? `<button id="mail-search-clear-btn">[clear]</button>`
+              : ""
+          }
+          <button id="mail-compose-btn">[compose (c)]</button>
           <button id="mail-lane-refresh-btn">[sync &amp; refresh]</button>
         </div>
       </div>
       <div class="mail-lane-list">
-        ${rowsHtml}
+        ${bodyHtml}
       </div>
       ${state.mailAccounts.length === 0 ? renderMailAccountsSectionHtml() : ""}
     </div>
   `;
+
+  const searchInput = container.querySelector(
+    "#mail-search-input"
+  ) as HTMLInputElement | null;
+  searchInput?.addEventListener("keydown", async (e) => {
+    if (e.key === "Enter") {
+      const q = searchInput.value.trim();
+      state.mailSearchQuery = q;
+      if (!q) {
+        state.mailSearchRows = null;
+      } else {
+        const res = await sidecarSearchMail(q);
+        state.mailSearchRows = res.rows ?? [];
+      }
+      await actions.onRefreshState();
+    } else if (e.key === "Escape") {
+      state.mailSearchQuery = "";
+      state.mailSearchRows = null;
+      await actions.onRefreshState();
+    }
+  });
+
+  container
+    .querySelector("#mail-search-clear-btn")
+    ?.addEventListener("click", async () => {
+      state.mailSearchQuery = "";
+      state.mailSearchRows = null;
+      await actions.onRefreshState();
+    });
+
+  container
+    .querySelector("#mail-compose-btn")
+    ?.addEventListener("click", () => {
+      actions.onOpenComposeTab();
+    });
 
   container
     .querySelector("#mail-lane-refresh-btn")
@@ -480,7 +682,8 @@ export function renderMailLaneView(
     });
 
   container.querySelectorAll("[data-mail-msg-id]").forEach((el) => {
-    el.addEventListener("click", () => {
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
       const mid = (el as HTMLElement).getAttribute("data-mail-msg-id");
       const subj =
         (el as HTMLElement).getAttribute("data-mail-msg-subject") || "mail";
@@ -490,7 +693,425 @@ export function renderMailLaneView(
     });
   });
 
+  container.querySelectorAll("[data-open-site-url]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const url = (btn as HTMLElement).getAttribute("data-open-site-url");
+      if (url) {
+        actions.onOpenSiteUrl(url, "Track Package");
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-copy-promo-code]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const code = (btn as HTMLElement).getAttribute("data-copy-promo-code");
+      if (code && navigator.clipboard) {
+        void navigator.clipboard.writeText(code);
+        (btn as HTMLElement).textContent = "[copied]";
+      }
+    });
+  });
+
   if (state.mailAccounts.length === 0) {
     bindMailAccountsEvents(container, actions.onRefreshState);
   }
 }
+
+function renderInboxRowsHtml(rows: Array<Record<string, unknown>>): string {
+  return rows
+    .map((r, idx) => {
+      const id = String(r.id ?? r.latest_message_id ?? "");
+      const fromStr = String(
+        r.from_name || r.from_addr || r.merchant || r.company || "unknown"
+      );
+      const subj = String(
+        r.subject || r.order_number || r.domain || "(no subject)"
+      );
+      const snip = String(r.snippet || r.status || "");
+      const ts = Number(r.date ?? r.last_update ?? 0);
+      const timeLabel =
+        ts > 0 ? formatRelativeTime(String(Math.floor(ts))) : "";
+      const unseen = Number(r.seen ?? 1) === 0;
+      const needsReply = Number(r.needs_reply ?? 0) === 1;
+      const dueDate = r.due_date ? String(r.due_date) : "";
+      const isSelected = idx === state.mailSelectedRowIdx;
+
+      return `
+        <div
+          class="mail-lane-row ${unseen ? "mail-unseen" : ""} ${isSelected ? "selected" : ""}"
+          data-mail-msg-id="${escapeHtml(id)}"
+          data-mail-msg-subject="${escapeHtml(subj)}"
+        >
+          <span class="mail-col-from truncate">${unseen ? "* " : "  "}${escapeHtml(fromStr)}</span>
+          <span class="mail-col-subject truncate">
+            ${needsReply ? `<span class="source-cut-badge">reply</span> ` : ""}
+            ${dueDate ? `<span class="source-cut-badge">due ${escapeHtml(dueDate.slice(5))}</span> ` : ""}
+            ${escapeHtml(subj)}
+            <span class="muted"> · ${escapeHtml(snip)}</span>
+          </span>
+          <span class="mail-col-time muted">${escapeHtml(timeLabel)}</span>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+export function renderEmailTabHeaderHtml(
+  tab: BrowserTab,
+  detailObj: Record<string, unknown> | undefined
+): string {
+  const msg = (detailObj?.message ?? detailObj ?? {}) as Record<string, unknown>;
+  const mid = String(
+    msg.id || tab.url.replace("satzmail://message/", "").split("/")[0]
+  );
+  const fromName = String(msg.from_name || "");
+  const fromAddr = String(msg.from_addr || "");
+  const fromDisp = fromName ? `${fromName} <${fromAddr}>` : fromAddr || "loading...";
+  const toList = ((msg.to ?? []) as Array<Record<string, string>>)
+    .map((x) => x.email || x.name)
+    .join(", ");
+  const ccList = ((msg.cc ?? []) as Array<Record<string, string>>)
+    .map((x) => x.email || x.name)
+    .join(", ");
+  const subj = String(msg.subject || tab.title || "(no subject)");
+  const label = String(msg.label || "email");
+  const allowRemote = Boolean(msg.allow_remote_images);
+  const attachments = ((msg.attachments ?? []) as Array<Record<string, unknown>>);
+
+  return `
+    <div class="kb-card" id="email-tab-header-${escapeHtml(tab.id)}">
+      <div class="kb-card-header">
+        <span><strong>${escapeHtml(subj)}</strong> · <span class="source-cut-badge">${escapeHtml(label)}</span></span>
+        <div>
+          <button data-email-reply="${escapeHtml(mid)}">[reply (r)]</button>
+          <button data-email-reply-all="${escapeHtml(mid)}">[reply all]</button>
+          <button data-email-forward="${escapeHtml(mid)}">[forward]</button>
+          <button data-email-hide="${escapeHtml(mid)}">[hide (e)]</button>
+          <button id="toggle-agent-rail-btn" class="${state.agentRailOpen ? "active" : ""}">
+            [agent rail ${MOD_LABEL}+j]
+          </button>
+        </div>
+      </div>
+      <div class="rail-row">
+        <span>from: ${escapeHtml(fromDisp)}${toList ? ` · to: ${escapeHtml(toList)}` : ""}${ccList ? ` · cc: ${escapeHtml(ccList)}` : ""}</span>
+        <div>
+          <span class="muted">move to:</span>
+          <button data-email-move="${escapeHtml(mid)}" data-target-label="email" class="${label === "email" ? "active" : ""}">[1 inbox]</button>
+          <button data-email-move="${escapeHtml(mid)}" data-target-label="ping" class="${label === "ping" ? "active" : ""}">[2 pings]</button>
+          <button data-email-move="${escapeHtml(mid)}" data-target-label="information" class="${label === "information" ? "active" : ""}">[3 orders]</button>
+          <button data-email-move="${escapeHtml(mid)}" data-target-label="promotion" class="${label === "promotion" ? "active" : ""}">[4 promos]</button>
+          ${
+            !allowRemote && fromAddr
+              ? `<button data-email-allow-remote="${escapeHtml(fromAddr)}">[load remote images]</button>`
+              : ""
+          }
+        </div>
+      </div>
+      ${
+        attachments.length > 0
+          ? `<div class="rail-row">
+              <span class="muted">attachments:</span>
+              <div>
+                ${attachments
+                  .map(
+                    (a) =>
+                      `<button data-email-save-att="${escapeHtml(mid)}" data-part-id="${escapeHtml(String(a.part_id ?? ""))}">[save ${escapeHtml(String(a.filename ?? "file"))}]</button>`
+                  )
+                  .join(" ")}
+              </div>
+            </div>`
+          : ""
+      }
+    </div>
+  `;
+}
+
+export function renderEmailAgentRailCardsHtml(
+  detailObj: Record<string, unknown> | undefined
+): string {
+  const msg = (detailObj?.message ?? detailObj ?? {}) as Record<string, unknown>;
+  if (!msg || !msg.id) return "";
+
+  const senderCard = msg.sender_card as Record<string, unknown> | null;
+  const recent = (msg.recent_with_sender ?? []) as Array<Record<string, unknown>>;
+  const extracts = (msg.extracts ?? {}) as Record<string, string>;
+
+  return `
+    <div class="kb-section">
+      ${
+        senderCard
+          ? `<div class="kb-card">
+              <div class="kb-card-header">
+                <span>sender · ${escapeHtml(String(senderCard.name ?? ""))}</span>
+                <span class="muted">${escapeHtml(String(senderCard.type ?? ""))}</span>
+              </div>
+              <div class="muted">${escapeHtml(String(senderCard.summary ?? ""))}</div>
+            </div>`
+          : ""
+      }
+      ${
+        extracts.order_number || extracts.tracking_number
+          ? `<div class="kb-card">
+              <div class="kb-card-header">
+                <span>order · ${escapeHtml(extracts.merchant || "Order")}</span>
+                <span class="source-cut-badge">${escapeHtml(extracts.status || "ordered")}</span>
+              </div>
+              <div class="muted">
+                ${extracts.order_number ? `#${escapeHtml(extracts.order_number)} ` : ""}
+                ${extracts.tracking_number ? `· tracking: ${escapeHtml(extracts.tracking_number)}` : ""}
+              </div>
+            </div>`
+          : ""
+      }
+      ${
+        recent.length > 0
+          ? `<div class="kb-card">
+              <div class="kb-card-header">recent with sender (${recent.length})</div>
+              ${recent
+                .map(
+                  (r) =>
+                    `<div class="rail-row"><span class="truncate">${escapeHtml(String(r.subject ?? ""))}</span></div>`
+                )
+                .join("")}
+            </div>`
+          : ""
+      }
+    </div>
+  `;
+}
+
+export function renderComposeTabView(
+  container: HTMLElement,
+  tab: BrowserTab,
+  onChanged: () => void
+): void {
+  const accounts = state.mailAccounts;
+  const defaultAcct = accounts[0]?.id ?? "";
+  const draft = (state.mailComposeDrafts[tab.id] ??= {
+    account_id: defaultAcct,
+    to: "",
+    cc: "",
+    bcc: "",
+    subject: tab.title && tab.title !== "compose" ? tab.title : "",
+    body: "",
+    in_reply_to: "",
+    references: "",
+    reply_to_message_id: "",
+  });
+
+  container.innerHTML = `
+    <div class="knowledge-view" id="compose-view-${escapeHtml(tab.id)}">
+      <div class="kb-header">
+        <span>compose mail (plain text · Gemma never sends without [confirm])</span>
+        <div>
+          <button id="compose-draft-btn">[draft with gemma]</button>
+          <button id="compose-prepare-send-btn">[send (${MOD_LABEL}+Enter)]</button>
+        </div>
+      </div>
+
+      ${
+        draft.status_msg
+          ? `<div class="kb-status-banner">${escapeHtml(draft.status_msg)}</div>`
+          : ""
+      }
+
+      ${
+        draft.confirm_token && draft.confirm_line
+          ? `<div class="kb-card" id="compose-confirm-bar">
+              <div class="rail-row">
+                <span>${escapeHtml(draft.confirm_line)}</span>
+                <div>
+                  <button id="compose-confirm-send-btn">[confirm]</button>
+                  <button id="compose-cancel-send-btn">[cancel]</button>
+                </div>
+              </div>
+            </div>`
+          : ""
+      }
+
+      ${
+        draft.queued_outbox_id
+          ? `<div class="kb-card" id="compose-undo-bar">
+              <div class="rail-row">
+                <span>queued for delivery (10s window)...</span>
+                <button id="compose-undo-send-btn">[undo]</button>
+              </div>
+            </div>`
+          : ""
+      }
+
+      <div class="kb-card">
+        <div class="kb-form-row">
+          <label class="muted">from:</label>
+          <select id="compose-from-select" class="kb-input">
+            ${accounts
+              .map(
+                (a) =>
+                  `<option value="${escapeHtml(a.id)}" ${a.id === draft.account_id ? "selected" : ""}>${escapeHtml(a.label)} &lt;${escapeHtml(a.email)}&gt;</option>`
+              )
+              .join("")}
+          </select>
+        </div>
+        <div class="kb-form-row">
+          <input id="compose-to-input" class="kb-input" type="text" placeholder="to: alice@example.com" value="${escapeHtml(draft.to)}" />
+          <input id="compose-cc-input" class="kb-input" type="text" placeholder="cc:" value="${escapeHtml(draft.cc)}" />
+          <input id="compose-bcc-input" class="kb-input" type="text" placeholder="bcc:" value="${escapeHtml(draft.bcc)}" />
+        </div>
+        <div class="kb-form-row">
+          <input id="compose-subject-input" class="kb-input" type="text" placeholder="subject" value="${escapeHtml(draft.subject)}" />
+        </div>
+        <textarea
+          id="compose-body-textarea"
+          class="kb-textarea"
+          rows="16"
+          placeholder="write plain-text message..."
+        >${escapeHtml(draft.body)}</textarea>
+      </div>
+    </div>
+  `;
+
+  const syncFields = () => {
+    draft.account_id =
+      (container.querySelector("#compose-from-select") as HTMLSelectElement | null)
+        ?.value ?? draft.account_id;
+    draft.to =
+      (container.querySelector("#compose-to-input") as HTMLInputElement | null)
+        ?.value ?? "";
+    draft.cc =
+      (container.querySelector("#compose-cc-input") as HTMLInputElement | null)
+        ?.value ?? "";
+    draft.bcc =
+      (container.querySelector("#compose-bcc-input") as HTMLInputElement | null)
+        ?.value ?? "";
+    draft.subject =
+      (container.querySelector("#compose-subject-input") as HTMLInputElement | null)
+        ?.value ?? "";
+    draft.body =
+      (
+        container.querySelector(
+          "#compose-body-textarea"
+        ) as HTMLTextAreaElement | null
+      )?.value ?? "";
+  };
+
+  container
+    .querySelectorAll("input, textarea, select")
+    .forEach((el) => el.addEventListener("input", syncFields));
+
+  container
+    .querySelector("#compose-draft-btn")
+    ?.addEventListener("click", async () => {
+      syncFields();
+      draft.status_msg = "drafting reply with Gemma...";
+      onChanged();
+      const res = await sidecarDraftMailReply({
+        message_id: draft.reply_to_message_id,
+        to: draft.to,
+        subject: draft.subject,
+        instructions: draft.body,
+      });
+      if (res.ok) {
+        if (res.to && !draft.to) draft.to = res.to;
+        if (res.subject && !draft.subject) draft.subject = res.subject;
+        if (res.body) draft.body = res.body;
+        draft.status_msg = "draft ready (review and click [send] to prepare confirmation).";
+      } else {
+        draft.status_msg = `draft error: ${res.error ?? "failed"}`;
+      }
+      onChanged();
+    });
+
+  const handlePrepare = async () => {
+    syncFields();
+    const res = await sidecarPrepareMailSend({
+      account_id: draft.account_id,
+      to: draft.to,
+      cc: draft.cc,
+      bcc: draft.bcc,
+      subject: draft.subject,
+      body: draft.body,
+      in_reply_to: draft.in_reply_to,
+      references: draft.references,
+      reply_to_message_id: draft.reply_to_message_id,
+    });
+    if (res.ok && res.confirm_token && res.outbox_id) {
+      draft.confirm_outbox_id = res.outbox_id;
+      draft.confirm_token = res.confirm_token;
+      draft.confirm_line = res.confirm_line;
+      draft.status_msg = "";
+    } else {
+      draft.status_msg = `send prepare error: ${res.error ?? "failed"}`;
+    }
+    onChanged();
+  };
+
+  container
+    .querySelector("#compose-prepare-send-btn")
+    ?.addEventListener("click", () => {
+      void handlePrepare();
+    });
+
+  container
+    .querySelector("#compose-body-textarea")
+    ?.addEventListener("keydown", (e) => {
+      const ke = e as KeyboardEvent;
+      if ((ke.ctrlKey || ke.metaKey) && ke.key === "Enter") {
+        ke.preventDefault();
+        void handlePrepare();
+      }
+    });
+
+  container
+    .querySelector("#compose-confirm-send-btn")
+    ?.addEventListener("click", async () => {
+      if (!draft.confirm_outbox_id || !draft.confirm_token) return;
+      const outboxId = draft.confirm_outbox_id;
+      const tok = draft.confirm_token;
+      draft.confirm_outbox_id = undefined;
+      draft.confirm_token = undefined;
+      draft.confirm_line = undefined;
+      const res = await sidecarConfirmMailSend(outboxId, tok);
+      if (res.ok) {
+        draft.queued_outbox_id = outboxId;
+        draft.status_msg = "sending in 10s (click [undo] to cancel)...";
+      } else {
+        draft.status_msg = `send rejected: ${res.error ?? "failed"}`;
+      }
+      onChanged();
+    });
+
+  container
+    .querySelector("#compose-cancel-send-btn")
+    ?.addEventListener("click", () => {
+      draft.confirm_outbox_id = undefined;
+      draft.confirm_token = undefined;
+      draft.confirm_line = undefined;
+      draft.status_msg = "send cancelled.";
+      onChanged();
+    });
+
+  container
+    .querySelector("#compose-undo-send-btn")
+    ?.addEventListener("click", async () => {
+      if (!draft.queued_outbox_id) return;
+      const res = await sidecarUndoMailSend(draft.queued_outbox_id);
+      if (res.ok) {
+        draft.queued_outbox_id = undefined;
+        draft.status_msg = "send undone. message returned to draft.";
+      } else {
+        draft.status_msg = `undo failed: ${res.error ?? "already sent"}`;
+      }
+      onChanged();
+    });
+}
+
+export {
+  sidecarGetMailMessage,
+  sidecarHideMailMessage,
+  sidecarLabelMailMessage,
+  sidecarOpenMailMessage,
+  sidecarSaveMailAttachment,
+  sidecarUpdateMailSettings,
+};

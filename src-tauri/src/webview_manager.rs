@@ -98,7 +98,11 @@ pub fn is_likely_url_token(raw: &str) -> bool {
     if t.is_empty() || t.contains(' ') || t.starts_with('?') {
         return false;
     }
-    if t.starts_with("http://") || t.starts_with("https://") || t.starts_with("about:") {
+    if t.starts_with("http://")
+        || t.starts_with("https://")
+        || t.starts_with("about:")
+        || t.starts_with("satzmail://")
+    {
         return true;
     }
     let lower = t.to_ascii_lowercase();
@@ -122,6 +126,7 @@ pub fn normalize_url(raw: &str) -> Result<Url, String> {
     if trimmed.starts_with("http://")
         || trimmed.starts_with("https://")
         || trimmed.starts_with("about:")
+        || trimmed.starts_with("satzmail://")
     {
         Url::parse(trimmed).map_err(|e| e.to_string())
     } else if {
@@ -318,26 +323,28 @@ pub fn sync_tab_webviews_impl(
                                 None,
                             );
                         }
-                        trigger_dom_capture_and_ingest(
-                            app_load.clone(),
-                            wv.clone(),
-                            tid_load.clone(),
-                            url_str.clone(),
-                        );
-                        // Second delayed capture for SPAs (e.g. Gmail, Notion, dashboards) that render asynchronously after load
-                        let app_delayed = app_load.clone();
-                        let wv_delayed = wv.clone();
-                        let tid_delayed = tid_load.clone();
-                        let url_delayed = url_str.clone();
-                        std::thread::spawn(move || {
-                            std::thread::sleep(Duration::from_millis(1800));
+                        if !url_str.starts_with("satzmail://") {
                             trigger_dom_capture_and_ingest(
-                                app_delayed,
-                                wv_delayed,
-                                tid_delayed,
-                                url_delayed,
+                                app_load.clone(),
+                                wv.clone(),
+                                tid_load.clone(),
+                                url_str.clone(),
                             );
-                        });
+                            // Second delayed capture for SPAs (e.g. Gmail, Notion, dashboards) that render asynchronously after load
+                            let app_delayed = app_load.clone();
+                            let wv_delayed = wv.clone();
+                            let tid_delayed = tid_load.clone();
+                            let url_delayed = url_str.clone();
+                            std::thread::spawn(move || {
+                                std::thread::sleep(Duration::from_millis(1800));
+                                trigger_dom_capture_and_ingest(
+                                    app_delayed,
+                                    wv_delayed,
+                                    tid_delayed,
+                                    url_delayed,
+                                );
+                            });
+                        }
                     }
 
                     let _ = app_load.emit(
@@ -360,13 +367,16 @@ pub fn sync_tab_webviews_impl(
                             Some(&title),
                         );
                     }
-                    // SPAs (like Gmail opening an email or finishing inbox load) update document.title on in-page navigation
-                    trigger_dom_capture_and_ingest(
-                        app_title.clone(),
-                        wv.clone(),
-                        tid_title.clone(),
-                        current_url.clone().unwrap_or_default(),
-                    );
+                    let cur_u = current_url.clone().unwrap_or_default();
+                    if !cur_u.starts_with("satzmail://") {
+                        // SPAs (like Gmail opening an email or finishing inbox load) update document.title on in-page navigation
+                        trigger_dom_capture_and_ingest(
+                            app_title.clone(),
+                            wv.clone(),
+                            tid_title.clone(),
+                            cur_u,
+                        );
+                    }
                     let _ = app_title.emit(
                         "tab-page-event",
                         TabPageEventPayload {

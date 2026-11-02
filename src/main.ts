@@ -51,7 +51,19 @@ import {
 } from "./chat";
 import { bindKeyboardShortcuts } from "./keys";
 import { renderKnowledgeView } from "./knowledge";
-import { refreshMailState, renderMailLaneView } from "./mail";
+import {
+  refreshMailState,
+  renderComposeTabView,
+  renderEmailAgentRailCardsHtml,
+  renderEmailTabHeaderHtml,
+  renderMailLaneView,
+  sidecarGetMailMessage,
+  sidecarHideMailMessage,
+  sidecarLabelMailMessage,
+  sidecarOpenMailMessage,
+  sidecarSaveMailAttachment,
+  sidecarUpdateMailSettings,
+} from "./mail";
 import { renderRail } from "./rail";
 import { renderSourcesPanel } from "./sources";
 import { renderStartScreen } from "./start";
@@ -168,6 +180,10 @@ async function initApp(): Promise<void> {
         renderWorkspaceRegions();
       }
     },
+  });
+
+  window.addEventListener("keydown", (e: KeyboardEvent) => {
+    void handleMailSingleKeyShortcuts(e);
   });
 
   window.addEventListener("resize", () => {
@@ -660,21 +676,13 @@ function renderViewportRegion(): void {
   if (state.activeTabId.startsWith("lane:")) {
     renderMailLaneView(viewport, {
       onOpenEmailMessage: (messageId, subject) => {
-        void (async () => {
-          if (!state.activeDetail) return;
-          const tab = await apiOpenTab(
-            state.activeDetail.conversation.id,
-            `satzmail://message/${messageId}`,
-            subject,
-            "mail"
-          );
-          state.activeDetail = await apiGetConversation(
-            state.activeDetail.conversation.id
-          );
-          state.activeTabId = tab.id;
-          await refreshLists();
-          renderAllRegions();
-        })();
+        void openEmailMessageTab(messageId, subject);
+      },
+      onOpenComposeTab: (seed) => {
+        void openComposeTab(seed);
+      },
+      onOpenSiteUrl: (url, title) => {
+        void handleOpenUrlAsTab(url, title);
       },
       onRefreshState: async () => {
         await refreshLists();
@@ -732,6 +740,57 @@ function renderSiteTabViewport(viewport: HTMLElement): void {
   if (!tab) {
     state.activeTabId = "chat";
     renderViewportRegion();
+    return;
+  }
+
+  if (tab.kind === "compose") {
+    renderComposeTabView(viewport, tab, () => {
+      renderViewportRegion();
+    });
+    return;
+  }
+
+  if (tab.kind === "mail" || tab.url.startsWith("satzmail://")) {
+    const mid = tab.url.replace("satzmail://message/", "").split("/")[0].trim();
+    const cachedDetail = state.mailMessageDetails[mid];
+    if (!cachedDetail && mid) {
+      void (async () => {
+        const res = await sidecarGetMailMessage(mid);
+        if (res.ok) {
+          state.mailMessageDetails[mid] = res;
+          renderViewportRegion();
+        }
+      })();
+    }
+
+    viewport.innerHTML = `
+      <div class="chat-view">
+        <div class="viewport-primary">
+          ${renderEmailTabHeaderHtml(tab, cachedDetail)}
+          <div id="webview-slot-${escapeHtml(tab.id)}" class="webview-slot">
+            loading ${escapeHtml(tab.url)}...
+          </div>
+        </div>
+        ${
+          state.agentRailOpen
+            ? `<aside class="right-panel" id="site-tab-agent-rail">
+                ${renderEmailAgentRailCardsHtml(cachedDetail)}
+                <div id="email-tab-chat-container"></div>
+              </aside>`
+            : ""
+        }
+      </div>
+    `;
+
+    const chatEl =
+      document.getElementById("email-tab-chat-container") ??
+      document.getElementById("site-tab-agent-rail");
+    if (chatEl) {
+      renderChatPanel(chatEl, getChatActions());
+    }
+
+    bindEmailTabHeaderEvents(viewport, mid, cachedDetail);
+    bindToolbarEvents(viewport);
     return;
   }
 
@@ -1374,6 +1433,309 @@ async function handleSendChatMessage(text: string): Promise<void> {
     );
     state.activeDetail = await apiGetConversation(convId);
     renderViewportRegion();
+  }
+}
+
+async function openEmailMessageTab(
+  messageId: string,
+  subject: string
+): Promise<void> {
+  if (!state.activeDetail) return;
+  void sidecarOpenMailMessage(messageId);
+  const msgDetail = await sidecarGetMailMessage(messageId);
+  if (msgDetail.ok) {
+    state.mailMessageDetails[messageId] = msgDetail;
+  }
+  const tab = await apiOpenTab(
+    state.activeDetail.conversation.id,
+    `satzmail://message/${messageId}`,
+    subject,
+    "mail"
+  );
+  state.activeDetail = await apiGetConversation(
+    state.activeDetail.conversation.id
+  );
+  state.activeTabId = tab.id;
+  await refreshMailState();
+  await refreshLists();
+  renderAllRegions();
+}
+
+async function openComposeTab(seed?: {
+  to?: string;
+  cc?: string;
+  subject?: string;
+  body?: string;
+  in_reply_to?: string;
+  references?: string;
+  reply_to_message_id?: string;
+}): Promise<void> {
+  if (!state.activeDetail) return;
+  const title = seed?.subject || "compose";
+  const tab = await apiOpenTab(
+    state.activeDetail.conversation.id,
+    "about:compose",
+    title,
+    "compose"
+  );
+  state.mailComposeDrafts[tab.id] = {
+    account_id: state.mailAccounts[0]?.id ?? "",
+    to: seed?.to ?? "",
+    cc: seed?.cc ?? "",
+    bcc: "",
+    subject: seed?.subject ?? "",
+    body: seed?.body ?? "",
+    in_reply_to: seed?.in_reply_to ?? "",
+    references: seed?.references ?? "",
+    reply_to_message_id: seed?.reply_to_message_id ?? "",
+  };
+  state.activeDetail = await apiGetConversation(
+    state.activeDetail.conversation.id
+  );
+  state.activeTabId = tab.id;
+  await refreshLists();
+  renderAllRegions();
+}
+
+function bindEmailTabHeaderEvents(
+  viewport: HTMLElement,
+  messageId: string,
+  detailObj: Record<string, unknown> | undefined
+): void {
+  const msg = (detailObj?.message ?? detailObj ?? {}) as Record<string, unknown>;
+  const buildReplySeed = (replyAll: boolean) => {
+    const origSubj = String(msg.subject || "");
+    const reSubj = origSubj.toLowerCase().startsWith("re:")
+      ? origSubj
+      : `Re: ${origSubj}`;
+    const fromAddr = String(msg.from_addr || "");
+    const fromName = String(msg.from_name || fromAddr);
+    const parts = (msg.parts ?? {}) as Record<string, string>;
+    const origBody = parts.new || String(msg.body_text || "");
+    const quoted = origBody
+      .split("\n")
+      .map((ln) => `> ${ln}`)
+      .join("\n");
+    const dt = new Date(Number(msg.date || 0) * 1000).toISOString().slice(0, 16);
+    const ccArr = replyAll
+      ? ((msg.cc ?? []) as Array<Record<string, string>>)
+          .map((c) => c.email)
+          .filter(Boolean)
+      : [];
+    return {
+      to: fromAddr,
+      cc: ccArr.join(", "),
+      subject: reSubj,
+      body: `\n\nOn ${dt}, ${fromName} wrote:\n${quoted}`,
+      in_reply_to: String(msg.message_id || ""),
+      references: `${String(msg.references || "")} ${String(msg.message_id || "")}`.trim(),
+      reply_to_message_id: messageId,
+    };
+  };
+
+  viewport
+    .querySelector(`[data-email-reply="${messageId}"]`)
+    ?.addEventListener("click", () => {
+      void openComposeTab(buildReplySeed(false));
+    });
+
+  viewport
+    .querySelector(`[data-email-reply-all="${messageId}"]`)
+    ?.addEventListener("click", () => {
+      void openComposeTab(buildReplySeed(true));
+    });
+
+  viewport
+    .querySelector(`[data-email-forward="${messageId}"]`)
+    ?.addEventListener("click", () => {
+      const origSubj = String(msg.subject || "");
+      const fwdSubj = origSubj.toLowerCase().startsWith("fwd:")
+        ? origSubj
+        : `Fwd: ${origSubj}`;
+      const parts = (msg.parts ?? {}) as Record<string, string>;
+      const origBody = parts.new || String(msg.body_text || "");
+      void openComposeTab({
+        to: "",
+        subject: fwdSubj,
+        body: `\n\n-----Forwarded message-----\n${origBody}`,
+      });
+    });
+
+  viewport
+    .querySelector(`[data-email-hide="${messageId}"]`)
+    ?.addEventListener("click", async () => {
+      await sidecarHideMailMessage(messageId);
+      await refreshMailState();
+      renderAllRegions();
+    });
+
+  viewport.querySelectorAll("[data-email-move]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const el = btn as HTMLElement;
+      const targetLabel = el.getAttribute("data-target-label") as
+        | "email"
+        | "ping"
+        | "information"
+        | "promotion"
+        | null;
+      if (!targetLabel) return;
+      await sidecarLabelMailMessage(messageId, targetLabel);
+      const updated = await sidecarGetMailMessage(messageId);
+      if (updated.ok) {
+        state.mailMessageDetails[messageId] = updated;
+      }
+      await refreshMailState();
+      renderAllRegions();
+    });
+  });
+
+  viewport.querySelectorAll("[data-email-allow-remote]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const sender = (btn as HTMLElement).getAttribute(
+        "data-email-allow-remote"
+      );
+      if (!sender) return;
+      await sidecarUpdateMailSettings({ allow_remote_images_sender: sender });
+      const updated = await sidecarGetMailMessage(messageId);
+      if (updated.ok) {
+        state.mailMessageDetails[messageId] = updated;
+      }
+      if (state.activeTabId) {
+        void apiControlTab(state.activeTabId, "reload");
+      }
+      renderViewportRegion();
+    });
+  });
+
+  viewport.querySelectorAll("[data-email-save-att]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const el = btn as HTMLElement;
+      const partId = el.getAttribute("data-part-id") || "";
+      const res = await sidecarSaveMailAttachment(messageId, partId);
+      if (res.ok) {
+        el.textContent = "[saved to Downloads]";
+      }
+    });
+  });
+}
+
+async function handleMailSingleKeyShortcuts(e: KeyboardEvent): Promise<void> {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const activeEl = document.activeElement;
+  if (
+    activeEl &&
+    (activeEl.tagName === "INPUT" ||
+      activeEl.tagName === "TEXTAREA" ||
+      activeEl.tagName === "SELECT" ||
+      (activeEl as HTMLElement).isContentEditable)
+  ) {
+    return;
+  }
+  if (!state.activeDetail || state.activeDetail.conversation.origin !== "mail") {
+    return;
+  }
+
+  const key = e.key;
+  const rows = state.mailSearchRows ?? state.mailLaneRows;
+  const isLaneView = state.activeTabId.startsWith("lane:");
+  const activeTab = state.activeDetail.tabs.find(
+    (t) => t.id === state.activeTabId && t.is_open
+  );
+  const currentMsgId =
+    activeTab && activeTab.url.startsWith("satzmail://message/")
+      ? activeTab.url.replace("satzmail://message/", "").split("/")[0].trim()
+      : rows[state.mailSelectedRowIdx]
+        ? String(
+            rows[state.mailSelectedRowIdx].id ??
+              rows[state.mailSelectedRowIdx].latest_message_id ??
+              ""
+          )
+        : "";
+
+  if (isLaneView && key === "j") {
+    e.preventDefault();
+    if (rows.length > 0) {
+      state.mailSelectedRowIdx = Math.min(
+        rows.length - 1,
+        state.mailSelectedRowIdx + 1
+      );
+      renderViewportRegion();
+    }
+    return;
+  }
+  if (isLaneView && key === "k") {
+    e.preventDefault();
+    if (rows.length > 0) {
+      state.mailSelectedRowIdx = Math.max(0, state.mailSelectedRowIdx - 1);
+      renderViewportRegion();
+    }
+    return;
+  }
+  if (isLaneView && key === "Enter") {
+    const row = rows[state.mailSelectedRowIdx];
+    if (row) {
+      e.preventDefault();
+      const mid = String(row.id ?? row.latest_message_id ?? "");
+      const subj = String(row.subject ?? row.merchant ?? "mail");
+      if (mid) {
+        await openEmailMessageTab(mid, subj);
+      }
+    }
+    return;
+  }
+  if (key === "/") {
+    e.preventDefault();
+    const sInput = document.getElementById(
+      "mail-search-input"
+    ) as HTMLInputElement | null;
+    sInput?.focus();
+    sInput?.select();
+    return;
+  }
+  if (key === "c") {
+    e.preventDefault();
+    await openComposeTab();
+    return;
+  }
+  if (key === "r" && currentMsgId) {
+    e.preventDefault();
+    const detail =
+      state.mailMessageDetails[currentMsgId] ??
+      (await sidecarGetMailMessage(currentMsgId));
+    const msg = (detail?.message ?? detail ?? {}) as Record<string, unknown>;
+    const origSubj = String(msg.subject || "");
+    await openComposeTab({
+      to: String(msg.from_addr || ""),
+      subject: origSubj.toLowerCase().startsWith("re:")
+        ? origSubj
+        : `Re: ${origSubj}`,
+      in_reply_to: String(msg.message_id || ""),
+      references: String(msg.references || ""),
+      reply_to_message_id: currentMsgId,
+    });
+    return;
+  }
+  if (key === "e" && currentMsgId) {
+    e.preventDefault();
+    await sidecarHideMailMessage(currentMsgId);
+    await refreshMailState();
+    renderAllRegions();
+    return;
+  }
+  if (
+    (key === "1" || key === "2" || key === "3" || key === "4") &&
+    currentMsgId
+  ) {
+    e.preventDefault();
+    const map: Record<string, "email" | "ping" | "information" | "promotion"> = {
+      "1": "email",
+      "2": "ping",
+      "3": "information",
+      "4": "promotion",
+    };
+    await sidecarLabelMailMessage(currentMsgId, map[key]);
+    await refreshMailState();
+    renderAllRegions();
   }
 }
 

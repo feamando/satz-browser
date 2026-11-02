@@ -1197,6 +1197,26 @@ class SatzSidecarRuntime:
                 self.record_error("bookmark_loop", e)
 
     def get_source_text(self, source_id: str, url: str, title: str = "") -> tuple[str, list[str]]:
+        # Section 4.6 (M13): Email tab source text comes directly from `mail.sqlite` `parts` (new text first, then quote)
+        mail_msg_id = ""
+        if source_id and source_id.startswith("mail:"):
+            mail_msg_id = source_id.split("mail:", 1)[1].strip()
+        elif url and url.startswith("satzmail://"):
+            mail_msg_id = url.split("message/")[-1].split("/")[0].split("?")[0].strip()
+
+        if mail_msg_id and getattr(self, "mail", None) is not None and self.passwords.unlocked:
+            detail = self.mail.get_message_detail(mail_msg_id)
+            if detail.get("ok"):
+                m = detail["message"]
+                parts = m.get("parts") or {}
+                new_t = (parts.get("new") or m.get("body_text") or "").strip()
+                quote_t = (parts.get("quote") or "").strip()
+                header_line = f"From: {m.get('from_name') or ''} <{m.get('from_addr') or ''}>\nSubject: {m.get('subject') or ''}\n"
+                combined_mail = f"{header_line}\n{new_t}"
+                if quote_t:
+                    combined_mail += f"\n\n--- Quoted Thread ---\n{quote_t}"
+                return combined_mail.strip(), []
+
         with self.store_lock:
             row = None
             if source_id:
@@ -2195,6 +2215,15 @@ def make_sidecar_server(
                 return self._json(runtime.mail.get_lane(name=lane_name, cursor=cursor_val))
             if route_path == "/mail/status":
                 return self._json(runtime.mail.get_status())
+            if route_path == "/mail/search":
+                q = query_params.get("q", "")
+                return self._json(runtime.mail.search_messages(q))
+            if route_path.startswith("/mail/message/"):
+                parts = [p for p in route_path.split("/") if p]
+                if len(parts) == 3 and parts[0] == "mail" and parts[1] == "message":
+                    return self._json(runtime.mail.get_message_detail(parts[2]))
+                if len(parts) == 4 and parts[0] == "mail" and parts[1] == "message" and parts[3] == "html":
+                    return self._json(runtime.mail.get_sanitized_message_html(parts[2]))
             return self._json({"error": "not found"}, 404)
 
         def do_POST(self):
@@ -2415,16 +2444,43 @@ def make_sidecar_server(
             if self.path == "/mail/settings":
                 return self._json({"ok": True, "settings": runtime.mail.update_mail_settings(data)})
 
-            if self.path.startswith("/mail/message/") and self.path.endswith("/label"):
+            if self.path.startswith("/mail/message/"):
                 parts = [p for p in self.path.split("/") if p]
-                if len(parts) == 4 and parts[0] == "mail" and parts[1] == "message" and parts[3] == "label":
+                if len(parts) == 4 and parts[0] == "mail" and parts[1] == "message":
                     mid = parts[2]
-                    new_label = str(data.get("label") or "").strip().lower()
-                    try:
-                        res = runtime.mail.pipeline.record_user_correction(mid, new_label)
-                        return self._json(res)
-                    except Exception as e:
-                        return self._json({"ok": False, "error": str(e)}, 400)
+                    action = parts[3]
+                    if action == "label":
+                        new_label = str(data.get("label") or "").strip().lower()
+                        try:
+                            res = runtime.mail.pipeline.record_user_correction(mid, new_label)
+                            return self._json(res)
+                        except Exception as e:
+                            return self._json({"ok": False, "error": str(e)}, 400)
+                    if action == "open":
+                        return self._json(runtime.mail.open_message(mid))
+                    if action == "hide":
+                        return self._json(runtime.mail.hide_message(mid))
+                    if action == "attachment":
+                        part_id = str(data.get("part_id") or "")
+                        return self._json(runtime.mail.save_attachment_to_downloads(mid, part_id))
+
+            if self.path == "/mail/draft":
+                return self._json(runtime.mail.draft_reply(data))
+
+            if self.path == "/mail/send/prepare":
+                return self._json(runtime.mail.prepare_send(data))
+
+            if self.path == "/mail/send":
+                outbox_id = str(data.get("outbox_id") or "")
+                confirm_token = str(data.get("confirm_token") or "")
+                immediate = bool(data.get("immediate_for_test", False))
+                res = runtime.mail.confirm_and_queue_send(outbox_id, confirm_token, immediate_for_test=immediate)
+                return self._json(res, 200 if res.get("ok") else 400)
+
+            if self.path == "/mail/send/undo":
+                outbox_id = str(data.get("outbox_id") or "")
+                res = runtime.mail.undo_send(outbox_id)
+                return self._json(res, 200 if res.get("ok") else 400)
 
             if self.path == "/chat/summarize":
                 messages = data.get("messages") or []

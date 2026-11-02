@@ -1195,3 +1195,200 @@ export async function sidecarGetMailStatus(): Promise<MailStatusSummary> {
     };
   }
 }
+
+export async function sidecarGetMailMessage(
+  messageId: string
+): Promise<Record<string, unknown>> {
+  try {
+    const res = await sidecarFetch(
+      `/mail/message/${encodeURIComponent(messageId)}`
+    );
+    if (!res.ok) return { ok: false };
+    return await res.json();
+  } catch {
+    return { ok: false };
+  }
+}
+
+export async function sidecarOpenMailMessage(
+  messageId: string
+): Promise<Record<string, unknown>> {
+  try {
+    const res = await sidecarFetch(
+      `/mail/message/${encodeURIComponent(messageId)}/open`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      }
+    );
+    return await res.json();
+  } catch {
+    return { ok: false };
+  }
+}
+
+export async function sidecarLabelMailMessage(
+  messageId: string,
+  label: "email" | "ping" | "information" | "promotion"
+): Promise<Record<string, unknown>> {
+  try {
+    const res = await sidecarFetch(
+      `/mail/message/${encodeURIComponent(messageId)}/label`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label }),
+      }
+    );
+    return await res.json();
+  } catch {
+    return { ok: false };
+  }
+}
+
+export async function sidecarHideMailMessage(
+  messageId: string
+): Promise<Record<string, unknown>> {
+  try {
+    const res = await sidecarFetch(
+      `/mail/message/${encodeURIComponent(messageId)}/hide`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      }
+    );
+    return await res.json();
+  } catch {
+    return { ok: false };
+  }
+}
+
+export async function sidecarSaveMailAttachment(
+  messageId: string,
+  partId: string
+): Promise<{ ok: boolean; saved_to?: string; filename?: string; error?: string }> {
+  try {
+    const res = await sidecarFetch(
+      `/mail/message/${encodeURIComponent(messageId)}/attachment`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ part_id: partId }),
+      }
+    );
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarSearchMail(
+  query: string
+): Promise<{ ok: boolean; rows: Array<Record<string, unknown>> }> {
+  try {
+    const res = await sidecarFetch(
+      `/mail/search?q=${encodeURIComponent(query)}`
+    );
+    if (!res.ok) return { ok: false, rows: [] };
+    return await res.json();
+  } catch {
+    return { ok: false, rows: [] };
+  }
+}
+
+export async function sidecarUpdateMailSettings(
+  payload: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  try {
+    const res = await sidecarFetch("/mail/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch {
+    return { ok: false };
+  }
+}
+
+export async function sidecarDraftMailReply(
+  payload: Record<string, unknown>
+): Promise<{
+  ok: boolean;
+  to?: string;
+  subject?: string;
+  body?: string;
+  error?: string;
+}> {
+  try {
+    const res = await sidecarFetch("/mail/draft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarPrepareMailSend(
+  payload: Record<string, unknown>
+): Promise<{
+  ok: boolean;
+  outbox_id?: string;
+  confirm_token?: string;
+  confirm_line?: string;
+  new_recipients?: string[];
+  error?: string;
+}> {
+  try {
+    const res = await sidecarFetch("/mail/send/prepare", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarConfirmMailSend(
+  outboxId: string,
+  confirmToken: string
+): Promise<{
+  ok: boolean;
+  outbox_id?: string;
+  status?: string;
+  undo_window_seconds?: number;
+  error?: string;
+}> {
+  try {
+    const res = await sidecarFetch("/mail/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ outbox_id: outboxId, confirm_token: confirmToken }),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarUndoMailSend(
+  outboxId: string
+): Promise<{ ok: boolean; undone?: boolean; error?: string }> {
+  try {
+    const res = await sidecarFetch("/mail/send/undo", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ outbox_id: outboxId }),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}

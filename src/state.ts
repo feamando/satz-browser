@@ -62,6 +62,29 @@ export interface AppState {
   mailLaneGroups: Array<Record<string, unknown>>;
   mailSelectedRowIdx: number;
   mailStatusMessage: string;
+  mailSearchQuery: string;
+  mailSearchRows: Array<Record<string, unknown>> | null;
+  mailMessageDetails: Record<string, Record<string, unknown>>;
+  mailComposeDrafts: Record<
+    string,
+    {
+      account_id: string;
+      to: string;
+      cc: string;
+      bcc: string;
+      subject: string;
+      body: string;
+      in_reply_to: string;
+      references: string;
+      reply_to_message_id: string;
+      confirm_outbox_id?: string;
+      confirm_token?: string;
+      confirm_line?: string;
+      queued_outbox_id?: string;
+      undo_until?: number;
+      status_msg?: string;
+    }
+  >;
 }
 
 export const state: AppState = {
@@ -123,6 +146,10 @@ export const state: AppState = {
   mailLaneGroups: [],
   mailSelectedRowIdx: 0,
   mailStatusMessage: "",
+  mailSearchQuery: "",
+  mailSearchRows: null,
+  mailMessageDetails: {},
+  mailComposeDrafts: {},
 };
 
 export function escapeHtml(str: string): string {

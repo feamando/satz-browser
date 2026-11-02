@@ -155,6 +155,31 @@ Owner: Nikita Gorshkov · Date: 2026-10-27 · Target: Windows 11 (4090 box) firs
   - `organization` entities skip `FREE_MAIL_DOMAINS` and automated senders (`noreply@`, `no-reply@`, `notifications@`).
   - `Store.add_passages` indexes `new` text for `email` and `information` messages under `conversation_id = 'mail'`, while excluding `promotion` and `ping` messages from the knowledge store.
 
+---
+
+## 7. Milestone 13 (M13): Mail UI, `satzmail://` & SMTP Send Gate
+
+- **Custom Scheme `satzmail://` & Strict Content-Security-Policy (`src-tauri/src/lib.rs`, `sidecar/satz_mail.py`):**
+  - Registered `satzmail://` in Tauri (`register_uri_scheme_protocol("satzmail", ...)`).
+  - Fetches sanitized HTML (`GET /mail/message/<id>/html` with `X-Satz-Token`) and serves with `Content-Security-Policy: default-src 'none'; img-src data: cid:; style-src 'unsafe-inline'; font-src data:`.
+  - `sanitize_email_html` strips `<script>`, `<iframe>`, `<object>`, `<embed>`, inline `on*` handlers, and replaces remote `http(s)://` images with a local `data:image/gif` 1x1 placeholder unless the user explicitly enables `[load remote images]` for that sender (`img-src https: data: cid:`).
+  - Plain-text emails render inside `<pre>` in the same monochrome terminal style.
+  - Email tabs (`kind = 'mail'`, `satzmail://message/<id>`) skip WebView2 DOM capture; `get_source_text` reads `parts.new` and `parts.quote` directly from `mail.sqlite`.
+- **Four Lanes, Email Tab Header, Agent Rail Cards, FTS5 Search & Keyboard Shortcuts (`src/mail.ts`, `src/main.ts`):**
+  - Rendered all 4 lanes: `inbox` (one-line rows with `reply` and `due MM-DD` tags), `pings` (grouped by platform and author), `orders` (order cards with merchant, order number, status, tracking link, total, and chronological emails), and `promos` (company cards with active codes, value, expiry, `[copy]`, expired codes, and recent promo emails).
+  - Native email tab header above the webview: `from`, `to`, `cc`, `reply (r)`, `reply all`, `forward`, `hide (e)`, `[move to: 1 inbox / 2 pings / 3 orders / 4 promos]`, `[load remote images]`, and attachment `[save]` buttons (saving to `Downloads`).
+  - Agent rail (`Mod+J`) on email tabs renders sender Brain card, order card (if `information`), and recent emails with that sender above the chat composer.
+  - Added FTS5 search (`GET /mail/search?q=`, `/`) and single-key mail shortcuts (`j`/`k`, `Enter`, `r`, `c`, `e`, `1`–`4`, `/`) active when no text input is focused.
+- **Compose Tab & SMTP Send Gate (`sidecar/satz_mail.py`, `src/mail.ts`):**
+  - Compose tab (`kind = 'compose'`) supports plain-text authoring and `[draft with gemma]` (`POST /mail/draft`), which writes into the compose body and never queues or sends mail.
+  - **Send Gate Verification Log:**
+    1. `Mod+Enter` or `[send]` calls `POST /mail/send/prepare`, creating an `outbox` row in `confirm` status, marking first-time recipients as `[new]`, and returning a single-use `confirm_token` (2-minute expiry) + confirm line (`send from <acct> to <rcpt> · "<subject>" · <N> words [confirm] [cancel]`).
+    2. `POST /mail/send` rejects any call missing a valid, unused `confirm_token` (`0` sends without `[confirm]`).
+    3. Clicking `[confirm]` queues the message with `send_after = now + 10s` and shows `[undo]`; clicking `[undo]` (`POST /mail/send/undo`) cancels the timer and restores the row to `draft`.
+    4. After the 10s window, dispatches via `smtplib`, enforces the `20 sends/hour/account` rate limit, sets `\Answered` on the replied-to message, `APPEND`s to `Sent` for non-Gmail/Outlook IMAP servers, and stores the sent message locally in `mail.sqlite`.
+  - Verified in `test_m13_satzmail_csp_sanitization_smtp_send_gate_confirm_token_undo_and_correction`.
+
+
 
 
 

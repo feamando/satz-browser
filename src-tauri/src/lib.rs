@@ -625,12 +625,91 @@ fn ensure_default_desktop_on_windows() {
     }
 }
 
+fn fetch_satzmail_from_sidecar(app: &AppHandle, message_id: &str) -> (String, String) {
+    let default_csp =
+        "default-src 'none'; img-src data: cid:; style-src 'unsafe-inline'; font-src data:"
+            .to_string();
+    let default_html =
+        "<!DOCTYPE html><html><body style=\"background:#000;color:#e8e8e8;font-family:monospace;\"><pre>(unable to load mail message)</pre></body></html>"
+            .to_string();
+
+    let (port, token) = if let Some(sc) = app.try_state::<SidecarState>() {
+        (sc.settings.port, sc.token.clone())
+    } else {
+        (8020, String::new())
+    };
+
+    let addr_str = format!("127.0.0.1:{}", port);
+    let Ok(sock_addr) = addr_str.parse() else {
+        return (default_csp, default_html);
+    };
+
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    if let Ok(mut stream) = TcpStream::connect_timeout(&sock_addr, Duration::from_millis(1200)) {
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+        let safe_id: String = message_id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        let req = format!(
+            "GET /mail/message/{}/html HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nX-Satz-Token: {}\r\nConnection: close\r\n\r\n",
+            safe_id, port, token
+        );
+        if stream.write_all(req.as_bytes()).is_ok() {
+            let mut resp_bytes = Vec::new();
+            if stream.read_to_end(&mut resp_bytes).is_ok() {
+                let raw_resp = String::from_utf8_lossy(&resp_bytes);
+                if let Some((_hdrs, body)) = raw_resp.split_once("\r\n\r\n") {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body.trim()) {
+                        let csp = parsed
+                            .get("csp")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&default_csp)
+                            .to_string();
+                        let html = parsed
+                            .get("html")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&default_html)
+                            .to_string();
+                        return (csp, html);
+                    }
+                }
+            }
+        }
+    }
+    (default_csp, default_html)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(windows)]
     ensure_default_desktop_on_windows();
 
     let app = tauri::Builder::default()
+        .register_uri_scheme_protocol("satzmail", |ctx, request| {
+            let uri_str = request.uri().to_string();
+            // Extract `<id>` from `satzmail://message/<id>` or `satzmail://localhost/message/<id>`
+            let msg_id = uri_str
+                .split("message/")
+                .nth(1)
+                .unwrap_or("")
+                .split(&['/', '?', '#'][..])
+                .next()
+                .unwrap_or("")
+                .trim();
+
+            let (csp, html_body) = fetch_satzmail_from_sidecar(ctx.app_handle(), msg_id);
+            tauri::http::Response::builder()
+                .status(200)
+                .header("Content-Type", "text/html; charset=utf-8")
+                .header("Content-Security-Policy", csp)
+                .body(html_body.into_bytes())
+                .unwrap()
+        })
         .setup(|app| {
             let app_data_dir = app
                 .path()

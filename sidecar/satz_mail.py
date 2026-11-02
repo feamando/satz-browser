@@ -1832,3 +1832,758 @@ class SatzMailManager:
             "counts": counts,
             **pipe_status,
         }
+
+    # ── Milestone M13: Message Reading, Search, Compose & SMTP Send Gate ──
+
+    def get_message_detail(self, message_id: str) -> dict[str, Any]:
+        """
+        Section 4.6 & 4.8: Returns headers, parts, labels, extracts, actions, attachments,
+        and Agent rail context (sender Brain card, recent emails with sender, and order card).
+        """
+        self.passwords._check_autolock()
+        if not self.passwords.unlocked:
+            return {"ok": False, "error": "Profile is locked."}
+        with self.db_lock:
+            conn = self._ensure_connection()
+            msg_row = conn.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
+            if not msg_row:
+                return {"ok": False, "error": f"Message {message_id} not found."}
+            msg = dict(msg_row)
+
+            parts_rows = conn.execute(
+                "SELECT kind, text FROM parts WHERE message_id = ?",
+                (message_id,),
+            ).fetchall()
+            parts = {r["kind"]: r["text"] for r in parts_rows}
+
+            lbl_row = conn.execute(
+                "SELECT label, confidence, source, model_version, at FROM labels WHERE message_id = ?",
+                (message_id,),
+            ).fetchone()
+            label_info = dict(lbl_row) if lbl_row else {"label": "email", "confidence": 0.0, "source": "rule", "model_version": "cold"}
+
+            ext_rows = conn.execute(
+                "SELECT field, value, source, confidence FROM extracts WHERE message_id = ?",
+                (message_id,),
+            ).fetchall()
+            extracts = {r["field"]: r["value"] for r in ext_rows}
+
+            act_row = conn.execute(
+                "SELECT needs_reply, due_date, ask FROM actions WHERE message_id = ?",
+                (message_id,),
+            ).fetchone()
+            action_info = dict(act_row) if act_row else {"needs_reply": 0, "due_date": None, "ask": ""}
+
+            att_rows = conn.execute(
+                "SELECT filename, mime, size, part_id, saved_path FROM attachments WHERE message_id = ? ORDER BY part_id ASC",
+                (message_id,),
+            ).fetchall()
+            attachments = [dict(r) for r in att_rows]
+
+            from_addr = (msg.get("from_addr") or "").strip().lower()
+            recent_rows = conn.execute(
+                """
+                SELECT id, subject, date, snippet, seen
+                FROM messages
+                WHERE LOWER(from_addr) = ? AND id != ? AND hidden = 0
+                ORDER BY date DESC
+                LIMIT 5
+                """,
+                (from_addr, message_id),
+            ).fetchall()
+            recent_with_sender = [dict(r) for r in recent_rows]
+
+            settings = self.get_mail_settings()
+            allow_remote = from_addr in (settings.get("remote_images_senders") or [])
+
+        # Look up sender card in Brain
+        sender_card: dict[str, Any] | None = None
+        brain = getattr(self.runtime, "brain", None)
+        if brain is not None and from_addr:
+            for ent in brain.list_entities():
+                if ent.get("type") in ("person", "organization"):
+                    ent_email = str(ent.get("attributes", {}).get("email") or "").lower()
+                    ent_dom = str(ent.get("attributes", {}).get("domain") or "").lower()
+                    if ent_email == from_addr or (ent_dom and from_addr.endswith(f"@{ent_dom}")):
+                        sender_card = ent
+                        break
+
+        try:
+            to_list = json.loads(msg.get("to_json") or "[]")
+        except Exception:
+            to_list = []
+        try:
+            cc_list = json.loads(msg.get("cc_json") or "[]")
+        except Exception:
+            cc_list = []
+
+        return {
+            "ok": True,
+            "message": {
+                **msg,
+                "to": to_list,
+                "cc": cc_list,
+                "parts": parts,
+                "label": label_info["label"],
+                "label_info": label_info,
+                "extracts": extracts,
+                "action": action_info,
+                "attachments": attachments,
+                "allow_remote_images": allow_remote,
+                "recent_with_sender": recent_with_sender,
+                "sender_card": sender_card,
+            },
+        }
+
+    def get_sanitized_message_html(self, message_id: str) -> dict[str, Any]:
+        """
+        Section 4.6: Returns sanitized HTML and CSP header for `satzmail://message/<id>`.
+        Plain text emails render as `<pre>` in the same scheme.
+        """
+        self.passwords._check_autolock()
+        if not self.passwords.unlocked:
+            return {
+                "ok": False,
+                "html": "<html><body><pre>[profile locked]</pre></body></html>",
+                "csp": "default-src 'none'; img-src data: cid:; style-src 'unsafe-inline'; font-src data:",
+            }
+
+        with self.db_lock:
+            conn = self._ensure_connection()
+            row = conn.execute(
+                "SELECT id, from_addr, from_name, subject, body_text, has_html FROM messages WHERE id = ?",
+                (message_id,),
+            ).fetchone()
+            if not row:
+                return {
+                    "ok": False,
+                    "html": "<html><body><pre>(message not found)</pre></body></html>",
+                    "csp": "default-src 'none'; img-src data: cid:; style-src 'unsafe-inline'; font-src data:",
+                }
+            from_addr = (row["from_addr"] or "").strip().lower()
+            body_text = row["body_text"] or ""
+            has_html = int(row["has_html"] or 0) == 1
+            settings = self.get_mail_settings()
+
+        allow_remote = from_addr in (settings.get("remote_images_senders") or [])
+        img_src = "https: data: cid:" if allow_remote else "data: cid:"
+        csp = f"default-src 'none'; img-src {img_src}; style-src 'unsafe-inline'; font-src data:"
+
+        raw_html = ""
+        if has_html:
+            html_file = self._current_mail_html_dir() / f"{message_id}.html"
+            if html_file.exists():
+                try:
+                    raw_html = html_file.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    raw_html = ""
+
+        base_style = (
+            "<style>"
+            "html,body{background:#000000;color:#e8e8e8;font-family:'JetBrains Mono',monospace;"
+            "font-size:13px;line-height:1.5;margin:0;padding:14px;}"
+            "a{color:#e8e8e8;text-decoration:underline;}"
+            "pre{white-space:pre-wrap;word-break:break-word;margin:0;font-family:inherit;}"
+            "blockquote{border-left:1px solid #333333;margin:8px 0;padding-left:10px;color:#9a9a9a;}"
+            "</style>"
+        )
+
+        if raw_html:
+            clean_body = sanitize_email_html(raw_html, allow_remote_images=allow_remote)
+            final_html = f"<!DOCTYPE html><html><head><meta charset=\"utf-8\">{base_style}</head><body>{clean_body}</body></html>"
+        else:
+            escaped_txt = html_lib.escape(body_text or "(empty message)")
+            final_html = f"<!DOCTYPE html><html><head><meta charset=\"utf-8\">{base_style}</head><body><pre>{escaped_txt}</pre></body></html>"
+
+        return {
+            "ok": True,
+            "message_id": message_id,
+            "from_addr": from_addr,
+            "allow_remote_images": allow_remote,
+            "csp": csp,
+            "html": final_html,
+        }
+
+    def open_message(self, message_id: str) -> dict[str, Any]:
+        """
+        Section 4.4 & 4.8: Marks message read locally (`seen = 1`) and sets `\\Seen` on the
+        IMAP server if `mark_read_on_server` is enabled (default on).
+        """
+        if not self.passwords.unlocked:
+            return {"ok": False, "error": "Profile is locked."}
+        with self.db_lock:
+            conn = self._ensure_connection()
+            row = conn.execute(
+                "SELECT id, account_id, folder, uid, seen FROM messages WHERE id = ?",
+                (message_id,),
+            ).fetchone()
+            if not row:
+                return {"ok": False, "error": "Message not found."}
+            conn.execute("UPDATE messages SET seen = 1 WHERE id = ?", (message_id,))
+            conn.commit()
+            acct_id = row["account_id"]
+            folder = row["folder"]
+            uid = int(row["uid"] or 0)
+            acct = conn.execute("SELECT * FROM accounts WHERE id = ?", (acct_id,)).fetchone()
+            settings = self.get_mail_settings()
+
+        server_marked = False
+        if (
+            settings.get("mark_read_on_server", True)
+            and acct is not None
+            and str(acct["protocol"] or "imap").lower() == "imap"
+            and uid > 0
+        ):
+            username, password = self._resolve_credentials_for_prefix(acct["vault_prefix"])
+            if username and password:
+                try:
+                    imap = self._open_imap_client(acct["in_host"], int(acct["in_port"]), acct["in_security"])
+                    try:
+                        imap.login(username, password)
+                        st, _ = imap.select(f'"{folder}"' if " " in folder else folder, readonly=False)
+                        if st == "OK":
+                            imap.uid("STORE", str(uid), "+FLAGS.SILENT", "(\\Seen)")
+                            server_marked = True
+                    finally:
+                        try:
+                            imap.logout()
+                        except Exception:
+                            pass
+                except Exception as exc:
+                    self.runtime.record_error("mail_open_seen", f"{message_id}: {exc}")
+
+        return {"ok": True, "message_id": message_id, "seen": 1, "server_marked": server_marked}
+
+    def hide_message(self, message_id: str) -> dict[str, Any]:
+        """
+        Section 4.4 & 4.8: Local archive (`hidden = 1`). Never deletes or moves on the server.
+        """
+        if not self.passwords.unlocked:
+            return {"ok": False, "error": "Profile is locked."}
+        with self.db_lock:
+            conn = self._ensure_connection()
+            conn.execute("UPDATE messages SET hidden = 1 WHERE id = ?", (message_id,))
+            conn.commit()
+        return {"ok": True, "message_id": message_id, "hidden": 1}
+
+    def save_attachment_to_downloads(self, message_id: str, part_id: str) -> dict[str, Any]:
+        """
+        Section 4.6: Downloads attachment part to the user's `Downloads` folder.
+        """
+        if not self.passwords.unlocked:
+            return {"ok": False, "error": "Profile is locked."}
+        with self.db_lock:
+            conn = self._ensure_connection()
+            row = conn.execute(
+                "SELECT filename, saved_path FROM attachments WHERE message_id = ? AND part_id = ?",
+                (message_id, str(part_id)),
+            ).fetchone()
+            if not row:
+                return {"ok": False, "error": "Attachment not found."}
+            src_path = Path(row["saved_path"])
+            fname = row["filename"] or f"attachment-{part_id}"
+
+        if not src_path.exists():
+            return {"ok": False, "error": "Attachment file missing on disk."}
+
+        downloads_dir = Path.home() / "Downloads"
+        downloads_dir.mkdir(parents=True, exist_ok=True)
+        dest_path = downloads_dir / re.sub(r"[^A-Za-z0-9._-]+", "_", fname)
+        try:
+            dest_path.write_bytes(src_path.read_bytes())
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "saved_to": str(dest_path), "filename": fname}
+
+    def search_messages(self, query: str, limit: int = 50) -> dict[str, Any]:
+        """
+        Section 4.8: FTS5 search over `messages_fts` (`subject`, `from_name`, `from_addr`, `new_text`).
+        """
+        self.passwords._check_autolock()
+        if not self.passwords.unlocked:
+            return {"ok": False, "unlocked": False, "rows": []}
+        q = (query or "").strip()
+        if not q:
+            return {"ok": True, "unlocked": True, "rows": []}
+
+        # Sanitize FTS5 query tokens safely
+        tokens = [re.sub(r'[^A-Za-z0-9@._äöüÄÖÜß-]+', "", t) for t in q.split()]
+        tokens = [t for t in tokens if t]
+        if not tokens:
+            return {"ok": True, "unlocked": True, "rows": []}
+        fts_expr = " AND ".join(f'"{t}"*' for t in tokens)
+
+        with self.db_lock:
+            conn = self._ensure_connection()
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT m.id, m.account_id, m.thread_id, m.from_name, m.from_addr, m.subject,
+                           m.snippet, m.date, m.seen, COALESCE(l.label, 'email') AS label
+                    FROM messages_fts f
+                    JOIN messages m ON m.id = f.message_id
+                    LEFT JOIN labels l ON l.message_id = m.id
+                    WHERE messages_fts MATCH ? AND m.hidden = 0
+                    ORDER BY m.date DESC
+                    LIMIT ?
+                    """,
+                    (fts_expr, max(1, min(100, int(limit or 50)))),
+                ).fetchall()
+            except Exception:
+                like_pat = f"%{q}%"
+                rows = conn.execute(
+                    """
+                    SELECT m.id, m.account_id, m.thread_id, m.from_name, m.from_addr, m.subject,
+                           m.snippet, m.date, m.seen, COALESCE(l.label, 'email') AS label
+                    FROM messages m
+                    LEFT JOIN labels l ON l.message_id = m.id
+                    WHERE m.hidden = 0 AND (m.subject LIKE ? OR m.from_addr LIKE ? OR m.body_text LIKE ?)
+                    ORDER BY m.date DESC
+                    LIMIT ?
+                    """,
+                    (like_pat, like_pat, like_pat, max(1, min(100, int(limit or 50)))),
+                ).fetchall()
+        return {"ok": True, "unlocked": True, "query": q, "rows": [dict(r) for r in rows]}
+
+    def draft_reply(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """
+        Section 4.7: Gemma drafts a reply into the compose body.
+        Gemma NEVER sends and has no send path; this only returns draft text (and optionally
+        saves a `status = 'draft'` row in `outbox`, never `queued`).
+        """
+        if not self.passwords.unlocked:
+            return {"ok": False, "error": "Profile is locked."}
+        message_id = str(payload.get("message_id") or "").strip()
+        instructions = str(payload.get("instructions") or payload.get("prompt") or "").strip()
+        subject = str(payload.get("subject") or "").strip()
+        to_addr = str(payload.get("to") or "").strip()
+        quoted_context = ""
+
+        if message_id:
+            detail = self.get_message_detail(message_id)
+            if detail.get("ok"):
+                m = detail["message"]
+                subject = subject or (
+                    m["subject"] if str(m["subject"]).lower().startswith("re:") else f"Re: {m['subject']}"
+                )
+                to_addr = to_addr or m["from_addr"]
+                new_part = m.get("parts", {}).get("new") or m.get("body_text") or ""
+                dt_str = datetime.datetime.fromtimestamp(
+                    float(m.get("date") or time.time()), tz=datetime.timezone.utc
+                ).strftime("%Y-%m-%d %H:%M UTC")
+                sender_disp = m.get("from_name") or m.get("from_addr") or "Sender"
+                quoted_Lines = "\n".join(f"> {ln}" for ln in new_part.splitlines())
+                quoted_context = f"\n\nOn {dt_str}, {sender_disp} wrote:\n{quoted_Lines}"
+
+        draft_body = ""
+        if getattr(self.runtime, "gemma_model", None) is not None and getattr(self.runtime, "gemma_tokenizer", None) is not None:
+            try:
+                import torch
+
+                tok, model = self.runtime.ensure_gemma()
+                prompt = (
+                    f"Write a concise, plain-text email reply.\n"
+                    f"Recipient: {to_addr}\n"
+                    f"Subject: {subject}\n"
+                    f"Instructions: {instructions or 'Write a helpful, clear reply.'}\n"
+                    f"Original message:\n{quoted_context[:1500]}\n\n"
+                    f"Reply body only:"
+                )
+                msgs = [{"role": "user", "content": prompt}]
+                inputs = tok.apply_chat_template(
+                    msgs, add_generation_prompt=True, return_tensors="pt", return_dict=True
+                ).to(model.device)
+                with torch.no_grad():
+                    out_ids = model.generate(**inputs, max_new_tokens=220, do_sample=False)
+                gen_ids = out_ids[0][inputs["input_ids"].shape[-1] :]
+                draft_body = tok.decode(gen_ids, skip_special_tokens=True).strip()
+            except Exception as exc:
+                self.runtime.record_error("mail_draft", exc)
+
+        if not draft_body:
+            if instructions:
+                draft_body = f"Hi,\n\n{instructions}\n\nBest,\n"
+            else:
+                draft_body = "Hi,\n\nThanks for your email. I will follow up shortly.\n\nBest,\n"
+
+        full_body = f"{draft_body}{quoted_context}" if quoted_context else draft_body
+        return {
+            "ok": True,
+            "to": to_addr,
+            "subject": subject,
+            "body": full_body,
+            "status": "draft",
+        }
+
+    def prepare_send(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """
+        Section 4.7 Send Gate Step 1:
+        `POST /mail/send/prepare` creates an `outbox` row in `confirm` status, checks which
+        recipients are `new` (never written to or received from), generates a single-use
+        `confirm_token` expiring in 2 minutes (120s), and returns the confirm line summary.
+        """
+        self.passwords._check_autolock()
+        if not self.passwords.unlocked:
+            return {"ok": False, "error": "Profile is locked."}
+
+        account_id = str(payload.get("account_id") or "").strip()
+        raw_to = payload.get("to") or []
+        raw_cc = payload.get("cc") or []
+        raw_bcc = payload.get("bcc") or []
+        if isinstance(raw_to, str):
+            to_list = [x.strip() for x in raw_to.split(",") if x.strip()]
+        else:
+            to_list = [str(x).strip() for x in raw_to if str(x).strip()]
+        if isinstance(raw_cc, str):
+            cc_list = [x.strip() for x in raw_cc.split(",") if x.strip()]
+        else:
+            cc_list = [str(x).strip() for x in raw_cc if str(x).strip()]
+        if isinstance(raw_bcc, str):
+            bcc_list = [x.strip() for x in raw_bcc.split(",") if x.strip()]
+        else:
+            bcc_list = [str(x).strip() for x in raw_bcc if str(x).strip()]
+
+        if not to_list:
+            return {"ok": False, "error": "At least one 'To' recipient is required."}
+
+        subject = str(payload.get("subject") or "(no subject)").strip()
+        body = str(payload.get("body") or "")
+        in_reply_to = str(payload.get("in_reply_to") or "").strip()
+        references = str(payload.get("references") or "").strip()
+        reply_to_message_id = str(payload.get("reply_to_message_id") or "").strip()
+
+        with self.db_lock:
+            conn = self._ensure_connection()
+            if account_id:
+                acct = conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
+            else:
+                acct = conn.execute("SELECT * FROM accounts ORDER BY rowid ASC LIMIT 1").fetchone()
+            if not acct:
+                return {"ok": False, "error": "No mail account configured."}
+            account_id = acct["id"]
+            from_email = acct["email"]
+
+            if reply_to_message_id and not in_reply_to:
+                orig = conn.execute(
+                    'SELECT message_id, "references" FROM messages WHERE id = ?',
+                    (reply_to_message_id,),
+                ).fetchone()
+                if orig and orig["message_id"]:
+                    in_reply_to = orig["message_id"]
+                    prev_refs = (orig["references"] or "").strip()
+                    references = f"{prev_refs} {in_reply_to}".strip()
+
+            # Check known vs new recipients
+            new_recipients: list[str] = []
+            for rcpt in to_list + cc_list + bcc_list:
+                rcpt_low = rcpt.lower()
+                known = conn.execute(
+                    """
+                    SELECT 1 FROM messages
+                    WHERE LOWER(from_addr) = ? OR LOWER(to_json) LIKE ? OR LOWER(cc_json) LIKE ?
+                    LIMIT 1
+                    """,
+                    (rcpt_low, f"%{rcpt_low}%", f"%{rcpt_low}%"),
+                ).fetchone()
+                if not known:
+                    new_recipients.append(rcpt)
+
+            now = time.time()
+            outbox_id = f"out-{uuid.uuid4().hex[:12]}"
+            conn.execute(
+                """
+                INSERT INTO outbox (
+                    id, account_id, to_json, cc_json, bcc_json, subject, body,
+                    in_reply_to, "references", status, error, created_at, send_after, sent_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirm', '', ?, 0.0, 0.0)
+                """,
+                (
+                    outbox_id,
+                    account_id,
+                    json.dumps(to_list, ensure_ascii=False),
+                    json.dumps(cc_list, ensure_ascii=False),
+                    json.dumps(bcc_list, ensure_ascii=False),
+                    subject,
+                    body,
+                    in_reply_to,
+                    references,
+                    now,
+                ),
+            )
+            conn.commit()
+
+        confirm_token = f"ctok-{uuid.uuid4().hex}"
+        self._confirm_tokens[confirm_token] = {
+            "outbox_id": outbox_id,
+            "expires_at": now + 120.0,
+            "used": False,
+            "reply_to_message_id": reply_to_message_id,
+        }
+
+        word_count = len(re.findall(r"\S+", body))
+        to_disp = ", ".join(
+            f"{r} [new]" if r in new_recipients else r for r in to_list
+        )
+        cc_part = f", cc {len(cc_list)}" if cc_list else ""
+        confirm_line = f'send from {from_email} to {to_disp}{cc_part} · "{subject}" · {word_count} words'
+
+        return {
+            "ok": True,
+            "outbox_id": outbox_id,
+            "confirm_token": confirm_token,
+            "expires_in_seconds": 120,
+            "from_email": from_email,
+            "to": to_list,
+            "cc": cc_list,
+            "bcc": bcc_list,
+            "new_recipients": new_recipients,
+            "subject": subject,
+            "word_count": word_count,
+            "confirm_line": confirm_line,
+        }
+
+    def confirm_and_queue_send(
+        self,
+        outbox_id: str,
+        confirm_token: str,
+        immediate_for_test: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Section 4.7 Send Gate Step 2 & 3:
+        Requires a valid, single-use, non-expired `confirm_token` from `/mail/send/prepare`.
+        Enforces the 20 sends/hour/account limit, transitions the outbox row to `queued`
+        with `send_after = now + 10s` (for 10s `[undo]`), and dispatches via `smtplib`.
+        """
+        self.passwords._check_autolock()
+        if not self.passwords.unlocked:
+            return {"ok": False, "error": "Profile is locked."}
+
+        outbox_id = (outbox_id or "").strip()
+        confirm_token = (confirm_token or "").strip()
+        if not outbox_id or not confirm_token:
+            return {"ok": False, "error": "Missing outbox_id or confirm_token."}
+
+        tok_entry = self._confirm_tokens.get(confirm_token)
+        now = time.time()
+        if not tok_entry:
+            return {"ok": False, "error": "Invalid confirm_token."}
+        if tok_entry.get("used"):
+            return {"ok": False, "error": "confirm_token has already been used."}
+        if float(tok_entry.get("expires_at") or 0.0) < now:
+            return {"ok": False, "error": "confirm_token has expired (2 minute limit)."}
+        if tok_entry.get("outbox_id") != outbox_id:
+            return {"ok": False, "error": "confirm_token does not match outbox_id."}
+
+        # Mark token used (single-use)
+        tok_entry["used"] = True
+
+        with self.db_lock:
+            conn = self._ensure_connection()
+            ob_row = conn.execute("SELECT * FROM outbox WHERE id = ?", (outbox_id,)).fetchone()
+            if not ob_row:
+                return {"ok": False, "error": "Outbox item not found."}
+            account_id = ob_row["account_id"]
+
+            # Rate limit check: max 20 sends per hour per account (setting)
+            settings = self.get_mail_settings()
+            hourly_limit = int(settings.get("sends_per_hour_limit") or 20)
+            sent_last_hour = conn.execute(
+                """
+                SELECT COUNT(*) AS c FROM outbox
+                WHERE account_id = ? AND status = 'sent' AND sent_at >= ?
+                """,
+                (account_id, now - 3600.0),
+            ).fetchone()["c"]
+            if int(sent_last_hour) >= hourly_limit:
+                conn.execute(
+                    "UPDATE outbox SET status = 'draft', error = ? WHERE id = ?",
+                    (f"Rate limit exceeded ({hourly_limit} sends/hour)", outbox_id),
+                )
+                conn.commit()
+                return {"ok": False, "error": f"Rate limit exceeded ({hourly_limit} sends/hour)."}
+
+            send_after = now if immediate_for_test else (now + 10.0)
+            conn.execute(
+                "UPDATE outbox SET status = 'queued', send_after = ?, error = '' WHERE id = ?",
+                (send_after, outbox_id),
+            )
+            conn.commit()
+
+        reply_to_mid = str(tok_entry.get("reply_to_message_id") or "")
+        if immediate_for_test:
+            return self._execute_outbox_send(outbox_id, reply_to_message_id=reply_to_mid)
+
+        timer = threading.Timer(10.0, self._execute_outbox_send, args=(outbox_id, reply_to_mid))
+        timer.daemon = True
+        self._send_timers[outbox_id] = timer
+        timer.start()
+
+        return {
+            "ok": True,
+            "outbox_id": outbox_id,
+            "status": "queued",
+            "send_after": send_after,
+            "undo_window_seconds": 10,
+        }
+
+    def undo_send(self, outbox_id: str) -> dict[str, Any]:
+        """
+        Section 4.7: Cancels a queued send within the 10-second `[undo]` window and returns
+        the outbox row to `draft` status.
+        """
+        outbox_id = (outbox_id or "").strip()
+        timer = self._send_timers.pop(outbox_id, None)
+        if timer is not None:
+            timer.cancel()
+
+        with self.db_lock:
+            conn = self._ensure_connection()
+            row = conn.execute("SELECT status FROM outbox WHERE id = ?", (outbox_id,)).fetchone()
+            if not row:
+                return {"ok": False, "error": "Outbox row not found."}
+            if row["status"] == "sent":
+                return {"ok": False, "error": "Message was already sent."}
+            conn.execute(
+                "UPDATE outbox SET status = 'draft', send_after = 0.0 WHERE id = ?",
+                (outbox_id,),
+            )
+            conn.commit()
+        return {"ok": True, "outbox_id": outbox_id, "status": "draft", "undone": True}
+
+    def _execute_outbox_send(self, outbox_id: str, reply_to_message_id: str = "") -> dict[str, Any]:
+        self._send_timers.pop(outbox_id, None)
+        with self.db_lock:
+            conn = self._ensure_connection()
+            ob = conn.execute("SELECT * FROM outbox WHERE id = ?", (outbox_id,)).fetchone()
+            if not ob or ob["status"] != "queued":
+                return {"ok": False, "error": "Outbox item is no longer queued."}
+            ob_dict = dict(ob)
+            acct = conn.execute("SELECT * FROM accounts WHERE id = ?", (ob_dict["account_id"],)).fetchone()
+            if not acct:
+                conn.execute("UPDATE outbox SET status = 'failed', error = 'Account missing' WHERE id = ?", (outbox_id,))
+                conn.commit()
+                return {"ok": False, "error": "Account missing."}
+            acct_dict = dict(acct)
+
+        username, password = self._resolve_credentials_for_prefix(acct_dict["vault_prefix"])
+        if not username:
+            username = acct_dict["email"]
+        if not username or not password:
+            err = "Missing SMTP credentials in vault"
+            with self.db_lock:
+                conn = self._ensure_connection()
+                conn.execute("UPDATE outbox SET status = 'failed', error = ? WHERE id = ?", (err, outbox_id))
+                conn.commit()
+            return {"ok": False, "error": err}
+
+        to_list = json.loads(ob_dict.get("to_json") or "[]")
+        cc_list = json.loads(ob_dict.get("cc_json") or "[]")
+        bcc_list = json.loads(ob_dict.get("bcc_json") or "[]")
+        all_rcpts = [r for r in (to_list + cc_list + bcc_list) if r]
+
+        msg = EmailMessage()
+        msg_id_hdr = f"<{uuid.uuid4().hex}@satz.mail>"
+        msg["Message-ID"] = msg_id_hdr
+        msg["From"] = acct_dict["email"]
+        msg["To"] = ", ".join(to_list)
+        if cc_list:
+            msg["Cc"] = ", ".join(cc_list)
+        msg["Subject"] = ob_dict.get("subject") or "(no subject)"
+        msg["Date"] = email.utils.format_datetime(datetime.datetime.now(datetime.timezone.utc))
+        if ob_dict.get("in_reply_to"):
+            msg["In-Reply-To"] = ob_dict["in_reply_to"]
+        if ob_dict.get("references"):
+            msg["References"] = ob_dict["references"]
+        msg.set_content(ob_dict.get("body") or "")
+        raw_bytes = msg.as_bytes()
+
+        try:
+            smtp = self._open_smtp_client(
+                acct_dict["smtp_host"],
+                int(acct_dict["smtp_port"]),
+                acct_dict["smtp_security"],
+            )
+            try:
+                smtp.login(username, password)
+                if hasattr(smtp, "send_message"):
+                    smtp.send_message(msg, from_addr=acct_dict["email"], to_addrs=all_rcpts)
+                elif hasattr(smtp, "sendmail"):
+                    smtp.sendmail(acct_dict["email"], all_rcpts, raw_bytes)
+            finally:
+                try:
+                    smtp.quit()
+                except Exception:
+                    pass
+
+            now_ts = time.time()
+            # Store sent message in local thread (`messages` table under folder='Sent')
+            sent_local_id = self._store_parsed_raw_email(
+                account_id=acct_dict["id"],
+                folder_name="Sent",
+                role="sent",
+                uid=0,
+                pop_uidl="",
+                raw_bytes=raw_bytes,
+                seen=1,
+                answered=0,
+                flagged=0,
+            )
+
+            with self.db_lock:
+                conn = self._ensure_connection()
+                conn.execute(
+                    "UPDATE outbox SET status = 'sent', sent_at = ?, error = '' WHERE id = ?",
+                    (now_ts, outbox_id),
+                )
+                if reply_to_message_id:
+                    conn.execute("UPDATE messages SET answered = 1 WHERE id = ?", (reply_to_message_id,))
+                elif ob_dict.get("in_reply_to"):
+                    conn.execute(
+                        "UPDATE messages SET answered = 1 WHERE message_id = ?",
+                        (ob_dict["in_reply_to"],),
+                    )
+                conn.commit()
+
+            # Server writes allowed by Section 4.4:
+            # 1) Set `\Answered` on the original message on IMAP server
+            # 2) `APPEND` to Sent for providers that do not auto-save SMTP sends (not Gmail, not Outlook)
+            if str(acct_dict.get("protocol") or "imap").lower() == "imap":
+                in_host_low = str(acct_dict.get("in_host") or "").lower()
+                is_gmail_or_outlook = ("gmail.com" in in_host_low) or ("office365.com" in in_host_low) or ("outlook.com" in in_host_low)
+                try:
+                    imap = self._open_imap_client(acct_dict["in_host"], int(acct_dict["in_port"]), acct_dict["in_security"])
+                    try:
+                        imap.login(username, password)
+                        if reply_to_message_id:
+                            with self.db_lock:
+                                orig_row = self._ensure_connection().execute(
+                                    "SELECT folder, uid FROM messages WHERE id = ?",
+                                    (reply_to_message_id,),
+                                ).fetchone()
+                            if orig_row and int(orig_row["uid"] or 0) > 0:
+                                st, _ = imap.select(orig_row["folder"], readonly=False)
+                                if st == "OK":
+                                    imap.uid("STORE", str(orig_row["uid"]), "+FLAGS.SILENT", "(\\Answered)")
+                        if not is_gmail_or_outlook and hasattr(imap, "append"):
+                            imap.append("Sent", "(\\Seen)", None, raw_bytes)
+                    finally:
+                        try:
+                            imap.logout()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            return {"ok": True, "outbox_id": outbox_id, "status": "sent", "sent_message_id": sent_local_id}
+
+        except Exception as exc:
+            err_str = str(exc)
+            self.runtime.record_error("mail_send", f"{outbox_id}: {err_str}")
+            with self.db_lock:
+                conn = self._ensure_connection()
+                conn.execute(
+                    "UPDATE outbox SET status = 'draft', error = ? WHERE id = ?",
+                    (err_str, outbox_id),
+                )
+                conn.commit()
+            return {"ok": False, "error": err_str, "outbox_id": outbox_id, "status": "draft"}

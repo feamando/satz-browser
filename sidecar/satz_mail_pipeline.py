@@ -836,6 +836,7 @@ class SatzMailPipeline:
         self._distilbert_model: Any = None
         self._load_active_model_if_exists()
 
+        self._stop_event = threading.Event()
         self._worker_thread: threading.Thread | None = None
         if start_worker:
             self._worker_thread = threading.Thread(
@@ -844,6 +845,13 @@ class SatzMailPipeline:
                 name="satz-mail-pipeline",
             )
             self._worker_thread.start()
+
+    def stop_worker(self) -> None:
+        self.auto_wake = False
+        self._stop_event.set()
+        self._wake_event.set()
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            self._worker_thread.join(timeout=2.0)
 
     def _active_model_dir(self) -> Path:
         db_path = self.mail._current_mail_db_path()
@@ -934,10 +942,12 @@ class SatzMailPipeline:
         return processed
 
     def _pipeline_worker_loop(self) -> None:
-        while True:
+        while not self._stop_event.is_set():
             self._wake_event.wait(timeout=5.0)
             self._wake_event.clear()
-            while True:
+            if self._stop_event.is_set() or not self.auto_wake:
+                continue
+            while not self._stop_event.is_set() and self.auto_wake:
                 with self.lock:
                     if not self._queue:
                         self.is_processing = False
@@ -1630,21 +1640,17 @@ class SatzMailPipeline:
                     """,
                     (source_tag, mail_url, msg["subject"], new_text, time.time()),
                 )
-                passage_items = [
-                    {
-                        "url": mail_url,
-                        "domain": domain or "mail",
-                        "title": msg["subject"],
-                        "text": new_text[:4000],
-                        "trust": 0.9,
-                        "score": 0.9,
-                    }
-                ]
-                self.runtime.store.add_passages(
-                    passage_items,
-                    entity_name,
-                    f"[conv:mail] {msg['subject']}",
-                )
+                if getattr(self.runtime, "ingest_queue", None) is not None and not getattr(self.runtime, "pause_learning", False):
+                    self.runtime.ingest_queue.put(
+                        {
+                            "conversation_id": "mail",
+                            "source_id": source_tag,
+                            "url": mail_url,
+                            "domain": domain or "mail",
+                            "title": msg["subject"],
+                            "text": new_text[:4000],
+                        }
+                    )
                 try:
                     from src.planck3.util import norm_text
 
