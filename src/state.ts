@@ -5,6 +5,7 @@ import type {
   Conversation,
   ConversationDetail,
   DigestEntry,
+  DoctorRoleEntry,
   FindingItem,
   KnowledgeSummary,
   LocalModelId,
@@ -45,6 +46,7 @@ export interface AppState {
   streamingSteps: string[];
   lastUserPrompt: string;
   sidecar: SidecarHealth;
+  doctorRoles: DoctorRoleEntry[];
   digestItems: DigestEntry[];
   knowledge: KnowledgeSummary;
   bookmarkTooltipNotice: string;
@@ -139,6 +141,7 @@ export const state: AppState = {
     pause_learning: false,
     errors: [],
   },
+  doctorRoles: [],
   digestItems: [],
   knowledge: {
     pause_learning: false,

@@ -37,7 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-SATZ_SIDECAR_VERSION = "0.4.0"
+SATZ_SIDECAR_VERSION = "0.5.0"
 ALLOWED_CORS_ORIGINS = {
     "http://tauri.localhost",
     "tauri://localhost",
@@ -58,6 +58,18 @@ STATIC_SYSTEM_PROMPT = (
     '<brain_store>{"type": "place", "name": "Short Entity Name", "summary": "One-line summary", "attributes": {"address": "...", "email": "..."}, "content": "Full details"}</brain_store>\n'
     "  Valid types: 'place', 'person', 'account', 'organization', 'project', 'note', 'decision'.\n"
     "- Every time you use a fact from a numbered source, cite it inline as [1], [2], etc.\n"
+    "- Keep answers concise and never use em dashes."
+)
+
+STATIC_SYSTEM_PROMPT_NO_SOURCES = (
+    "You are the local AI assistant inside the Satz browser, connected to the user's persistent local SATZ BRAIN KNOWLEDGE BASE (BRAIN.md index + entity files on disk).\n\n"
+    "CRITICAL RULES:\n"
+    "- No open browser tab text or external sources were captured for this turn (SOURCES is empty).\n"
+    "- NEVER invent, fabricate, or guess content from an open tab, email, or web page when SOURCES is empty. If the user asks about an open tab or email and SOURCES is empty, state clearly that no text was captured from the tab and suggest recapturing or turning on [+ web].\n"
+    "- Do NOT output fake [1] or [2] source citations when SOURCES is empty.\n"
+    "- When the user asks to store, save, or remember information into the knowledge base / Brain, confirm clearly what you are storing AND output a <brain_store> JSON block at the very end of your response in this exact format:\n"
+    '<brain_store>{"type": "place", "name": "Short Entity Name", "summary": "One-line summary", "attributes": {"address": "...", "email": "..."}, "content": "Full details"}</brain_store>\n'
+    "  Valid types: 'place', 'person', 'account', 'organization', 'project', 'note', 'decision'.\n"
     "- Keep answers concise and never use em dashes."
 )
 
@@ -363,6 +375,7 @@ class SatzSidecarRuntime:
         self.gemma_tok = None
         self.gemma_model = None
         self.gemma_loading = False
+        self.gemma_device = self._detect_gemma_device()
 
         self.answerer = None
         self.answer_sessions: collections.OrderedDict[str, Any] = collections.OrderedDict()
@@ -539,6 +552,18 @@ class SatzSidecarRuntime:
         return self.pause_learning
 
     # ── Checkpoint resolution ────────────────────────────────────────────
+    def _detect_gemma_device(self) -> str:
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                return "cuda"
+            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                return "mps"
+        except Exception:
+            pass
+        return "cpu"
+
     def _gemma_dir(self) -> Path:
         p = Path(self.gemma_rel_path)
         return p if p.is_absolute() else (self.sgs_root / p)
@@ -566,40 +591,149 @@ class SatzSidecarRuntime:
                 return cand
         return None
 
+    def get_doctor(self) -> dict[str, Any]:
+        gemma_dir = self._gemma_dir()
+        hertz_ckpt = self._hertz_reader_ckpt()
+        planck_ckpt = self._planck_reader_ckpt()
+        gemma_dev = self.gemma_device or self._detect_gemma_device()
+
+        enc_ckpt = self.sgs_root / "checkpoints" / "planck13" / "best.pt"
+        enc_tok = self.sgs_root / "data" / "wikipedia" / "tokenizer.model"
+        enc_ready = bool(getattr(self.brain, "_encoder_ready", False))
+        enc_files_exist = enc_ckpt.exists() and enc_tok.exists()
+
+        roles = [
+            {
+                "role": "chat",
+                "model": "gemma-4-e4b",
+                "state": (
+                    "missing"
+                    if not gemma_dir.exists()
+                    else ("cpu_only" if gemma_dev == "cpu" else "ready")
+                ),
+                "device": gemma_dev,
+                "path": str(gemma_dir),
+                "fix": (
+                    f"Place Gemma 4 E4B weights at {gemma_dir}"
+                    if not gemma_dir.exists()
+                    else (
+                        "Install CUDA or Apple Silicon MPS PyTorch build for GPU acceleration"
+                        if gemma_dev == "cpu"
+                        else ""
+                    )
+                ),
+            },
+            {
+                "role": "web_answer",
+                "model": "planck3 (web)",
+                "state": "ready" if (hertz_ckpt is not None and hertz_ckpt.exists()) else "missing",
+                "device": "cpu",
+                "path": str(hertz_ckpt or (self.sgs_root / "checkpoints/xreader_hertz_rc/reader.pt")),
+                "fix": (
+                    ""
+                    if (hertz_ckpt is not None and hertz_ckpt.exists())
+                    else f"Copy reader.pt to {self.sgs_root / 'checkpoints/xreader_hertz_rc/reader.pt'}"
+                ),
+            },
+            {
+                "role": "reader_hertz",
+                "model": "hertz (reader)",
+                "state": "ready" if (hertz_ckpt is not None and hertz_ckpt.exists()) else "missing",
+                "device": "cpu",
+                "path": str(hertz_ckpt or (self.sgs_root / "checkpoints/xreader_hertz_rc/reader.pt")),
+                "fix": (
+                    ""
+                    if (hertz_ckpt is not None and hertz_ckpt.exists())
+                    else f"Copy reader.pt to {self.sgs_root / 'checkpoints/xreader_hertz_rc/reader.pt'}"
+                ),
+            },
+            {
+                "role": "reader_planck",
+                "model": "planck (reader)",
+                "state": "ready" if (planck_ckpt is not None and planck_ckpt.exists()) else "missing",
+                "device": "cpu",
+                "path": str(planck_ckpt or (self.sgs_root / "checkpoints/xreader_planck_rc/reader.pt")),
+                "fix": (
+                    ""
+                    if (planck_ckpt is not None and planck_ckpt.exists())
+                    else f"Copy reader.pt to {self.sgs_root / 'checkpoints/xreader_planck_rc/reader.pt'} (optional; hertz reader is active)"
+                ),
+            },
+            {
+                "role": "brain_encoder",
+                "model": "planck13",
+                "state": "ready" if (enc_ready or enc_files_exist) else "missing",
+                "device": "cpu",
+                "path": str(enc_ckpt),
+                "fix": (
+                    ""
+                    if (enc_ready or enc_files_exist)
+                    else f"Place {enc_ckpt} and {enc_tok} to enable semantic Brain vector embeddings"
+                ),
+            },
+        ]
+        return {
+            "ok": True,
+            "version": SATZ_SIDECAR_VERSION,
+            "roles": roles,
+        }
+
     def get_health(self) -> dict[str, Any]:
         gemma_dir = self._gemma_dir()
         hertz_ckpt = self._hertz_reader_ckpt()
         planck_ckpt = self._planck_reader_ckpt()
+        gemma_dev = self.gemma_device or self._detect_gemma_device()
 
         def gemma_status():
             if self.gemma_model is not None:
-                return {"id": "gemma-4-e4b", "state": "ready", "detail": str(gemma_dir.name)}
+                return {
+                    "id": "gemma-4-e4b",
+                    "state": "ready",
+                    "device": gemma_dev,
+                    "detail": str(gemma_dir.name),
+                }
             if self.gemma_loading:
-                return {"id": "gemma-4-e4b", "state": "loading", "detail": "loading into GPU..."}
+                return {
+                    "id": "gemma-4-e4b",
+                    "state": "loading",
+                    "device": gemma_dev,
+                    "detail": f"loading into {gemma_dev}...",
+                }
             if gemma_dir.exists():
-                return {"id": "gemma-4-e4b", "state": "not_loaded", "detail": str(gemma_dir.name)}
-            return {"id": "gemma-4-e4b", "state": "missing", "detail": f"missing {gemma_dir}"}
+                return {
+                    "id": "gemma-4-e4b",
+                    "state": "not_loaded",
+                    "device": gemma_dev,
+                    "detail": str(gemma_dir.name),
+                }
+            return {
+                "id": "gemma-4-e4b",
+                "state": "missing",
+                "device": gemma_dev,
+                "detail": f"missing {gemma_dir}",
+            }
 
         def planck3_status():
             if self.answerer is not None:
-                return {"id": "planck3 (web)", "state": "ready", "detail": "x-hertz + template"}
+                return {"id": "planck3 (web)", "state": "ready", "device": "cpu", "detail": "x-hertz + template"}
             if self.planck3_loading:
-                return {"id": "planck3 (web)", "state": "loading", "detail": "loading pipeline..."}
+                return {"id": "planck3 (web)", "state": "loading", "device": "cpu", "detail": "loading pipeline..."}
             if hertz_ckpt is not None:
-                return {"id": "planck3 (web)", "state": "not_loaded", "detail": "hertz int8 + template"}
-            return {"id": "planck3 (web)", "state": "missing", "detail": "missing reader checkpoint"}
+                return {"id": "planck3 (web)", "state": "not_loaded", "device": "cpu", "detail": "hertz int8 + template"}
+            return {"id": "planck3 (web)", "state": "missing", "device": "cpu", "detail": "missing reader checkpoint"}
 
         def reader_status(model_id: str, ckpt: Path | None):
             if model_id in self.readers:
-                return {"id": model_id, "state": "ready", "detail": ckpt.parent.name if ckpt else "loaded"}
+                return {"id": model_id, "state": "ready", "device": "cpu", "detail": ckpt.parent.name if ckpt else "loaded"}
             if self.reader_loading.get(model_id):
-                return {"id": model_id, "state": "loading", "detail": "loading reader..."}
+                return {"id": model_id, "state": "loading", "device": "cpu", "detail": "loading reader..."}
             if ckpt is not None and ckpt.exists():
-                return {"id": model_id, "state": "not_loaded", "detail": f"{ckpt.parent.name}/reader.pt"}
-            return {"id": model_id, "state": "missing", "detail": f"missing {model_id} checkpoint"}
+                return {"id": model_id, "state": "not_loaded", "device": "cpu", "detail": f"{ckpt.parent.name}/reader.pt"}
+            return {"id": model_id, "state": "missing", "device": "cpu", "detail": f"missing {model_id} checkpoint"}
 
         return {
             "online": True,
+            "version": SATZ_SIDECAR_VERSION,
             "models": [
                 gemma_status(),
                 planck3_status(),
@@ -627,13 +761,26 @@ class SatzSidecarRuntime:
                 import torch
                 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-                print(f"[satz-sidecar] loading Gemma 4 E4B from {gemma_dir} ...", flush=True)
+                dev = self._detect_gemma_device()
+                self.gemma_device = dev
+                print(f"[satz-sidecar] loading Gemma 4 E4B from {gemma_dir} onto {dev} ...", flush=True)
                 tok = AutoTokenizer.from_pretrained(str(gemma_dir))
-                model = AutoModelForCausalLM.from_pretrained(
-                    str(gemma_dir),
-                    dtype=torch.bfloat16,
-                    device_map="auto" if torch.cuda.is_available() else None,
-                )
+                if dev == "cuda":
+                    model = AutoModelForCausalLM.from_pretrained(
+                        str(gemma_dir),
+                        dtype=torch.bfloat16,
+                        device_map="auto",
+                    )
+                elif dev == "mps":
+                    model = AutoModelForCausalLM.from_pretrained(
+                        str(gemma_dir),
+                        dtype=torch.float16,
+                    ).to("mps")
+                else:
+                    model = AutoModelForCausalLM.from_pretrained(
+                        str(gemma_dir),
+                        dtype=torch.float32,
+                    )
                 model.eval()
                 self.gemma_tok = tok
                 self.gemma_model = model
@@ -706,11 +853,13 @@ class SatzSidecarRuntime:
         dwell_seconds: float = 0.0,
         visible_text: str | None = None,
         findings: list[dict[str, Any]] | None = None,
+        capture_mode: str | None = None,
     ) -> dict[str, Any]:
         from src.planck3.web import domain_of, extract_jsonld, extract_main_text
 
         domain = domain_of(url) if url else ""
-        capture_mode = "dom"
+        requested_mode = (capture_mode or "").strip().lower()
+        effective_mode = requested_mode if requested_mode in ("dom", "fetch", "timeout") else "dom"
         text = ""
         extra_lines: list[str] = []
         extracted_findings: list[dict[str, Any]] = list(findings or [])
@@ -750,8 +899,16 @@ class SatzSidecarRuntime:
             text = trafilatura_text
 
         # Only fall back to unauthenticated python web.fetch if no DOM html or visible_text was provided
-        if not text and not html and not clean_visible and url and url.startswith(("http://", "https://")):
-            capture_mode = "fetch"
+        # AND the caller did not explicitly mark the capture as a live-tab timeout (`capture_mode == "timeout"`).
+        if (
+            effective_mode != "timeout"
+            and not text
+            and not html
+            and not clean_visible
+            and url
+            and url.startswith(("http://", "https://"))
+        ):
+            effective_mode = "fetch"
             try:
                 page = self.web.fetch(url)
                 if page.get("html"):
@@ -761,6 +918,7 @@ class SatzSidecarRuntime:
                         extracted_findings = self._extract_findings_from_html(page["html"], url, title)
             except Exception as fe:
                 self.record_error("web_fetch", f"{url}: {fe}")
+        capture_mode = effective_mode
 
         effective_title = (title or domain or url or "untitled").strip()
         now = time.time()
@@ -1776,8 +1934,11 @@ class SatzSidecarRuntime:
         prompt_sections.append(f"USER REQUEST: {user_msg}")
         user_prompt = "\n\n".join(prompt_sections)
 
+        has_sources = bool(context_str and context_str.strip())
+        sys_prompt = STATIC_SYSTEM_PROMPT if has_sources else STATIC_SYSTEM_PROMPT_NO_SOURCES
+
         return [
-            {"role": "system", "content": STATIC_SYSTEM_PROMPT},
+            {"role": "system", "content": sys_prompt},
             {"role": "user", "content": user_prompt},
         ]
 
@@ -2024,9 +2185,26 @@ class SatzSidecarRuntime:
 
         if self.gemma_model is None:
             yield {
-                "status": "loading gemma-4-e4b into GPU memory...",
+                "status": f"loading gemma-4-e4b into {self.gemma_device or self._detect_gemma_device()} memory...",
                 "phase": "model_load",
             }
+            load_done = threading.Event()
+            load_err: list[Exception] = []
+
+            def _load_worker():
+                try:
+                    self.ensure_gemma()
+                except Exception as exc:
+                    load_err.append(exc)
+                finally:
+                    load_done.set()
+
+            lt = threading.Thread(target=_load_worker, daemon=True)
+            lt.start()
+            while not load_done.wait(timeout=5.0):
+                yield {"phase": "heartbeat"}
+            if load_err:
+                raise load_err[0]
         tok, model = self.ensure_gemma()
         import torch
         from transformers import TextIteratorStreamer
@@ -2052,6 +2230,7 @@ class SatzSidecarRuntime:
         )
 
         gen_errors: list[str] = []
+        chunk_queue: queue.Queue[str | None] = queue.Queue()
 
         def _generate():
             try:
@@ -2064,15 +2243,31 @@ class SatzSidecarRuntime:
                 except Exception:
                     pass
 
+        def _pump_streamer():
+            try:
+                for piece in streamer:
+                    chunk_queue.put(piece)
+            finally:
+                chunk_queue.put(None)
+
         gen_thread = threading.Thread(target=_generate, daemon=True)
+        pump_thread = threading.Thread(target=_pump_streamer, daemon=True)
         gen_thread.start()
+        pump_thread.start()
 
         full_raw = ""
         emitted_len = 0
         in_brain_tag = False
         first_token_seen = False
 
-        for chunk in streamer:
+        while True:
+            try:
+                chunk = chunk_queue.get(timeout=5.0)
+            except queue.Empty:
+                yield {"phase": "heartbeat"}
+                continue
+            if chunk is None:
+                break
             if not chunk:
                 continue
             if not first_token_seen:
@@ -2467,6 +2662,8 @@ def make_sidecar_server(
             route_path = parsed_url.path
             query_params = dict(urllib.parse.parse_qsl(parsed_url.query))
 
+            if route_path == "/doctor":
+                return self._json(runtime.get_doctor())
             if route_path == "/digest":
                 return self._json(runtime.get_digest())
             if route_path == "/knowledge":
@@ -2527,6 +2724,7 @@ def make_sidecar_server(
                     dwell_seconds=float(data.get("dwell_seconds") or 0.0),
                     visible_text=data.get("visible_text"),
                     findings=data.get("findings") if isinstance(data.get("findings"), list) else None,
+                    capture_mode=str(data.get("capture_mode") or "") or None,
                 )
                 return self._json(res)
 

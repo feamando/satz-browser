@@ -42,6 +42,47 @@ export function renderKnowledgeView(
   const activeProfile = profileInfo?.active_profile ?? null;
   const vault = kb.vault;
   const vaultServices = vault?.services ?? [];
+  const doctorRoles = state.doctorRoles ?? [];
+
+  const doctorSectionHtml = `
+      <div class="knowledge-section">
+        <div class="panel-header">
+          <span>models (/doctor · ${doctorRoles.length || 5} roles)</span>
+        </div>
+        ${
+          doctorRoles.length === 0
+            ? `<div class="muted">models [offline]: start sidecar to inspect model checkpoints and device placement.</div>`
+            : doctorRoles
+                .map((dr) => {
+                  const badge =
+                    dr.state === "ready"
+                      ? `[ready · ${escapeHtml(dr.device)}]`
+                      : dr.state === "cpu_only"
+                        ? `[cpu_only · ${escapeHtml(dr.device)}]`
+                        : `[missing]`;
+                  return `
+                    <div class="source-row">
+                      <div class="source-row-top">
+                        <span>
+                          <strong>${escapeHtml(dr.role)}</strong>
+                          <span class="muted">· ${escapeHtml(dr.model)}</span>
+                        </span>
+                        <span class="${dr.state === "missing" ? "msg-error-badge" : "status-item"}">${badge}</span>
+                      </div>
+                      ${
+                        dr.fix
+                          ? `<div class="muted">fix: ${escapeHtml(dr.fix)}</div>`
+                          : dr.path
+                            ? `<div class="muted">${escapeHtml(dr.path)}</div>`
+                            : ""
+                      }
+                    </div>
+                  `;
+                })
+                .join("")
+        }
+      </div>
+  `;
 
   container.innerHTML = `
     <div class="knowledge-view">
@@ -68,6 +109,8 @@ export function renderKnowledgeView(
             : ""
         }
       </div>
+
+      ${doctorSectionHtml}
 
       <div class="knowledge-section">
         <div class="panel-header">

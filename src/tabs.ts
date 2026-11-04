@@ -164,21 +164,43 @@ export async function syncWebviewsNow(): Promise<void> {
   }
 
   const visible: TabBoundsSpec[] = [];
+  const viewportH = Math.max(0, Math.round(window.innerHeight));
+  const tabStripRect = document
+    .getElementById("region-tab-strip")
+    ?.getBoundingClientRect();
+  const minStripBottom = tabStripRect ? Math.ceil(tabStripRect.bottom) : 34;
+
+  const measureSlotBounds = (tabId: string, url: string, slot: HTMLElement): TabBoundsSpec => {
+    const rect = slot.getBoundingClientRect();
+    const parentEl = slot.parentElement;
+    const toolbarEl =
+      parentEl?.querySelector(".site-tab-toolbar") ??
+      parentEl?.querySelector(".email-tab-header");
+    const toolbarRect = toolbarEl?.getBoundingClientRect();
+    const toolbarBottom = Math.max(
+      minStripBottom,
+      toolbarRect ? Math.ceil(toolbarRect.bottom) : minStripBottom
+    );
+    const clampedTop = Math.max(Math.round(rect.top), toolbarBottom);
+    const clampedHeight = Math.max(0, Math.round(rect.bottom) - clampedTop);
+    return {
+      tab_id: tabId,
+      url,
+      x: Math.round(rect.left),
+      y: clampedTop,
+      w: Math.max(0, Math.round(rect.width)),
+      h: clampedHeight,
+      toolbar_bottom: toolbarBottom,
+      viewport_h: viewportH,
+    };
+  };
 
   if (state.compareMode) {
     for (const tabId of state.compareTabIds.slice(0, 4)) {
       const tab = detail.tabs.find((t) => t.id === tabId && t.is_open);
       const slot = document.getElementById(`webview-slot-${tabId}`);
       if (tab && tab.kind !== "compose" && slot) {
-        const rect = slot.getBoundingClientRect();
-        visible.push({
-          tab_id: tab.id,
-          url: tab.url,
-          x: Math.round(rect.left),
-          y: Math.round(rect.top),
-          w: Math.max(0, Math.round(rect.width)),
-          h: Math.max(0, Math.round(rect.height)),
-        });
+        visible.push(measureSlotBounds(tab.id, tab.url, slot));
       }
     }
   } else {
@@ -187,15 +209,7 @@ export async function syncWebviewsNow(): Promise<void> {
     );
     const slot = document.getElementById(`webview-slot-${state.activeTabId}`);
     if (tab && tab.kind !== "compose" && slot) {
-      const rect = slot.getBoundingClientRect();
-      visible.push({
-        tab_id: tab.id,
-        url: tab.url,
-        x: Math.round(rect.left),
-        y: Math.round(rect.top),
-        w: Math.max(0, Math.round(rect.width)),
-        h: Math.max(0, Math.round(rect.height)),
-      });
+      visible.push(measureSlotBounds(tab.id, tab.url, slot));
     }
   }
 

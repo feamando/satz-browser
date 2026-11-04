@@ -16,6 +16,7 @@ const LOCAL_MODELS: LocalModelId[] = [
 export interface ChatActions {
   onSendMessage: (text: string) => void;
   onChangeModel: (model: LocalModelId) => void;
+  onUsePlanckInstead?: (text: string) => void;
   onToggleWeb: () => void;
   onToggleMail?: () => void;
   onClickCitation: (citationIndex: number, sourceId: string | null) => void;
@@ -331,6 +332,7 @@ function renderMessageBlock(
     role === "assistant" &&
     (trimmed.startsWith("[err]") ||
       trimmed.startsWith("[error:") ||
+      trimmed.startsWith("gemma stopped responding after 30 s.") ||
       trimmed.startsWith("models [offline]"));
 
   const formattedBody = formatCitationsInText(content, sourceIds, citationCheck);
@@ -353,7 +355,8 @@ function renderMessageBlock(
     isErrorMsg && state.lastUserPrompt
       ? `
       <div class="composer-controls">
-        <button class="citation-link" data-retry-prompt="${escapeHtml(state.lastUserPrompt)}">[retry request]</button>
+        <button class="citation-link" data-retry-prompt="${escapeHtml(state.lastUserPrompt)}">[retry]</button>
+        <button class="citation-link" data-use-planck-prompt="${escapeHtml(state.lastUserPrompt)}">[use planck instead]</button>
       </div>
     `
       : "";
@@ -563,6 +566,20 @@ function bindChatEvents(container: HTMLElement, actions: ChatActions): void {
       if (state.isStreaming) return;
       const prompt = (btn as HTMLElement).getAttribute("data-retry-prompt");
       if (prompt) actions.onSendMessage(prompt);
+    });
+  });
+
+  container.querySelectorAll("[data-use-planck-prompt]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (state.isStreaming) return;
+      const prompt = (btn as HTMLElement).getAttribute("data-use-planck-prompt");
+      if (!prompt) return;
+      if (actions.onUsePlanckInstead) {
+        actions.onUsePlanckInstead(prompt);
+      } else {
+        actions.onChangeModel("planck3 (web)");
+        actions.onSendMessage(prompt);
+      }
     });
   });
 

@@ -6,11 +6,12 @@ export function renderStatusLine(): void {
   if (!container) return;
 
   const gemmaEntry = state.sidecar.models.find((m) => m.id === "gemma-4-e4b");
+  const gemmaDevSuffix = gemmaEntry?.device ? ` · ${escapeHtml(gemmaEntry.device)}` : "";
   const gemmaWarmLabel =
     state.sidecar.online && gemmaEntry?.state === "ready"
-      ? `<span>gemma [warm]</span>`
+      ? `<span>gemma [warm${gemmaDevSuffix}]</span>`
       : state.sidecar.online && gemmaEntry?.state === "loading"
-        ? `<span>gemma [loading]</span>`
+        ? `<span>gemma [loading${gemmaDevSuffix}]</span>`
         : "";
 
   const modelEntry = state.sidecar.models.find(

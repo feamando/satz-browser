@@ -11,6 +11,7 @@ import type {
   ConversationOrigin,
   ConversationStatus,
   DigestEntry,
+  DoctorRoleEntry,
   FindingItem,
   KnowledgeSummary,
   LocalModelId,
@@ -458,6 +459,7 @@ export async function sidecarFetchHealth(): Promise<SidecarHealth> {
     const data = (await res.json()) as SidecarHealth;
     return {
       online: true,
+      version: data.version,
       models: data.models ?? [
         { id: "gemma-4-e4b", state: "not_loaded" },
         { id: "planck3 (web)", state: "not_loaded" },
@@ -482,6 +484,17 @@ export async function sidecarFetchHealth(): Promise<SidecarHealth> {
       pause_learning: false,
       errors: [],
     };
+  }
+}
+
+export async function sidecarFetchDoctor(): Promise<DoctorRoleEntry[]> {
+  try {
+    const res = await sidecarFetch("/doctor");
+    if (!res.ok) return [];
+    const data = (await res.json()) as { roles?: DoctorRoleEntry[] };
+    return Array.isArray(data.roles) ? data.roles : [];
+  } catch {
+    return [];
   }
 }
 
@@ -974,7 +987,8 @@ export async function sidecarStreamChat(
   onError?: (err: string) => void,
   summary?: string,
   onSourceStats?: (stats: SourceStatEntry[]) => void,
-  mail?: boolean
+  mail?: boolean,
+  stallTimeoutMs = 30000
 ): Promise<{
   source_ids: string[];
   cited_sources?: Array<{ url: string; title: string }>;
@@ -986,6 +1000,7 @@ export async function sidecarStreamChat(
   source_stats?: SourceStatEntry[];
   findings?: FindingItem[];
   error?: string;
+  stalled?: boolean;
 }> {
   const res = await sidecarFetch("/chat", {
     method: "POST",
@@ -1016,69 +1031,107 @@ export async function sidecarStreamChat(
   let sourceStats: SourceStatEntry[] | undefined;
   let findings: FindingItem[] | undefined;
   let streamError: string | undefined;
+  let stalled = false;
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-    for (const rawLine of lines) {
-      const line = rawLine.trim();
-      if (!line.startsWith("data:")) continue;
-      const jsonStr = line.slice(5).trim();
-      if (!jsonStr) continue;
-      try {
-        const payload = JSON.parse(jsonStr) as {
-          delta?: string;
-          status?: string;
-          phase?: string;
-          error?: string;
-          done?: boolean;
-          source_ids?: string[];
-          cited_sources?: Array<{ url: string; title: string }>;
-          proposals?: BrainProposalItem[];
-          citation_check?: CitationCheckEntry[];
-          citations_ok?: number;
-          citations_flagged?: number;
-          annotated_text?: string;
-          source_stats?: SourceStatEntry[];
-          findings?: FindingItem[];
-        };
-        if (payload.source_stats && Array.isArray(payload.source_stats)) {
-          sourceStats = payload.source_stats;
-          if (onSourceStats) onSourceStats(payload.source_stats);
-        }
-        if (payload.status && onStatus) {
-          onStatus(payload.status, payload.phase);
-        }
-        if (payload.error) {
-          streamError = payload.error;
-          if (onError) onError(payload.error);
-        }
-        if (payload.delta) {
-          onDelta(payload.delta);
-        }
-        if (payload.done) {
-          finalSourceIds = payload.source_ids ?? [];
-          citedSources = payload.cited_sources;
-          proposals = payload.proposals;
-          citationCheck = payload.citation_check;
-          citationsOk = payload.citations_ok;
-          citationsFlagged = payload.citations_flagged;
-          annotatedText = payload.annotated_text;
-          if (payload.source_stats) {
-            sourceStats = payload.source_stats;
-          }
-          if (payload.findings && Array.isArray(payload.findings)) {
-            findings = payload.findings;
-          }
-        }
-      } catch {
-        // Ignore malformed SSE line
+  const readChunkWithWatchdog = async (): Promise<ReadableStreamReadResult<Uint8Array>> => {
+    let timerId: ReturnType<typeof setTimeout> | null = null;
+    try {
+      return await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => {
+          timerId = setTimeout(() => {
+            reject(new Error("__SATZ_STALL_TIMEOUT__"));
+          }, stallTimeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timerId !== null) {
+        clearTimeout(timerId);
       }
     }
+  };
+
+  try {
+    while (true) {
+      const { value, done } = await readChunkWithWatchdog();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line.startsWith("data:")) continue;
+        const jsonStr = line.slice(5).trim();
+        if (!jsonStr) continue;
+        try {
+          const payload = JSON.parse(jsonStr) as {
+            delta?: string;
+            status?: string;
+            phase?: string;
+            error?: string;
+            done?: boolean;
+            source_ids?: string[];
+            cited_sources?: Array<{ url: string; title: string }>;
+            proposals?: BrainProposalItem[];
+            citation_check?: CitationCheckEntry[];
+            citations_ok?: number;
+            citations_flagged?: number;
+            annotated_text?: string;
+            source_stats?: SourceStatEntry[];
+            findings?: FindingItem[];
+          };
+          if (payload.phase === "heartbeat") {
+            continue;
+          }
+          if (payload.source_stats && Array.isArray(payload.source_stats)) {
+            sourceStats = payload.source_stats;
+            if (onSourceStats) onSourceStats(payload.source_stats);
+          }
+          if (payload.status && onStatus) {
+            onStatus(payload.status, payload.phase);
+          }
+          if (payload.error) {
+            streamError = payload.error;
+            if (onError) onError(payload.error);
+          }
+          if (payload.delta) {
+            onDelta(payload.delta);
+          }
+          if (payload.done) {
+            finalSourceIds = payload.source_ids ?? [];
+            citedSources = payload.cited_sources;
+            proposals = payload.proposals;
+            citationCheck = payload.citation_check;
+            citationsOk = payload.citations_ok;
+            citationsFlagged = payload.citations_flagged;
+            annotatedText = payload.annotated_text;
+            if (payload.source_stats) {
+              sourceStats = payload.source_stats;
+            }
+            if (payload.findings && Array.isArray(payload.findings)) {
+              findings = payload.findings;
+            }
+          }
+        } catch {
+          // Ignore malformed SSE line
+        }
+      }
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message === "__SATZ_STALL_TIMEOUT__") {
+      stalled = true;
+      streamError = "gemma stopped responding after 30 s.";
+      try {
+        await reader.cancel();
+      } catch {
+        // Ignore cancel errors
+      }
+      if (onError) onError(streamError);
+    } else {
+      throw err;
+    }
   }
+
   return {
     source_ids: finalSourceIds,
     cited_sources: citedSources,
@@ -1090,6 +1143,7 @@ export async function sidecarStreamChat(
     source_stats: sourceStats,
     findings,
     error: streamError,
+    stalled,
   };
 }
 

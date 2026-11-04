@@ -127,6 +127,8 @@ export interface TabBoundsSpec {
   y: number;
   w: number;
   h: number;
+  toolbar_bottom?: number;
+  viewport_h?: number;
 }
 
 export interface TabPageEvent {
@@ -148,11 +150,23 @@ export type ModelHealthState = "not_loaded" | "loading" | "ready" | "missing";
 export interface ModelHealthEntry {
   id: LocalModelId;
   state: ModelHealthState;
+  device?: string;
+  detail?: string;
   reason?: string;
+}
+
+export interface DoctorRoleEntry {
+  role: string;
+  model: string;
+  state: "ready" | "missing" | "cpu_only";
+  device: string;
+  path?: string;
+  fix: string;
 }
 
 export interface SidecarHealth {
   online: boolean;
+  version?: string;
   models: ModelHealthEntry[];
   ingest_queue_len: number;
   pause_learning: boolean;

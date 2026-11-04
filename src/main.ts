@@ -27,6 +27,7 @@ import {
   sidecarDeletePassword,
   sidecarDeleteProfile,
   sidecarFetchDigest,
+  sidecarFetchDoctor,
   sidecarFetchHealth,
   sidecarFetchKnowledge,
   sidecarGetMailCodes,
@@ -272,6 +273,9 @@ function handleMenuShortcut(cmd: string): void {
 async function pollSidecarState(): Promise<void> {
   state.sidecar = await sidecarFetchHealth();
   if (state.sidecar.online) {
+    if (state.doctorRoles.length === 0) {
+      state.doctorRoles = await sidecarFetchDoctor();
+    }
     if (state.sidecar.mail?.counts) {
       state.mailCounts = state.sidecar.mail.counts;
     }
@@ -456,8 +460,12 @@ function renderRailRegion(): void {
     onOpenKnowledgeView: async () => {
       state.showKnowledgeView = !state.showKnowledgeView;
       if (state.showKnowledgeView) {
-        const kb = await sidecarFetchKnowledge();
+        const [kb, docRoles] = await Promise.all([
+          sidecarFetchKnowledge(),
+          sidecarFetchDoctor(),
+        ]);
         if (kb) state.knowledge = kb;
+        state.doctorRoles = docRoles;
         await refreshMailState();
       }
       renderAllRegions();
@@ -1053,6 +1061,16 @@ function getChatActions() {
       renderViewportRegion();
       renderStatusLine();
     },
+    onUsePlanckInstead: (text: string) => {
+      const openTabs = getActiveTabSources(state.activeDetail);
+      state.selectedModel =
+        openTabs.length > 0 && !state.webSearchEnabled
+          ? "hertz (reader)"
+          : "planck3 (web)";
+      renderViewportRegion();
+      renderStatusLine();
+      void handleSendChatMessage(text);
+    },
     onToggleWeb: () => {
       state.webSearchEnabled = !state.webSearchEnabled;
       renderViewportRegion();
@@ -1557,10 +1575,11 @@ async function handleSendChatMessage(text: string): Promise<void> {
       }
     }
 
-    const finalContent =
-      streamRes.annotated_text ||
-      state.streamingText ||
-      (streamRes.error ? `[err] ${streamRes.error}` : "(no response)");
+    const finalContent = streamRes.stalled
+      ? "gemma stopped responding after 30 s."
+      : streamRes.annotated_text ||
+        state.streamingText ||
+        (streamRes.error ? `[err] ${streamRes.error}` : "(no response)");
     stopStreamingProgress();
 
     const savedMsg = await apiAddMessage(
