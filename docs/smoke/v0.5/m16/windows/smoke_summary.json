@@ -1,0 +1,51 @@
+{
+  "health_ms": 0.3,
+  "version": "0.5.0",
+  "gemma_device": "cuda",
+  "doctor_roles": [
+    [
+      "chat",
+      "ready",
+      "cuda"
+    ],
+    [
+      "web_answer",
+      "ready",
+      "cpu"
+    ],
+    [
+      "reader_hertz",
+      "ready",
+      "cpu"
+    ],
+    [
+      "reader_planck",
+      "ready",
+      "cpu"
+    ],
+    [
+      "brain_encoder",
+      "ready",
+      "cpu"
+    ]
+  ],
+  "dw_capture": {
+    "ok": true,
+    "source_id": "src-dw-1",
+    "capture_mode": "dom",
+    "text_chars": 375,
+    "findings_count": 0,
+    "queued": true,
+    "queue_len": 1
+  },
+  "empty_timeout_capture": {
+    "ok": true,
+    "source_id": "src-empty-1",
+    "capture_mode": "timeout",
+    "text_chars": 0,
+    "findings_count": 0,
+    "queued": false,
+    "queue_len": 0
+  },
+  "fixture_count": 12
+}

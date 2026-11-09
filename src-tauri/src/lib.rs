@@ -45,9 +45,19 @@ fn default_bookmark_interval_minutes() -> u64 {
 
 impl Default for SatzSettings {
     fn default() -> Self {
+        #[cfg(windows)]
+        let (default_sgs, default_py) = (
+            "..\\sgs".to_string(),
+            "..\\sgs\\.venv\\Scripts\\python.exe".to_string(),
+        );
+        #[cfg(not(windows))]
+        let (default_sgs, default_py) = (
+            "../sgs".to_string(),
+            "../sgs/.venv/bin/python".to_string(),
+        );
         Self {
-            sgs_root: "..\\sgs".to_string(),
-            python: "..\\sgs\\.venv\\Scripts\\python.exe".to_string(),
+            sgs_root: default_sgs,
+            python: default_py,
             gemma_path: "models/gemma-4-e4b-it".to_string(),
             port: 8020,
             max_live_tabs: 8,
@@ -436,6 +446,42 @@ fn resolve_repo_root(settings: Option<&SatzSettings>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+pub fn normalize_rel_path_for_os(raw: &str) -> String {
+    if cfg!(windows) {
+        raw.replace('/', "\\")
+    } else {
+        raw.replace('\\', "/")
+    }
+}
+
+pub fn resolve_python_executable(repo_root: &std::path::Path, configured_python: &str) -> String {
+    let normalized = normalize_rel_path_for_os(configured_python);
+    let primary = repo_root.join(&normalized);
+    if primary.exists() {
+        return primary.to_string_lossy().to_string();
+    }
+    #[cfg(windows)]
+    let os_venv = repo_root.join("..\\sgs\\.venv\\Scripts\\python.exe");
+    #[cfg(not(windows))]
+    let os_venv = repo_root.join("../sgs/.venv/bin/python");
+    if os_venv.exists() {
+        return os_venv.to_string_lossy().to_string();
+    }
+    #[cfg(not(windows))]
+    {
+        for bin in ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"] {
+            if std::path::Path::new(bin).exists() {
+                return bin.to_string();
+            }
+        }
+        return "python3".to_string();
+    }
+    #[cfg(windows)]
+    {
+        "python".to_string()
+    }
+}
+
 fn spawn_sidecar(settings: &SatzSettings, app_data_dir: &PathBuf, token: &str) -> Option<Child> {
     let repo_root = resolve_repo_root(Some(settings));
     let script_path = repo_root.join("sidecar").join("satz_models.py");
@@ -443,18 +489,14 @@ fn spawn_sidecar(settings: &SatzSettings, app_data_dir: &PathBuf, token: &str) -
         return None;
     }
 
-    let python_candidate = repo_root.join(&settings.python);
-    let python_bin = if python_candidate.exists() {
-        python_candidate.to_string_lossy().to_string()
-    } else {
-        "python".to_string()
-    };
+    let python_bin = resolve_python_executable(&repo_root, &settings.python);
 
-    let sgs_candidate = repo_root.join(&settings.sgs_root);
+    let normalized_sgs = normalize_rel_path_for_os(&settings.sgs_root);
+    let sgs_candidate = repo_root.join(&normalized_sgs);
     let sgs_root_str = if sgs_candidate.exists() {
         sgs_candidate.to_string_lossy().to_string()
     } else {
-        settings.sgs_root.clone()
+        normalized_sgs
     };
 
     let store_path = app_data_dir.join("planck_store.sqlite");
@@ -510,6 +552,7 @@ fn setup_app_menu_accelerators(app: &tauri::App) -> tauri::Result<()> {
         ("toggle_agent_rail", "Toggle Agent Rail", "CmdOrCtrl+J"),
         ("toggle_compare", "Compare Selected Tabs", "CmdOrCtrl+M"),
         ("bookmark_current", "Bookmark Current Page", "CmdOrCtrl+D"),
+        ("fill_login", "Fill Login Credentials", "CmdOrCtrl+Shift+L"),
     ];
 
     let mut submenu = SubmenuBuilder::new(app, "satz");
@@ -820,4 +863,35 @@ pub fn run() {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_settings_default_and_cross_platform_path_normalization() {
+        let def = SatzSettings::default();
+        assert_eq!(def.port, 8020);
+        assert_eq!(def.max_live_tabs, 8);
+        assert!(def.preload_gemma);
+        #[cfg(windows)]
+        {
+            assert_eq!(def.sgs_root, "..\\sgs");
+            assert_eq!(def.python, "..\\sgs\\.venv\\Scripts\\python.exe");
+            assert_eq!(
+                normalize_rel_path_for_os("../sgs/.venv/bin/python"),
+                "..\\sgs\\.venv\\bin\\python"
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(def.sgs_root, "../sgs");
+            assert_eq!(def.python, "../sgs/.venv/bin/python");
+            assert_eq!(
+                normalize_rel_path_for_os("..\\sgs\\.venv\\Scripts\\python.exe"),
+                "../sgs/.venv/Scripts/python.exe"
+            );
+        }
+    }
 }

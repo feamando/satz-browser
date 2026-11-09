@@ -2658,8 +2658,12 @@ dependencies = [
 
 [[package]]
 name = "satz-browser"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
+ "block2",
+ "objc2",
+ "objc2-foundation",
+ "objc2-web-kit",
  "rusqlite",
  "serde",
  "serde_json",

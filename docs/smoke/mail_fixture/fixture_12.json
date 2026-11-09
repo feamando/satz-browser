@@ -1,0 +1,225 @@
+[
+  {
+    "id": "fix-01-dhl-shipped",
+    "uid": "1001",
+    "message_id": "<dhl-shipped-001@dhl.de>",
+    "thread_id": "thread-order-zalando-99412",
+    "from_name": "DHL Paket",
+    "from_addr": "noreply@dhl.de",
+    "to_addrs": "nikita@satz.local",
+    "subject": "Your parcel 00340434161094012345 from Zalando is on its way",
+    "date_ts": 1762001000,
+    "headers": {
+      "From": "DHL Paket <noreply@dhl.de>",
+      "Subject": "Your parcel 00340434161094012345 from Zalando is on its way"
+    },
+    "text": "Good news! Your Zalando order #99412088 has shipped via DHL.\nTracking number: 00340434161094012345\nTrack your parcel: https://www.dhl.de/de/privatkunden/pakete-empfangen/verfolgen.html?piececode=00340434161094012345\nEstimated delivery: Tuesday.",
+    "expected_label": "information",
+    "expected_lane": "orders"
+  },
+  {
+    "id": "fix-02-dhl-delivered",
+    "uid": "1002",
+    "message_id": "<dhl-delivered-002@dhl.de>",
+    "thread_id": "thread-order-zalando-99412",
+    "from_name": "DHL Paket",
+    "from_addr": "noreply@dhl.de",
+    "to_addrs": "nikita@satz.local",
+    "subject": "Delivered: Your Zalando order #99412088 (00340434161094012345)",
+    "date_ts": 1762087400,
+    "headers": {
+      "From": "DHL Paket <noreply@dhl.de>",
+      "Subject": "Delivered: Your Zalando order #99412088 (00340434161094012345)"
+    },
+    "text": "Your Zalando order #99412088 with tracking number 00340434161094012345 was delivered today at 14:10 to your front desk.",
+    "expected_label": "information",
+    "expected_lane": "orders"
+  },
+  {
+    "id": "fix-03-github-2fa",
+    "uid": "1003",
+    "message_id": "<gh-otp-003@github.com>",
+    "thread_id": "thread-gh-otp-003",
+    "from_name": "GitHub",
+    "from_addr": "noreply@github.com",
+    "to_addrs": "nikita@satz.local",
+    "subject": "[GitHub] Your verification code is 482910",
+    "date_ts": 1762091000,
+    "headers": {
+      "From": "GitHub <noreply@github.com>",
+      "Subject": "[GitHub] Your verification code is 482910"
+    },
+    "text": "Hey feamando! Your GitHub verification code is 482910. This code expires in 15 minutes. Do not share this code.",
+    "expected_label": "ping",
+    "expected_lane": "pings",
+    "expected_code": "482910"
+  },
+  {
+    "id": "fix-04-stripe-otp",
+    "uid": "1004",
+    "message_id": "<stripe-otp-004@stripe.com>",
+    "thread_id": "thread-stripe-otp-004",
+    "from_name": "Stripe",
+    "from_addr": "support@stripe.com",
+    "to_addrs": "nikita@satz.local",
+    "subject": "Your Stripe security code: 739204",
+    "date_ts": 1762092000,
+    "headers": {
+      "From": "Stripe <support@stripe.com>",
+      "Subject": "Your Stripe security code: 739204"
+    },
+    "text": "Use verification code 739204 to sign in to your Stripe dashboard. This one-time code is valid for 10 minutes.",
+    "expected_label": "ping",
+    "expected_lane": "pings",
+    "expected_code": "739204"
+  },
+  {
+    "id": "fix-05-zalando-promo",
+    "uid": "1005",
+    "message_id": "<zalando-promo-005@newsletter.zalando.de>",
+    "thread_id": "thread-zalando-promo-005",
+    "from_name": "Zalando Newsletter",
+    "from_addr": "newsletter@zalando.de",
+    "to_addrs": "nikita@satz.local",
+    "subject": "20% off autumn essentials - use code AUTUMN20 at checkout",
+    "date_ts": 1762093000,
+    "headers": {
+      "From": "Zalando Newsletter <newsletter@zalando.de>",
+      "List-Unsubscribe": "<https://www.zalando.de/unsubscribe>",
+      "Subject": "20% off autumn essentials - use code AUTUMN20 at checkout"
+    },
+    "text": "Save 20% off autumn jackets and boots on zalando.de! Use code: AUTUMN20 valid until 2026-12-31. Shop now at https://www.zalando.de/campaigns/autumn . To stop receiving marketing emails, unsubscribe in your preferences.",
+    "expected_label": "promotion",
+    "expected_lane": "promos",
+    "expected_voucher": "AUTUMN20"
+  },
+  {
+    "id": "fix-06-bahn-promo-no-header",
+    "uid": "1006",
+    "message_id": "<bahn-promo-006@angebote.bahn.de>",
+    "thread_id": "thread-bahn-promo-006",
+    "from_name": "DB Fahrkarten Angebote",
+    "from_addr": "angebote@bahn.de",
+    "to_addrs": "nikita@satz.local",
+    "subject": "15% Rabatt auf Ihre naechste Super Sparpreis Fahrt mit Code BAHN15",
+    "date_ts": 1762094000,
+    "headers": {
+      "From": "DB Fahrkarten Angebote <angebote@bahn.de>",
+      "Subject": "15% Rabatt auf Ihre naechste Super Sparpreis Fahrt mit Code BAHN15"
+    },
+    "text": "Exklusives Angebot: Sparen Sie 15% off mit Gutschein Code: BAHN15 bis 2026-11-30 auf bahn.de. Wenn Sie diesen Newsletter abbestellen oder unsubscribe moechten, klicken Sie hier.",
+    "expected_label": "promotion",
+    "expected_lane": "promos",
+    "expected_voucher": "BAHN15"
+  },
+  {
+    "id": "fix-07-jama-roadmap",
+    "uid": "1007",
+    "message_id": "<jama-roadmap-007@hellofresh.com>",
+    "thread_id": "thread-jama-roadmap-007",
+    "from_name": "Jama Musse",
+    "from_addr": "jama.musse@hellofresh.com",
+    "to_addrs": "nikita@satz.local",
+    "subject": "Q4 OTP capability review & Thursday product sync",
+    "date_ts": 1762095000,
+    "headers": {
+      "From": "Jama Musse <jama.musse@hellofresh.com>",
+      "Subject": "Q4 OTP capability review & Thursday product sync"
+    },
+    "text": "Hi Nikita,\n\nCan you send over the updated Q4 One-Time Purchase capability metrics before our Thursday 14:00 review at Prinzenstrasse 89, 10969 Berlin? Please confirm if the conversion numbers are finalized.\n\nThanks,\nJama",
+    "expected_label": "email",
+    "expected_lane": "inbox"
+  },
+  {
+    "id": "fix-08-landlord-lease",
+    "uid": "1008",
+    "message_id": "<hausverwaltung-008@berlin-wohnen.de>",
+    "thread_id": "thread-hausverwaltung-008",
+    "from_name": "Hausverwaltung Mitte",
+    "from_addr": "kontakt@berlin-wohnen.de",
+    "to_addrs": "nikita@satz.local",
+    "subject": "Heating meter reading appointment on Friday 10:00",
+    "date_ts": 1762096000,
+    "headers": {
+      "From": "Hausverwaltung Mitte <kontakt@berlin-wohnen.de>",
+      "Subject": "Heating meter reading appointment on Friday 10:00"
+    },
+    "text": "Dear Mr. Gorshkov,\n\nThe technician will visit your apartment at Torstrasse 142, 10119 Berlin this Friday between 10:00 and 12:00 to read the heating meters. Could you reply to confirm someone will be home?\n\nBest regards,\nSabine Weber",
+    "expected_label": "email",
+    "expected_lane": "inbox"
+  },
+  {
+    "id": "fix-09-colleague-pr",
+    "uid": "1009",
+    "message_id": "<elena-pr-009@satz.dev>",
+    "thread_id": "thread-elena-pr-009",
+    "from_name": "Elena Rostova",
+    "from_addr": "elena@satz.dev",
+    "to_addrs": "nikita@satz.local",
+    "subject": "Notes on WKWebView evaluateJavaScript bridge",
+    "date_ts": 1762097000,
+    "headers": {
+      "From": "Elena Rostova <elena@satz.dev>",
+      "Subject": "Notes on WKWebView evaluateJavaScript bridge"
+    },
+    "text": "Hey Nikita,\n\nI tested the WKWebView completion handler on macOS 15.6. Passing NSJSONWritingOptions::FragmentsAllowed serializes the JS string return cleanly. Let me know when you push M16 so I can run the smoke script on the M3 Max.\n\nCheers,\nElena",
+    "expected_label": "email",
+    "expected_lane": "inbox"
+  },
+  {
+    "id": "fix-10-apple-receipt",
+    "uid": "1010",
+    "message_id": "<apple-order-010@email.apple.com>",
+    "thread_id": "thread-apple-order-010",
+    "from_name": "Apple Store",
+    "from_addr": "no_reply@email.apple.com",
+    "to_addrs": "nikita@satz.local",
+    "subject": "We are processing your order W1294810293",
+    "date_ts": 1762098000,
+    "headers": {
+      "From": "Apple Store <no_reply@email.apple.com>",
+      "Subject": "We are processing your order W1294810293"
+    },
+    "text": "Thank you for shopping at the Apple Store. Your order #W1294810293 for USB-C Woven Charge Cable (Total: EUR 25.00) has been confirmed and will ship soon via UPS.",
+    "expected_label": "information",
+    "expected_lane": "orders"
+  },
+  {
+    "id": "fix-11-dentist-confirm",
+    "uid": "1011",
+    "message_id": "<praxis-dr-klein-011@zahnarzt-mitte.de>",
+    "thread_id": "thread-praxis-011",
+    "from_name": "Praxis Dr. Klein",
+    "from_addr": "empfang@zahnarzt-mitte.de",
+    "to_addrs": "nikita@satz.local",
+    "subject": "Appointment reminder: Monday 09:30 check-up",
+    "date_ts": 1762099000,
+    "headers": {
+      "From": "Praxis Dr. Klein <empfang@zahnarzt-mitte.de>",
+      "Subject": "Appointment reminder: Monday 09:30 check-up"
+    },
+    "text": "Hello Nikita Gorshkov,\n\nThis is a friendly reminder of your dental check-up on Monday at 09:30 at Friedrichstrasse 114, 10117 Berlin. Please reply if you need to reschedule.\n\nWarm regards,\nPraxis Dr. Klein",
+    "expected_label": "email",
+    "expected_lane": "inbox"
+  },
+  {
+    "id": "fix-12-newsletter-tech",
+    "uid": "1012",
+    "message_id": "<weekly-012@rust-weekly.org>",
+    "thread_id": "thread-rust-weekly-012",
+    "from_name": "This Week in Rust",
+    "from_addr": "editors@rust-weekly.org",
+    "to_addrs": "nikita@satz.local",
+    "subject": "This Week in Rust 624: Special 25% off RustConf early-bird tickets",
+    "date_ts": 1762100000,
+    "headers": {
+      "From": "This Week in Rust <editors@rust-weekly.org>",
+      "List-Unsubscribe": "<https://rust-weekly.org/unsubscribe>",
+      "Subject": "This Week in Rust 624: Special 25% off RustConf early-bird tickets"
+    },
+    "text": "Welcome to issue 624! Deal of the week: get 25% off RustConf tickets with promo code: RUSTCONF25 valid until 2026-12-15. Unsubscribe anytime at https://rust-weekly.org/unsubscribe .",
+    "expected_label": "promotion",
+    "expected_lane": "promos",
+    "expected_voucher": "RUSTCONF25"
+  }
+]

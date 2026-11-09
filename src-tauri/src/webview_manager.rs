@@ -20,6 +20,59 @@ pub struct TabBoundsSpec {
     pub y: f64,
     pub w: f64,
     pub h: f64,
+    #[serde(default)]
+    pub toolbar_bottom: Option<f64>,
+    #[serde(default)]
+    pub viewport_h: Option<f64>,
+}
+
+pub fn default_browser_user_agent() -> &'static str {
+    #[cfg(windows)]
+    {
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0"
+    }
+    #[cfg(not(windows))]
+    {
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15"
+    }
+}
+
+/// Computes the child webview `(x, y, w, h)` in `wry` parent-frame logical coordinates.
+/// Guarantees `safe_y >= toolbar_bottom` in content coordinates and adds `titlebar_inset`
+/// on macOS (where `wry`'s `parent_view` is `NSThemeFrame` including the window titlebar).
+pub fn compute_child_webview_bounds(
+    spec: &TabBoundsSpec,
+    titlebar_inset: f64,
+) -> (f64, f64, f64, f64) {
+    let min_toolbar_bottom = spec.toolbar_bottom.unwrap_or(70.0).max(34.0);
+    let safe_content_y = spec.y.max(min_toolbar_bottom);
+    let dy = (safe_content_y - spec.y).max(0.0);
+    let safe_h = (spec.h - dy).max(0.0);
+    let safe_w = spec.w.max(0.0);
+    let safe_x = spec.x.max(0.0);
+    let adjusted_y = safe_content_y + titlebar_inset.max(0.0);
+    (safe_x, adjusted_y, safe_w, safe_h)
+}
+
+fn window_titlebar_inset(window: &tauri::Window) -> f64 {
+    #[cfg(target_os = "macos")]
+    {
+        let scale = window.scale_factor().unwrap_or(1.0).max(0.1);
+        if let (Ok(outer), Ok(inner)) = (window.outer_size(), window.inner_size()) {
+            if outer.height > inner.height {
+                let diff = (outer.height - inner.height) as f64 / scale;
+                if diff >= 1.0 && diff <= 80.0 {
+                    return diff;
+                }
+            }
+        }
+        28.0
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window;
+        0.0
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,8 +298,11 @@ pub fn sync_tab_webviews_impl(
         *vis_lock = target_ids.clone();
     }
 
+    let titlebar_inset = window_titlebar_inset(&window);
+
     for spec in visible {
-        if spec.w < 10.0 || spec.h < 10.0 {
+        let (bx, by, bw, bh) = compute_child_webview_bounds(&spec, titlebar_inset);
+        if bw < 10.0 || bh < 10.0 {
             continue;
         }
 
@@ -264,8 +320,8 @@ pub fn sync_tab_webviews_impl(
 
         if let Some(existing_wv) = app.get_webview(&label) {
             let _ = existing_wv.set_bounds(Rect {
-                position: LogicalPosition::new(spec.x, spec.y).into(),
-                size: LogicalSize::new(spec.w, spec.h).into(),
+                position: LogicalPosition::new(bx, by).into(),
+                size: LogicalSize::new(bw, bh).into(),
             });
 
             let should_navigate = {
@@ -300,6 +356,7 @@ pub fn sync_tab_webviews_impl(
             let app_title = app.clone();
 
             let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed_url))
+                .user_agent(default_browser_user_agent())
                 .on_page_load(move |wv, payload| {
                     let url_str = payload.url().to_string();
                     let ev_type = match payload.event() {
@@ -392,8 +449,8 @@ pub fn sync_tab_webviews_impl(
             let child_wv = window
                 .add_child(
                     builder,
-                    LogicalPosition::new(spec.x, spec.y),
-                    LogicalSize::new(spec.w, spec.h),
+                    LogicalPosition::new(bx, by),
+                    LogicalSize::new(bw, bh),
                 )
                 .map_err(|e| format!("failed to add child webview {}: {}", label, e))?;
 
@@ -832,11 +889,76 @@ fn trigger_dom_capture_with_completion<R: tauri::Runtime>(
         }
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let app_clone = app.clone();
+        let tid_clone = tab_id.clone();
+        let url_clone = fallback_url.clone();
+        let tx_outer = done_tx.clone();
+        let res = webview.with_webview(move |platform_wv| unsafe {
+            use block2::RcBlock;
+            use objc2::runtime::AnyObject;
+            use objc2_foundation::{
+                NSError, NSJSONSerialization, NSJSONWritingOptions, NSString, NSUTF8StringEncoding,
+            };
+            use objc2_web_kit::WKWebView;
+
+            let wk_ptr = platform_wv.inner() as *const WKWebView;
+            if wk_ptr.is_null() {
+                if let Some(tx) = done_tx {
+                    let _ = tx.send(());
+                }
+                return;
+            }
+            let wk_webview: &WKWebView = &*wk_ptr;
+            let app_for_block = app_clone.clone();
+            let tid_for_block = tid_clone.clone();
+            let url_for_block = url_clone.clone();
+            let tx_for_block = done_tx.clone();
+
+            let handler = RcBlock::new(move |val: *mut AnyObject, _err: *mut NSError| {
+                let mut result_str = String::new();
+                if !val.is_null() {
+                    if let Ok(json_data) = NSJSONSerialization::dataWithJSONObject_options_error(
+                        &*val,
+                        NSJSONWritingOptions::FragmentsAllowed,
+                    ) {
+                        if let Some(json_ns_str) =
+                            NSString::initWithData_encoding(NSString::alloc(), &json_data, NSUTF8StringEncoding)
+                        {
+                            result_str = json_ns_str.to_string();
+                        }
+                    }
+                }
+                let app_bg = app_for_block.clone();
+                let tid_bg = tid_for_block.clone();
+                let url_bg = url_for_block.clone();
+                let tx_bg = tx_for_block.clone();
+                std::thread::spawn(move || {
+                    handle_captured_dom_json(&app_bg, &tid_bg, &url_bg, &result_str);
+                    if let Some(tx) = tx_bg {
+                        let _ = tx.send(());
+                    }
+                });
+            });
+
+            wk_webview.evaluateJavaScript_completionHandler(
+                &NSString::from_str(DOM_CAPTURE_JS),
+                Some(&handler),
+            );
+        });
+        if res.is_err() {
+            if let Some(tx) = tx_outer {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = webview;
         std::thread::spawn(move || {
-            post_ingest_to_sidecar(&app, &tab_id, &fallback_url, "", None, None, None);
+            post_ingest_to_sidecar(&app, &tab_id, &fallback_url, "", None, None, None, Some("timeout"));
             if let Some(tx) = done_tx {
                 let _ = tx.send(());
             }
@@ -875,6 +997,7 @@ pub fn navigate_and_capture_tab_impl(
         let app_title = app.clone();
 
         let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed_url))
+            .user_agent(default_browser_user_agent())
             .on_page_load(move |wv, payload| {
                 let url_str = payload.url().to_string();
                 if let Some(st) = app_load.try_state::<WebviewManagerState>() {
@@ -917,10 +1040,11 @@ pub fn navigate_and_capture_tab_impl(
                 }
             });
 
+        let inset = window_titlebar_inset(&window);
         if let Ok(child_wv) = window.add_child(
             builder,
-            LogicalPosition::new(0.0, 0.0),
-            LogicalSize::new(1180.0, 820.0),
+            LogicalPosition::new(220.0, 70.0 + inset),
+            LogicalSize::new(940.0, 760.0),
         ) {
             #[cfg(windows)]
             attach_child_webview_accelerators(app.clone(), &child_wv);
@@ -967,6 +1091,7 @@ pub fn capture_open_tabs_for_conversation(
     let cache_snapshot = wv_state.capture_cache.lock().unwrap().clone();
 
     let mut receivers = Vec::new();
+    let mut pending_tabs = Vec::new();
     for tab in open_tabs {
         if tab.kind != "site" || tab.url.starts_with("satzmail://") {
             continue;
@@ -985,11 +1110,34 @@ pub fn capture_open_tabs_for_conversation(
                 Some(tx),
             );
             receivers.push(rx);
+            pending_tabs.push((tab.id.clone(), tab.url.clone(), tab.title.clone()));
         }
     }
 
     let count = receivers.len();
-    wait_for_receivers_with_shared_deadline(receivers, Duration::from_millis(800));
+    let deadline = Instant::now() + Duration::from_millis(800);
+    for (idx, rx) in receivers.into_iter().enumerate() {
+        let rem = deadline.saturating_duration_since(Instant::now());
+        let completed_in_time = if rem.is_zero() {
+            rx.try_recv().is_ok()
+        } else {
+            rx.recv_timeout(rem).is_ok()
+        };
+        if !completed_in_time {
+            if let Some((tid, turl, ttitle)) = pending_tabs.get(idx) {
+                post_ingest_to_sidecar(
+                    app,
+                    tid,
+                    turl,
+                    ttitle,
+                    None,
+                    None,
+                    None,
+                    Some("timeout"),
+                );
+            }
+        }
+    }
     Ok(count)
 }
 
@@ -999,10 +1147,15 @@ fn handle_captured_dom_json<R: tauri::Runtime>(
     fallback_url: &str,
     raw_result: &str,
 ) {
-    // WebView2 ExecuteScript returns a JSON-encoded string literal
-    let inner_json: Option<String> = serde_json::from_str(raw_result).ok();
-    if let Some(json_str) = inner_json {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&json_str) {
+    // WebView2 ExecuteScript and macOS NSJSONSerialization with FragmentsAllowed return a JSON-encoded string literal;
+    // also support a direct JSON object if a runtime returns an unquoted JSON string.
+    let parsed_val: Option<serde_json::Value> = serde_json::from_str::<String>(raw_result)
+        .ok()
+        .and_then(|inner| serde_json::from_str::<serde_json::Value>(&inner).ok())
+        .or_else(|| serde_json::from_str::<serde_json::Value>(raw_result).ok());
+
+    if let Some(parsed) = parsed_val {
+        if parsed.is_object() {
             let url = parsed
                 .get("url")
                 .and_then(|v| v.as_str())
@@ -1036,10 +1189,6 @@ fn handle_captured_dom_json<R: tauri::Runtime>(
                         text_hash,
                     },
                 );
-                // Also record under fallback_url if WebView2 redirected
-                if !fallback_url.is_empty() && fallback_url != url {
-                    // Keep the canonical URL in DB synced below
-                }
             }
 
             if let Some(db) = app.try_state::<DbState>() {
@@ -1065,11 +1214,11 @@ fn handle_captured_dom_json<R: tauri::Runtime>(
                 },
             );
 
-            post_ingest_to_sidecar(app, tab_id, url, title, visible_text, html, findings);
+            post_ingest_to_sidecar(app, tab_id, url, title, visible_text, html, findings, Some("dom"));
             return;
         }
     }
-    post_ingest_to_sidecar(app, tab_id, fallback_url, "", None, None, None);
+    post_ingest_to_sidecar(app, tab_id, fallback_url, "", None, None, None, Some("timeout"));
 }
 
 fn post_ingest_to_sidecar<R: tauri::Runtime>(
@@ -1080,6 +1229,7 @@ fn post_ingest_to_sidecar<R: tauri::Runtime>(
     visible_text: Option<&str>,
     html: Option<&str>,
     findings: Option<serde_json::Value>,
+    capture_mode: Option<&str>,
 ) {
     let source = if let Some(db) = app.try_state::<DbState>() {
         db.get_latest_source_for_tab(tab_id).ok().flatten()
@@ -1113,6 +1263,7 @@ fn post_ingest_to_sidecar<R: tauri::Runtime>(
         "visible_text": capped_visible,
         "html": capped_html,
         "findings": findings,
+        "capture_mode": capture_mode.unwrap_or("dom"),
     });
 
     let (port, token) = sidecar_port_and_token(app);
@@ -1277,5 +1428,75 @@ mod tests {
             "Shared deadline took {:?}, expected ~800ms",
             elapsed
         );
+    }
+
+    #[test]
+    fn test_child_webview_bounds_never_overlap_toolbar() {
+        // 1. Single-tab on Windows (titlebar_inset = 0) and macOS (titlebar_inset = 28)
+        let single_spec = TabBoundsSpec {
+            tab_id: "t-single".to_string(),
+            url: "https://example.com".to_string(),
+            x: 220.0,
+            y: 70.0,
+            w: 940.0,
+            h: 808.0,
+            toolbar_bottom: Some(70.0),
+            viewport_h: Some(900.0),
+        };
+        let (_wx, wy, _ww, wh) = compute_child_webview_bounds(&single_spec, 0.0);
+        assert!(wy >= 70.0, "Windows child_y ({}) must be >= toolbar_bottom (70.0)", wy);
+        assert_eq!(wh, 808.0);
+
+        let (_mx, my, _mw, mh) = compute_child_webview_bounds(&single_spec, 28.0);
+        // In macOS parent_view coordinates, titlebar is 0..28, tab strip is 28..62, toolbar is 62..98
+        assert!(
+            my >= 70.0 + 28.0,
+            "macOS child_y ({}) must be >= toolbar_bottom + titlebar_inset (98.0)",
+            my
+        );
+        assert_eq!(mh, 808.0);
+
+        // 2. Even if a stale layout measurement passes y < toolbar_bottom (e.g. y = 42.0 while toolbar_bottom = 70.0),
+        // compute_child_webview_bounds clamps y >= toolbar_bottom and shrinks height accordingly.
+        let overlapping_spec = TabBoundsSpec {
+            tab_id: "t-overlap".to_string(),
+            url: "https://example.com".to_string(),
+            x: 220.0,
+            y: 42.0,
+            w: 940.0,
+            h: 800.0,
+            toolbar_bottom: Some(70.0),
+            viewport_h: Some(900.0),
+        };
+        let (_, cy_win, _, ch_win) = compute_child_webview_bounds(&overlapping_spec, 0.0);
+        assert_eq!(cy_win, 70.0);
+        assert_eq!(ch_win, 772.0);
+
+        let (_, cy_mac, _, ch_mac) = compute_child_webview_bounds(&overlapping_spec, 28.0);
+        assert_eq!(cy_mac, 98.0);
+        assert_eq!(ch_mac, 772.0);
+
+        // 3. Compare 2-up and 4-up (top row toolbar_bottom = 70, bottom row toolbar_bottom = 490)
+        for (tb_bottom, slot_y, slot_h) in [(70.0, 70.0, 380.0), (490.0, 490.0, 380.0)] {
+            let tile_spec = TabBoundsSpec {
+                tab_id: "t-compare".to_string(),
+                url: "https://example.com".to_string(),
+                x: 220.0,
+                y: slot_y,
+                w: 470.0,
+                h: slot_h,
+                toolbar_bottom: Some(tb_bottom),
+                viewport_h: Some(900.0),
+            };
+            let (_, y_w, _, _) = compute_child_webview_bounds(&tile_spec, 0.0);
+            assert!(y_w >= tb_bottom);
+            let (_, y_m, _, _) = compute_child_webview_bounds(&tile_spec, 28.0);
+            assert!(y_m >= tb_bottom + 28.0);
+        }
+
+        // 4. Default browser user agent is non-empty and realistic
+        let ua = default_browser_user_agent();
+        assert!(ua.starts_with("Mozilla/5.0 ("));
+        assert!(ua.contains("AppleWebKit/"));
     }
 }

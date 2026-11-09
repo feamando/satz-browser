@@ -1504,6 +1504,7 @@ class TestSatzSidecar(unittest.TestCase):
         - 200 stratified labelled emails in Eval Mode produce the confusion matrix and pass all gates (`real_email_misfiled_as_promotion_pct <= 1.0%`, `promotion_recall_pct >= 90.0%`, `extraction_accuracy_pct >= 90.0%`), and Eval labels are excluded from classifier training.
         """
         import datetime
+        import email.utils
         import re
 
         self.runtime.passwords.create_profile("Nikita", "123456")
@@ -1609,13 +1610,16 @@ class TestSatzSidecar(unittest.TestCase):
         ]
 
         stored_key_ids: list[str] = []
+        recent_rfc_date = email.utils.format_datetime(
+            datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=2)
+        )
         for uid_val, from_hdr, subj_hdr, body_txt in key_messages:
             raw_bytes = (
                 f"Message-ID: <m14-key-{uid_val}@example.com>\r\n"
                 f"From: {from_hdr}\r\n"
                 f"To: nikita@gmx.net\r\n"
                 f"Subject: {subj_hdr}\r\n"
-                f"Date: Mon, 02 Nov 2026 10:0{uid_val}:00 +0000\r\n"
+                f"Date: {recent_rfc_date}\r\n"
                 f"Content-Type: text/plain; charset=utf-8\r\n\r\n"
                 f"{body_txt}\r\n"
             ).encode("utf-8")
@@ -1824,7 +1828,7 @@ class TestSatzSidecar(unittest.TestCase):
                 f"From: {from_h}\r\n"
                 f"To: nikita@gmx.net\r\n"
                 f"Subject: {subj_h}\r\n"
-                f"Date: Mon, 02 Nov 2026 11:{idx % 60:02d}:00 +0000\r\n"
+                f"Date: {recent_rfc_date}\r\n"
                 f"Content-Type: text/plain; charset=utf-8\r\n\r\n"
                 f"{body_t}\r\n"
             ).encode("utf-8")
