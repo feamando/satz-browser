@@ -329,6 +329,14 @@ export interface KnowledgeSummary {
     brain_md: string;
     entity_count: number;
     entities: BrainEntityItem[];
+    locked?: boolean;
+    message?: string;
+    brain_ranking?: string;
+    encoder?: {
+      mode: string;
+      state: string;
+      label: string;
+    };
   };
   bookmarks_indexed?: BookmarkIndexStatus[];
   profile?: ProfileStatusSummary;

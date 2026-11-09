@@ -119,9 +119,10 @@ def neutralize_brain_directives_in_source(text: str) -> str:
 class SatzBrain:
     """Manages the local Satz Brain knowledge graph on disk."""
 
-    def __init__(self, brain_dir: Path, sgs_root: Path | None = None):
+    def __init__(self, brain_dir: Path, sgs_root: Path | None = None, locked: bool = False):
         self.brain_dir = brain_dir
         self.sgs_root = sgs_root
+        self.locked = bool(locked)
         self.lock = threading.RLock()
         self.registry_path = self.brain_dir / "registry.yaml"
         self.brain_md_path = self.brain_dir / "BRAIN.md"
@@ -130,7 +131,24 @@ class SatzBrain:
         self._brain_md_mtime: float = -1.0
         self._encoder: Any = None
         self._entity_emb_cache: dict[str, tuple[str, Any]] = {}
-        self._ensure_layout()
+        if not self.locked:
+            self._ensure_layout()
+
+    def get_encoder_status(self) -> dict[str, Any]:
+        sgs_base = self.sgs_root or (Path(__file__).resolve().parent.parent.parent / "sgs")
+        ckpt = sgs_base / "checkpoints" / "planck13" / "best.pt"
+        tok = sgs_base / "data" / "wikipedia" / "tokenizer.model"
+        if ckpt.exists() and tok.exists():
+            return {
+                "mode": "planck13",
+                "state": "ready",
+                "label": "brain ranking: semantic (planck13)",
+            }
+        return {
+            "mode": "lexical",
+            "state": "missing",
+            "label": "brain ranking: lexical (planck13 missing)",
+        }
 
     def _get_encoder(self) -> Any:
         if self._encoder is not None:
@@ -160,6 +178,8 @@ class SatzBrain:
         return self._encoder
 
     def get_cached_brain_md(self) -> str:
+        if self.locked:
+            return ""
         with self.lock:
             if not self.brain_md_path.exists():
                 return self.regenerate_brain_md()
@@ -175,6 +195,8 @@ class SatzBrain:
                 return self.regenerate_brain_md()
 
     def _ensure_layout(self) -> None:
+        if self.locked:
+            return
         with self.lock:
             self.brain_dir.mkdir(parents=True, exist_ok=True)
             for rel_dir in set(ENTITY_TYPE_DIRS.values()):
@@ -266,6 +288,8 @@ class SatzBrain:
         tier: int | None = None,
         actor: str = "agent/harness",
     ) -> dict[str, Any]:
+        if self.locked:
+            raise PermissionError("unlock a profile to save to your Brain")
         norm_type = (entity_type or "note").strip().lower()
         if norm_type not in ENTITY_TYPE_DIRS:
             norm_type = "note"
@@ -278,6 +302,42 @@ class SatzBrain:
             alias_idx = reg.get("alias_index") or {}
             if clean_name.lower() in alias_idx:
                 slug = alias_idx[clean_name.lower()]
+
+            # Section 4 (M18): For webmail accounts, upsert by (provider, email) so a second account
+            # updates or keys cleanly while keeping the entity name as the provider.
+            if norm_type == "account":
+                in_attrs = attributes or {}
+                provider_val = str(in_attrs.get("provider") or in_attrs.get("service") or clean_name).strip()
+                email_val = str(in_attrs.get("email") or "").strip().lower()
+                matched_slug: str | None = None
+                for cand_slug, cand_meta in (reg.get("entities") or {}).items():
+                    if str(cand_meta.get("$type") or "") != "account":
+                        continue
+                    cand_attrs = cand_meta.get("attributes") or {}
+                    cand_prov = str(cand_attrs.get("provider") or cand_attrs.get("service") or cand_meta.get("name") or "").strip()
+                    cand_email = str(cand_attrs.get("email") or "").strip().lower()
+                    if cand_prov.lower() != provider_val.lower():
+                        continue
+                    if email_val and cand_email == email_val:
+                        matched_slug = cand_slug
+                        break
+                    if email_val and not cand_email:
+                        matched_slug = cand_slug
+                        break
+                    if not email_val:
+                        matched_slug = cand_slug
+                        break
+                if matched_slug:
+                    slug = matched_slug
+                elif email_val:
+                    # Check if another account on the same provider already exists with a different email
+                    other_prov = any(
+                        str(m.get("$type") or "") == "account"
+                        and str((m.get("attributes") or {}).get("provider") or m.get("name") or "").strip().lower() == provider_val.lower()
+                        for m in (reg.get("entities") or {}).values()
+                    )
+                    if other_prov:
+                        slug = slugify(f"{provider_val}-{email_val}")
 
             existing_entry = reg["entities"].get(slug)
             if existing_entry and existing_entry.get("$ref"):
@@ -372,15 +432,16 @@ class SatzBrain:
                 body_lines.append(existing_body)
                 body_lines.append("")
 
-            if merged_attrs:
-                attr_block = "\n".join(f"- **{k}**: {v}" for k, v in merged_attrs.items())
+            visible_attrs = {k: v for k, v in merged_attrs.items() if not str(k).startswith("$") and k != "source_url"}
+            if visible_attrs:
+                attr_block = "\n".join(f"- **{k}**: {v}" for k, v in visible_attrs.items())
                 if "## Attributes" not in existing_body:
                     body_lines.append("## Attributes")
                     body_lines.append(attr_block)
                     body_lines.append("")
                 else:
                     # Replace existing Attributes section or append new keys
-                    for k, v in merged_attrs.items():
+                    for k, v in visible_attrs.items():
                         line_check = f"**{k}**:"
                         if line_check not in existing_body:
                             body_lines.append(f"- **{k}**: {v}")
@@ -423,6 +484,7 @@ class SatzBrain:
 
     def delete_entity(self, slug: str) -> bool:
         with self.lock:
+            self._entity_emb_cache.pop(slug, None)
             reg = self._load_registry()
             entry = reg.get("entities", {}).pop(slug, None)
             if not entry:
@@ -444,6 +506,8 @@ class SatzBrain:
         Generates the compressed pipe-delimited BRAIN.md index following the
         PM-OS Brain / SGS-Brain two-tier format.
         """
+        if self.locked:
+            return ""
         with self.lock:
             reg = self._load_registry()
             entities: dict[str, dict[str, Any]] = reg.get("entities") or {}
@@ -465,10 +529,12 @@ class SatzBrain:
                 ref = str(meta.get("$ref") or "")
                 attrs = meta.get("attributes") or {}
                 attr_pairs = []
-                for k, v in list(attrs.items())[:4]:
-                    if k == "source_url":
+                for k, v in attrs.items():
+                    if k == "source_url" or str(k).startswith("$"):
                         continue
                     attr_pairs.append(f"{k}:{str(v).replace('|', '/')[:60]}")
+                    if len(attr_pairs) >= 6:
+                        break
                 attr_str = ",".join(attr_pairs) if attr_pairs else ref
 
                 if int(meta.get("tier") or 2) == 1:
@@ -513,6 +579,18 @@ class SatzBrain:
         return list(self.get_brain_summary().get("entities") or [])
 
     def get_brain_summary(self) -> dict[str, Any]:
+        enc_status = self.get_encoder_status()
+        if self.locked:
+            return {
+                "brain_dir": "",
+                "brain_md": "",
+                "entity_count": 0,
+                "entities": [],
+                "locked": True,
+                "message": "unlock a profile to save to your Brain",
+                "encoder": enc_status,
+                "brain_ranking": enc_status["label"],
+            }
         with self.lock:
             reg = self._load_registry()
             brain_md = self.get_cached_brain_md()
@@ -522,6 +600,12 @@ class SatzBrain:
                 key=lambda kv: str(kv[1].get("updated") or ""),
                 reverse=True,
             ):
+                raw_attrs = meta.get("attributes") or {}
+                clean_attrs = {
+                    k: v
+                    for k, v in raw_attrs.items()
+                    if not str(k).startswith("$")
+                }
                 entities_out.append(
                     {
                         "slug": slug,
@@ -530,7 +614,7 @@ class SatzBrain:
                         "tier": int(meta.get("tier") or 2),
                         "summary": str(meta.get("summary") or ""),
                         "path": str(meta.get("$ref") or ""),
-                        "attributes": meta.get("attributes") or {},
+                        "attributes": clean_attrs,
                         "updated": str(meta.get("updated") or ""),
                     }
                 )
@@ -539,6 +623,9 @@ class SatzBrain:
                 "brain_md": brain_md,
                 "entity_count": len(entities_out),
                 "entities": entities_out[:60],
+                "locked": False,
+                "encoder": enc_status,
+                "brain_ranking": enc_status["label"],
             }
 
     def load_hot_entities(
@@ -547,10 +634,8 @@ class SatzBrain:
         open_sources: list[dict[str, Any]] | None = None,
         limit: int = 5,
     ) -> list[dict[str, Any]]:
-        """
-        Brain Loader: scans the user's query and open tabs for entity mentions
-        or attribute overlap and loads the full entity Markdown files.
-        """
+        if self.locked:
+            return []
         with self.lock:
             reg = self._load_registry()
             entities = reg.get("entities") or {}
@@ -666,6 +751,11 @@ class SatzBrain:
         - Sends only Tier 1 rows whose name or alias overlaps the question or open sources,
           plus hot entities, capped at 3,000 characters for the whole Brain section.
         """
+        if self.locked:
+            return (
+                "SATZ BRAIN (LOCAL KNOWLEDGE GRAPH):\n"
+                "Brain is locked (unlock a profile to save to your Brain)."
+            )[:max_chars]
         with self.lock:
             reg = self._load_registry()
             entities = reg.get("entities") or {}
@@ -716,11 +806,13 @@ class SatzBrain:
                 summary = str(meta.get("summary") or "").replace("|", "/").replace("\n", " ")[:100]
                 ref = str(meta.get("$ref") or "")
                 attrs = meta.get("attributes") or {}
-                attr_pairs = [
-                    f"{k}:{str(v).replace('|', '/')[:40]}"
-                    for k, v in list(attrs.items())[:3]
-                    if k != "source_url"
-                ]
+                attr_pairs = []
+                for k, v in attrs.items():
+                    if k == "source_url" or str(k).startswith("$"):
+                        continue
+                    attr_pairs.append(f"{k}:{str(v).replace('|', '/')[:40]}")
+                    if len(attr_pairs) >= 3:
+                        break
                 attr_str = ",".join(attr_pairs) if attr_pairs else ref
                 row_line = f"{slug}|{etype}|{name_str.replace('|', '/')}|{status}|{summary}|{attr_str}"
                 scored_tier1_rows.append((row_score, row_line))
@@ -747,9 +839,14 @@ class SatzBrain:
             if hot and len(out) < max_chars - 120:
                 out += "\n\n## Hot-Loaded Brain Entities"
                 for h in hot:
+                    clean_h_attrs = {
+                        k: v
+                        for k, v in (h.get("attributes") or {}).items()
+                        if not str(k).startswith("$")
+                    }
                     attrs_json = (
-                        json.dumps(h["attributes"], ensure_ascii=False)
-                        if h["attributes"]
+                        json.dumps(clean_h_attrs, ensure_ascii=False)
+                        if clean_h_attrs
                         else "{}"
                     )
                     block = (
@@ -778,44 +875,47 @@ class SatzBrain:
     ) -> list[dict[str, Any]]:
         """
         Passive Brain enrichment as the user browses:
-        - Detects authenticated user accounts on known web apps (e.g. Gmail, GitHub, Outlook, Notion)
-        - Extracts high-confidence email addresses/contacts in active email views
+        - Detects authenticated user accounts on known web apps (e.g. Gmail, GitHub, Outlook, Proton Mail)
+        - Entity name is the provider; address goes in `attributes.email`. Upserts by `(provider, email)`.
         """
         created_or_updated: list[dict[str, Any]] = []
-        if not url or not domain:
+        if self.locked or not url or not domain:
             return created_or_updated
 
-        # 1. Detect authenticated account from page title / text on major web apps
-        emails_in_title = EMAIL_RE.findall(title or "")
+        emails_found = EMAIL_RE.findall(f"{title or ''}\n{(text or '')[:600]}")
+        acct_email = emails_found[0].lower() if emails_found else ""
+
+        provider: str | None = None
+        aliases_base: list[str] = ["email", "webmail"]
         if "mail.google.com" in domain:
-            acct_email = emails_in_title[0] if emails_in_title else ""
-            acct_name = f"Gmail ({acct_email})" if acct_email else "Gmail Account"
-            attrs: dict[str, Any] = {"service": "Gmail", "domain": domain, "url": url}
+            provider = "Gmail"
+            aliases_base = ["gmail", "google mail", "email", "my email"]
+        elif "outlook.live.com" in domain or "outlook.office.com" in domain:
+            provider = "Outlook"
+            aliases_base = ["outlook", "email", "webmail", domain]
+        elif "mail.proton.me" in domain:
+            provider = "Proton Mail"
+            aliases_base = ["proton", "proton mail", "email", "webmail", domain]
+
+        if provider:
+            attrs: dict[str, Any] = {
+                "provider": provider,
+                "service": provider,
+                "domain": domain,
+                "url": url,
+                "last_seen": _utc_iso(),
+            }
             if acct_email:
                 attrs["email"] = acct_email
+            aliases = list(aliases_base)
+            if acct_email and acct_email not in aliases:
+                aliases.append(acct_email)
             ent = self.upsert_entity(
                 entity_type="account",
-                name=acct_name,
-                summary=f"Authenticated Gmail session ({title[:100]})",
+                name=provider,
+                summary=f"Authenticated {provider} session ({(title or domain)[:100]})",
                 attributes=attrs,
-                aliases=["gmail", "google mail", "email", "my email", acct_email] if acct_email else ["gmail", "google mail", "email", "my email"],
-                source_url=url,
-                tier=1,
-                actor="passive/browser",
-            )
-            created_or_updated.append(ent)
-        elif any(k in domain for k in ("outlook.live.com", "outlook.office.com", "mail.proton.me")):
-            acct_email = emails_in_title[0] if emails_in_title else ""
-            acct_name = f"Mail ({acct_email or domain})"
-            attrs = {"service": domain, "url": url}
-            if acct_email:
-                attrs["email"] = acct_email
-            ent = self.upsert_entity(
-                entity_type="account",
-                name=acct_name,
-                summary=f"Authenticated webmail session on {domain} ({title[:100]})",
-                attributes=attrs,
-                aliases=["email", "webmail", domain],
+                aliases=aliases,
                 source_url=url,
                 tier=1,
                 actor="passive/browser",
@@ -857,7 +957,7 @@ class SatzBrain:
                     ealiases = data.get("aliases") if isinstance(data.get("aliases"), list) else []
                     esrc = str(data.get("source_url") or source_url or "")
 
-                    if allow_direct:
+                    if allow_direct and not self.locked:
                         ent = self.upsert_entity(
                             entity_type=etype,
                             name=ename,
@@ -896,6 +996,8 @@ class SatzBrain:
 
     def accept_proposal(self, proposal_id: str) -> dict[str, Any]:
         """POST /brain/accept {proposal_id} -> commits a pending Brain proposal to disk."""
+        if self.locked:
+            raise PermissionError("unlock a profile to save to your Brain")
         with self.lock:
             prop = self.proposals.pop(proposal_id, None)
             if not prop:
@@ -929,7 +1031,7 @@ class SatzBrain:
         (e.g. "store the address on this email") and the local model answered without emitting
         a <brain_store> tag, deterministically extract and store the entity in SatzBrain.
         """
-        if already_stored or not user_msg or not STORE_INTENT_RE.search(user_msg):
+        if self.locked or already_stored or not user_msg or not STORE_INTENT_RE.search(user_msg):
             return already_stored
 
         combined_source_text = "\n".join(

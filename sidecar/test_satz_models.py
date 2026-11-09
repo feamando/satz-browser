@@ -355,6 +355,7 @@ class TestSatzSidecar(unittest.TestCase):
 
     def test_m9_brain_cap_100_entities_40k_article_ranking_prompt_order_and_lru(self):
         # 1. Populate 100 entities into Brain and verify Brain section is <= 3,000 characters
+        self.runtime.passwords.create_profile("M9User", "123456")
         brain = self.runtime.brain
         for i in range(100):
             brain.upsert_entity(
@@ -1117,6 +1118,7 @@ class TestSatzSidecar(unittest.TestCase):
         self.assertEqual(eff_promo_high, "promotion")
 
         # ── 4. Cold start: 300 messages get labels from Gemma, model trains at 50; Brain person after 2nd email ──
+        self.runtime.passwords.create_profile("M12User", "123456")
         self.runtime.mail.pipeline.stop_worker()
 
         # Seed a mail account

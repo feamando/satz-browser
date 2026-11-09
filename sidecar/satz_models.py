@@ -28,6 +28,8 @@ import os
 import queue
 import re
 import secrets
+import shutil
+import sqlite3
 import sys
 import threading
 import time
@@ -324,7 +326,8 @@ class SatzSidecarRuntime:
         bookmark_interval_minutes: float = 30.0,
     ):
         self.sgs_root = sgs_root.resolve()
-        self.store_path = store_path.resolve()
+        self.legacy_store_path = store_path.resolve()
+        self.store_path = Path(":memory:")
         self.gemma_rel_path = gemma_rel_path
         self.open_tab_char_budget = open_tab_char_budget
         self.total_context_char_budget = total_context_char_budget
@@ -358,14 +361,24 @@ class SatzSidecarRuntime:
         self.store_lock = threading.RLock()
         self.model_lock = threading.RLock()
 
+        self.passwords = ProfilePasswordManager(self.legacy_store_path.parent)
+        self.store_path = self.passwords.get_profile_store_path()
         self.store = Store(self.store_path)
-        self.passwords = ProfilePasswordManager(self.store_path.parent)
-        self.brain = SatzBrain(self.passwords.get_profile_brain_dir(), sgs_root=self.sgs_root)
+        self._current_store_key: str | None = (
+            self.passwords.active_profile_id if self.passwords.unlocked else None
+        )
+        self.last_migration_counts: dict[str, int] = {}
+        self.brain = SatzBrain(
+            self.passwords.get_profile_brain_dir(),
+            sgs_root=self.sgs_root,
+            locked=not self.passwords.unlocked,
+        )
+        self.passwords.on_profile_change = self._refresh_active_profile_brain
         self.mail = SatzMailManager(self)
         self._init_satz_tables()
 
         sgs_cache_dir = self.sgs_root / "data" / "planck3_cache"
-        cache_dir = sgs_cache_dir if sgs_cache_dir.exists() else (self.store_path.parent / "web_cache")
+        cache_dir = sgs_cache_dir if sgs_cache_dir.exists() else (self.legacy_store_path.parent / "web_cache")
         self.web = Web(WebCache(cache_dir, mode="live"), search_backend="ddgs")
         if os.environ.get("BRAVE_API_KEY"):
             self.web.backend = "brave"
@@ -424,10 +437,330 @@ class SatzSidecarRuntime:
         with self.error_lock:
             self.error_log.clear()
 
+    _BAD_BOOKMARK_ENTITIES = {
+        "bookmark",
+        "bookmarks",
+        "untitled",
+        "here",
+        "here are",
+        "click here",
+        "read more",
+        "learn more",
+        "sign in",
+        "log in",
+        "home",
+        "welcome",
+        "index",
+    }
+
+    def _extract_clean_entity(self, title: str, domain: str = "", url: str = "") -> str:
+        from src.planck3.candidates import main_entity
+        from src.planck3.web import domain_of
+
+        clean_title = re.sub(r"^\s*\[bookmark\]\s*", "", title or "", flags=re.I).strip()
+        dom = (domain or domain_of(url or "") or "").strip().lower().removeprefix("www.")
+        dom_root = dom.split(".")[0] if dom else ""
+        dom_label = dom_root.upper() if (0 < len(dom_root) <= 3) else dom_root.capitalize()
+
+        cand = (main_entity(clean_title) or "").strip()
+        cand_low = cand.lower()
+        if (
+            not cand
+            or cand_low in self._BAD_BOOKMARK_ENTITIES
+            or cand_low.startswith(("here are ", "click here", "read more", "[bookmark"))
+        ):
+            cand = ""
+
+        if not cand:
+            if clean_title and clean_title.lower() not in self._BAD_BOOKMARK_ENTITIES and clean_title.lower() != dom:
+                # Take the first clean segment before " - " or " | " if reasonable
+                seg = re.split(r"\s+[-|·]\s+", clean_title)[0].strip()
+                seg_cand = (main_entity(seg) or "").strip()
+                if seg_cand and seg_cand.lower() not in self._BAD_BOOKMARK_ENTITIES and not seg_cand.lower().startswith("here are"):
+                    cand = seg_cand
+                elif dom_label:
+                    cand = dom_label
+                else:
+                    cand = seg[:60]
+            elif dom_label:
+                cand = dom_label
+            else:
+                cand = (clean_title or dom or "web")[:60]
+
+        if cand.lower() in ("bookmark", "bookmarks"):
+            cand = dom_label or dom or "web"
+        return cand[:60]
+
+    def _repair_bookmark_entities_in_store(self, db_conn: sqlite3.Connection | None = None) -> int:
+        conn = db_conn or self.store.db
+        rows = conn.execute(
+            """
+            SELECT id, url, domain, title, entity, question
+            FROM passages
+            WHERE LOWER(COALESCE(entity, '')) IN ('bookmark', 'bookmarks')
+               OR title LIKE '[Bookmark]%'
+               OR title LIKE '[bookmark]%'
+            """
+        ).fetchall()
+        repaired = 0
+        for r in rows:
+            raw_title = str(r["title"] or "")
+            clean_title = re.sub(r"^\s*\[bookmark\]\s*", "", raw_title, flags=re.I).strip() or str(r["domain"] or r["url"] or "")
+            new_ent = self._extract_clean_entity(clean_title, str(r["domain"] or ""), str(r["url"] or ""))
+            old_q = str(r["question"] or "")
+            new_q = old_q
+            if "[Bookmark]" not in old_q and "[bookmark]" not in old_q:
+                new_q = f"{old_q} [Bookmark]".strip() if old_q else f"[conv:bookmarks] [Bookmark] {clean_title}"
+            conn.execute(
+                "UPDATE passages SET title = ?, entity = ?, question = ? WHERE id = ?",
+                (clean_title, new_ent, new_q, r["id"]),
+            )
+            repaired += 1
+
+        conn.execute(
+            "DELETE FROM queries WHERE LOWER(COALESCE(entity, '')) IN ('bookmark', 'bookmarks') OR question LIKE '[Bookmark]%'"
+        )
+        conn.execute(
+            "DELETE FROM edges WHERE LOWER(COALESCE(src, '')) IN ('bookmark', 'bookmarks') OR LOWER(COALESCE(dst, '')) IN ('bookmark', 'bookmarks')"
+        )
+        conn.commit()
+        return repaired
+
+    def _migrate_legacy_shared_store_if_needed(self, unlocked_profile_id: str) -> dict[str, int]:
+        """
+        Section 4 (M18):
+        Moves legacy top-level `planck_store.sqlite` into per-profile `profiles/<id>/planck_store.sqlite`.
+        - Backs up `planck_store.sqlite` to `planck_store.sqlite.v04.bak`.
+        - Passages with `question LIKE '[conv:mail]%'` move to the profile that owns `mail.sqlite`;
+          everything else moves to `unlocked_profile_id`.
+        - Rebuilds entities for existing bookmark passages in the migration.
+        """
+        if not self.legacy_store_path.exists() or not self.legacy_store_path.is_file():
+            return {}
+        # Never migrate if legacy_store_path is already inside a profile dir
+        if "profiles" in self.legacy_store_path.parts:
+            return {}
+
+        from src.planck3.store import Store
+
+        bak_path = self.legacy_store_path.with_name(self.legacy_store_path.name + ".v04.bak")
+        try:
+            if not bak_path.exists():
+                shutil.copy2(self.legacy_store_path, bak_path)
+        except Exception as e:
+            self.record_error("store_migration_backup", e)
+
+        mail_owner_pid = unlocked_profile_id
+        try:
+            profiles_info = self.passwords.list_profiles().get("profiles") or []
+            for p in profiles_info:
+                cand_pid = str(p.get("id") or "")
+                if cand_pid and (self.passwords.get_profile_dir(cand_pid) / "mail.sqlite").exists():
+                    mail_owner_pid = cand_pid
+                    break
+        except Exception:
+            mail_owner_pid = unlocked_profile_id
+
+        counts: dict[str, int] = {unlocked_profile_id: 0}
+        if mail_owner_pid != unlocked_profile_id:
+            counts[mail_owner_pid] = 0
+
+        src_conn = sqlite3.connect(str(self.legacy_store_path))
+        src_conn.row_factory = sqlite3.Row
+        target_stores: dict[str, Any] = {}
+        try:
+            for pid in {unlocked_profile_id, mail_owner_pid}:
+                p_store_path = self.passwords.get_profile_store_path(pid)
+                st = Store(p_store_path)
+                self._init_satz_tables_on_conn(st.db)
+                target_stores[pid] = st
+
+            def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+                row = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (name,),
+                ).fetchone()
+                return row is not None
+
+            if _table_exists(src_conn, "passages"):
+                p_rows = src_conn.execute(
+                    "SELECT url, domain, title, text, text_norm, entity, question, ts FROM passages"
+                ).fetchall()
+                for pr in p_rows:
+                    q_str = str(pr["question"] or "")
+                    u_str = str(pr["url"] or "")
+                    is_mail = q_str.startswith("[conv:mail]") or u_str.startswith("satzmail://")
+                    dest_pid = mail_owner_pid if is_mail else unlocked_profile_id
+                    dest_db = target_stores[dest_pid].db
+
+                    raw_title = str(pr["title"] or "")
+                    raw_ent = str(pr["entity"] or "")
+                    dom_str = str(pr["domain"] or "")
+                    is_bm = (
+                        raw_ent.lower() in ("bookmark", "bookmarks")
+                        or raw_title.lower().startswith("[bookmark]")
+                        or "[bookmark]" in q_str.lower()
+                        or q_str.startswith("[conv:bookmarks]")
+                    )
+                    if is_bm:
+                        clean_title = re.sub(r"^\s*\[bookmark\]\s*", "", raw_title, flags=re.I).strip() or dom_str or u_str
+                        clean_ent = self._extract_clean_entity(clean_title, dom_str, u_str)
+                        clean_q = q_str if "[bookmark]" in q_str.lower() else f"{q_str} [Bookmark]".strip()
+                    else:
+                        clean_title = raw_title
+                        clean_ent = raw_ent
+                        clean_q = q_str
+
+                    dest_db.execute(
+                        """
+                        INSERT OR IGNORE INTO passages (url, domain, title, text, text_norm, entity, question, ts)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (u_str, dom_str, clean_title, pr["text"], pr["text_norm"], clean_ent, clean_q, pr["ts"]),
+                    )
+                    counts[dest_pid] = counts.get(dest_pid, 0) + 1
+
+            if _table_exists(src_conn, "satz_sources"):
+                s_cols = {
+                    r["name"]
+                    for r in src_conn.execute("PRAGMA table_info('satz_sources')").fetchall()
+                }
+                has_findings = "findings_json" in s_cols
+                s_rows = src_conn.execute("SELECT * FROM satz_sources").fetchall()
+                for sr in s_rows:
+                    cid = str(sr["conversation_id"] or "")
+                    u_str = str(sr["url"] or "")
+                    dest_pid = mail_owner_pid if (cid == "mail" or u_str.startswith("satzmail://")) else unlocked_profile_id
+                    dest_stores_db = target_stores[dest_pid].db
+                    f_json = sr["findings_json"] if has_findings else "[]"
+                    dest_stores_db.execute(
+                        """
+                        INSERT OR REPLACE INTO satz_sources
+                        (source_id, conversation_id, url, domain, title, text, extra_json, findings_json, capture_mode, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            sr["source_id"],
+                            cid,
+                            u_str,
+                            sr["domain"],
+                            sr["title"],
+                            sr["text"],
+                            sr["extra_json"],
+                            f_json,
+                            sr["capture_mode"],
+                            sr["updated_at"],
+                        ),
+                    )
+
+            if _table_exists(src_conn, "satz_conv_passages"):
+                cp_rows = src_conn.execute("SELECT conversation_id, text_norm, url FROM satz_conv_passages").fetchall()
+                for cpr in cp_rows:
+                    cid = str(cpr["conversation_id"] or "")
+                    u_str = str(cpr["url"] or "")
+                    dest_pid = mail_owner_pid if (cid == "mail" or u_str.startswith("satzmail://")) else unlocked_profile_id
+                    target_stores[dest_pid].db.execute(
+                        "INSERT OR IGNORE INTO satz_conv_passages (conversation_id, text_norm, url) VALUES (?, ?, ?)",
+                        (cid, cpr["text_norm"], u_str),
+                    )
+
+            main_db = target_stores[unlocked_profile_id].db
+            if _table_exists(src_conn, "queries"):
+                q_rows = src_conn.execute("SELECT question, entity, ts FROM queries").fetchall()
+                for qr in q_rows:
+                    q_ent = str(qr["entity"] or "")
+                    q_txt = str(qr["question"] or "")
+                    if q_ent.lower() in ("bookmark", "bookmarks") or q_txt.lower().startswith("[bookmark]"):
+                        continue
+                    main_db.execute(
+                        "INSERT INTO queries (question, entity, ts) VALUES (?, ?, ?)",
+                        (q_txt, q_ent, qr["ts"]),
+                    )
+
+            if _table_exists(src_conn, "edges"):
+                e_rows = src_conn.execute("SELECT src, dst, weight, ts FROM edges").fetchall()
+                for er in e_rows:
+                    if str(er["src"] or "").lower() in ("bookmark", "bookmarks") or str(er["dst"] or "").lower() in ("bookmark", "bookmarks"):
+                        continue
+                    main_db.execute(
+                        "INSERT OR REPLACE INTO edges (src, dst, weight, ts) VALUES (?, ?, ?, ?)",
+                        (er["src"], er["dst"], er["weight"], er["ts"]),
+                    )
+
+            if _table_exists(src_conn, "satz_domain_visits"):
+                for dr in src_conn.execute("SELECT domain, visits, dwell_seconds, last_visited FROM satz_domain_visits").fetchall():
+                    main_db.execute(
+                        "INSERT OR REPLACE INTO satz_domain_visits (domain, visits, dwell_seconds, last_visited) VALUES (?, ?, ?, ?)",
+                        (dr["domain"], dr["visits"], dr["dwell_seconds"], dr["last_visited"]),
+                    )
+
+            if _table_exists(src_conn, "satz_bookmarks"):
+                for br in src_conn.execute(
+                    "SELECT bookmark_id, url, domain, title, last_indexed_at, text_chars, status, etag, last_modified, content_hash, changed_at, error_count, backoff_until FROM satz_bookmarks"
+                ).fetchall():
+                    main_db.execute(
+                        """
+                        INSERT OR REPLACE INTO satz_bookmarks
+                        (bookmark_id, url, domain, title, last_indexed_at, text_chars, status, etag, last_modified, content_hash, changed_at, error_count, backoff_until)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        tuple(br),
+                    )
+
+            for st in target_stores.values():
+                self._repair_bookmark_entities_in_store(st.db)
+                st.db.commit()
+        finally:
+            try:
+                src_conn.close()
+            except Exception:
+                pass
+            for st in target_stores.values():
+                try:
+                    st.close()
+                except Exception:
+                    pass
+
+        for suffix in ("", "-wal", "-shm"):
+            cand = self.legacy_store_path.with_name(self.legacy_store_path.name + suffix)
+            if cand.exists():
+                try:
+                    cand.unlink()
+                except OSError:
+                    pass
+
+        self.last_migration_counts = counts
+        print(f"[satz-sidecar] migrated legacy planck_store.sqlite -> {counts}", flush=True)
+        return counts
+
     def _refresh_active_profile_brain(self) -> None:
         from satz_brain import SatzBrain
+        from src.planck3.store import Store
 
-        self.brain = SatzBrain(self.passwords.get_profile_brain_dir(), sgs_root=self.sgs_root)
+        with self.store_lock:
+            is_unlocked = bool(self.passwords.unlocked and self.passwords.active_profile_id)
+            pid = self.passwords.active_profile_id if is_unlocked else None
+            if is_unlocked and pid:
+                self._migrate_legacy_shared_store_if_needed(pid)
+            target_store_path = self.passwords.get_profile_store_path(pid)
+            if getattr(self, "_current_store_key", "__INIT__") != pid:
+                try:
+                    self.store.close()
+                except Exception:
+                    pass
+                self.store = Store(target_store_path)
+                self.store_path = target_store_path
+                self._current_store_key = pid
+                self._init_satz_tables()
+                self._repair_bookmark_entities_in_store(self.store.db)
+                self.pause_learning = self._load_pause_learning()
+
+            self.brain = SatzBrain(
+                self.passwords.get_profile_brain_dir(pid),
+                sgs_root=self.sgs_root,
+                locked=not is_unlocked,
+            )
+
         if hasattr(self, "mail") and self.mail is not None:
             self.mail.rebind_profile()
 
@@ -447,7 +780,11 @@ class SatzSidecarRuntime:
 
     def _init_satz_tables(self):
         with self.store_lock:
-            self.store.db.executescript(
+            self._init_satz_tables_on_conn(self.store.db)
+
+    def _init_satz_tables_on_conn(self, db_conn: sqlite3.Connection):
+        if True:
+            db_conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS satz_sources (
                     source_id TEXT PRIMARY KEY,
@@ -501,7 +838,7 @@ class SatzSidecarRuntime:
             )
             existing_bm_cols = {
                 r["name"]
-                for r in self.store.db.execute("PRAGMA table_info('satz_bookmarks')").fetchall()
+                for r in db_conn.execute("PRAGMA table_info('satz_bookmarks')").fetchall()
             }
             for col_name, col_def in (
                 ("etag", "TEXT"),
@@ -512,20 +849,20 @@ class SatzSidecarRuntime:
                 ("backoff_until", "REAL DEFAULT 0.0"),
             ):
                 if col_name not in existing_bm_cols:
-                    self.store.db.execute(
+                    db_conn.execute(
                         f"ALTER TABLE satz_bookmarks ADD COLUMN {col_name} {col_def}"
                     )
             existing_src_cols = {
                 r["name"]
-                for r in self.store.db.execute("PRAGMA table_info('satz_sources')").fetchall()
+                for r in db_conn.execute("PRAGMA table_info('satz_sources')").fetchall()
             }
             if "findings_json" not in existing_src_cols:
-                self.store.db.execute("ALTER TABLE satz_sources ADD COLUMN findings_json TEXT")
+                db_conn.execute("ALTER TABLE satz_sources ADD COLUMN findings_json TEXT")
             # Purge any historical source rows where unclosed <style> blocks polluted trafilatura fallback with raw CSS
-            self.store.db.execute(
+            db_conn.execute(
                 "DELETE FROM satz_sources WHERE text LIKE '%.J-J5-Ji{%' OR text LIKE '%{position:relative;display:%'"
             )
-            self.store.db.commit()
+            db_conn.commit()
 
     def _load_pause_learning(self) -> bool:
         with self.store_lock:
@@ -665,6 +1002,11 @@ class SatzSidecarRuntime:
                 "state": "ready" if (enc_ready or enc_files_exist) else "missing",
                 "device": "cpu",
                 "path": str(enc_ckpt),
+                "label": (
+                    "brain ranking: semantic (planck13)"
+                    if (enc_ready or enc_files_exist)
+                    else "brain ranking: lexical (planck13 missing)"
+                ),
                 "fix": (
                     ""
                     if (enc_ready or enc_files_exist)
@@ -675,6 +1017,11 @@ class SatzSidecarRuntime:
         return {
             "ok": True,
             "version": SATZ_SIDECAR_VERSION,
+            "brain_ranking": (
+                "brain ranking: semantic (planck13)"
+                if (enc_ready or enc_files_exist)
+                else "brain ranking: lexical (planck13 missing)"
+            ),
             "roles": roles,
         }
 
@@ -996,6 +1343,9 @@ class SatzSidecarRuntime:
                     "domain": domain,
                     "title": effective_title,
                     "text": text,
+                    "profile_id": (
+                        self.passwords.active_profile_id if self.passwords.unlocked else None
+                    ),
                 }
             )
             queued = True
@@ -1097,7 +1447,7 @@ class SatzSidecarRuntime:
         return []
 
     def _ingest_worker_loop(self):
-        from src.planck3.candidates import main_entity, rank_passages
+        from src.planck3.candidates import rank_passages
         from src.planck3.util import norm_text
 
         while True:
@@ -1105,11 +1455,25 @@ class SatzSidecarRuntime:
             try:
                 if self.pause_learning:
                     continue
+                item_pid = item.get("profile_id")
+                cur_pid = self.passwords.active_profile_id if self.passwords.unlocked else None
+                if item_pid is not None and item_pid != cur_pid:
+                    continue
                 url = item["url"]
                 domain = item["domain"]
-                title = item["title"]
+                raw_title = str(item["title"] or "")
                 text = item["text"]
                 conv_id = item["conversation_id"]
+
+                is_bookmark = bool(
+                    conv_id == "bookmarks"
+                    or re.match(r"^\s*\[bookmark\]", raw_title, flags=re.I)
+                )
+                title = (
+                    re.sub(r"^\s*\[bookmark\]\s*", "", raw_title, flags=re.I).strip()
+                    or domain
+                    or url
+                )
 
                 # 1. Enrich the Satz Brain knowledge graph (accounts, entities, domains)
                 try:
@@ -1123,7 +1487,7 @@ class SatzSidecarRuntime:
                 except Exception as be:
                     self.record_error("brain_enrich", f"{url}: {be}")
 
-                entity = main_entity(title) or title[:60]
+                entity = self._extract_clean_entity(title, domain, url)
                 query_str = f"{title} {domain}".strip()
 
                 with self.store_lock:
@@ -1153,8 +1517,14 @@ class SatzSidecarRuntime:
                             for s in sents
                         ]
                     if passages:
-                        self.store.log_query(title, entity)
-                        self.store.add_passages(passages, entity, f"[conv:{conv_id}] {title}")
+                        if not is_bookmark:
+                            self.store.log_query(title, entity)
+                        q_tag = (
+                            f"[conv:{conv_id}] [Bookmark] {title}"
+                            if is_bookmark
+                            else f"[conv:{conv_id}] {title}"
+                        )
+                        self.store.add_passages(passages, entity, q_tag)
                         for p in passages:
                             self.store.db.execute(
                                 "INSERT OR IGNORE INTO satz_conv_passages (conversation_id, text_norm, url) VALUES (?, ?, ?)",
@@ -1416,7 +1786,7 @@ class SatzSidecarRuntime:
                     conversation_id="bookmarks",
                     source_id=f"bookmark:{bid}",
                     url=url,
-                    title=f"[Bookmark] {title}",
+                    title=title,
                     html=extracted_html,
                     visible_text=extracted_text or None,
                 )
@@ -2423,12 +2793,32 @@ class SatzSidecarRuntime:
         yield done_payload
 
     # ── /digest, /knowledge, /forget ─────────────────────────────────────
+    @staticmethod
+    def _norm_digest_url(raw_url: str) -> str:
+        u = (raw_url or "").strip()
+        if not u:
+            return ""
+        u = u.split("#", 1)[0]
+        if "?" in u:
+            base, q = u.split("?", 1)
+            kept = [
+                p
+                for p in q.split("&")
+                if p and not p.lower().startswith(("utm_", "fbclid=", "gclid=", "mc_cid=", "mc_eid="))
+            ]
+            u = f"{base}?{'&'.join(kept)}" if kept else base
+        while len(u) > 8 and u.endswith("/"):
+            u = u[:-1]
+        return u.lower()
+
     def get_digest(self) -> dict[str, Any]:
         from src.planck3.digest import build_digest
+        from src.planck3.web import domain_of
 
         with self.store_lock:
+            self._repair_bookmark_entities_in_store(self.store.db)
             raw = build_digest(self.store)
-            items = []
+            candidates: list[dict[str, Any]] = []
 
             # Section 3.4 (M10): Include recently changed bookmarks in /digest
             changed_bm_rows = self.store.db.execute(
@@ -2441,10 +2831,10 @@ class SatzSidecarRuntime:
                 """
             ).fetchall()
             for cbm in changed_bm_rows:
-                bm_title = cbm["title"] or cbm["domain"] or cbm["url"]
-                items.append(
+                bm_title = re.sub(r"^\s*\[bookmark\]\s*", "", str(cbm["title"] or ""), flags=re.I).strip() or cbm["domain"] or cbm["url"]
+                candidates.append(
                     {
-                        "entity": cbm["domain"] or "bookmark",
+                        "entity": self._extract_clean_entity(bm_title, str(cbm["domain"] or ""), str(cbm["url"] or "")),
                         "reason": "bookmark updated",
                         "title": f"changed: {bm_title}",
                         "url": cbm["url"],
@@ -2459,7 +2849,7 @@ class SatzSidecarRuntime:
                     triage = self.mail.get_triage_set()
                     for em in (triage.get("emails_needing_attention") or [])[:2]:
                         if em.get("needs_reply"):
-                            items.append(
+                            candidates.append(
                                 {
                                     "entity": em.get("from_name") or em.get("from_addr") or "mail",
                                     "reason": "mail action",
@@ -2470,7 +2860,7 @@ class SatzSidecarRuntime:
                                 }
                             )
                     for ord_item in (triage.get("order_updates") or [])[:2]:
-                        items.append(
+                        candidates.append(
                             {
                                 "entity": ord_item.get("merchant") or "orders",
                                 "reason": f"order {ord_item.get('status') or 'update'}",
@@ -2482,7 +2872,7 @@ class SatzSidecarRuntime:
                         )
                     for pr_item in (triage.get("expiring_promos") or [])[:2]:
                         exp_lbl = pr_item.get("expiry") or "soon"
-                        items.append(
+                        candidates.append(
                             {
                                 "entity": pr_item.get("company") or "promos",
                                 "reason": f"code {pr_item.get('voucher_code')}",
@@ -2496,43 +2886,85 @@ class SatzSidecarRuntime:
                     self.record_error("digest_mail", me)
 
             for sec in raw.get("interests", []):
-                ent = sec["entity"]
+                ent = str(sec["entity"] or "")
+                if ent.lower() in ("bookmark", "bookmarks"):
+                    continue
                 for p in sec.get("recent", [])[:2]:
-                    items.append(
+                    clean_t = re.sub(r"^\s*\[bookmark\]\s*", "", str(p.get("title") or ""), flags=re.I).strip()
+                    candidates.append(
                         {
                             "entity": ent,
                             "reason": f"recent ({p.get('domain', 'local')})",
-                            "title": p.get("title") or p.get("text", "")[:80],
+                            "title": clean_t or p.get("text", "")[:80],
                             "url": p.get("url", ""),
                             "domain": p.get("domain", ""),
                         }
                     )
                 for adj in sec.get("adjacent", [])[:2]:
                     ap = adj.get("passage")
-                    if ap:
-                        items.append(
+                    adj_ent = str(adj.get("entity") or "")
+                    if ap and adj_ent.lower() not in ("bookmark", "bookmarks"):
+                        clean_t = re.sub(r"^\s*\[bookmark\]\s*", "", str(ap.get("title") or ""), flags=re.I).strip()
+                        candidates.append(
                             {
-                                "entity": adj["entity"],
+                                "entity": adj_ent,
                                 "reason": f"adjacent to {ent}",
-                                "title": ap.get("title") or ap.get("text", "")[:80],
+                                "title": clean_t or ap.get("text", "")[:80],
                                 "url": ap.get("url", ""),
                                 "domain": ap.get("domain", ""),
                             }
                         )
-            if not items:
-                rows = self.store.db.execute(
-                    "SELECT id, url, domain, title, text, entity FROM passages ORDER BY ts DESC LIMIT 6"
-                ).fetchall()
-                for r in rows:
-                    items.append(
-                        {
-                            "entity": r["entity"] or r["domain"] or "recent",
-                            "reason": f"browsed on {r['domain']}",
-                            "title": r["title"] or r["text"][:80],
-                            "url": r["url"],
-                            "domain": r["domain"],
-                        }
+
+            rows = self.store.db.execute(
+                "SELECT id, url, domain, title, text, entity FROM passages ORDER BY ts DESC LIMIT 24"
+            ).fetchall()
+            for r in rows:
+                clean_t = re.sub(r"^\s*\[bookmark\]\s*", "", str(r["title"] or ""), flags=re.I).strip()
+                ent_val = str(r["entity"] or "")
+                if ent_val.lower() in ("bookmark", "bookmarks"):
+                    ent_val = self._extract_clean_entity(clean_t, str(r["domain"] or ""), str(r["url"] or ""))
+                candidates.append(
+                    {
+                        "entity": ent_val or r["domain"] or "recent",
+                        "reason": f"browsed on {r['domain']}",
+                        "title": clean_t or r["text"][:80],
+                        "url": r["url"],
+                        "domain": r["domain"],
+                    }
+                )
+
+            # Section 4 (M18): Digest dedupe: at most 1 item per URL per digest build,
+            # at most 2 per domain. `changed:` items replace, not add to, the same URL.
+            items: list[dict[str, Any]] = []
+            url_to_idx: dict[str, int] = {}
+            domain_counts: collections.Counter[str] = collections.Counter()
+
+            for cand in candidates:
+                norm_u = self._norm_digest_url(str(cand.get("url") or ""))
+                dom = str(cand.get("domain") or domain_of(str(cand.get("url") or "")) or "").lower().removeprefix("www.")
+                is_changed = str(cand.get("kind") or "") == "bookmark_changed" or str(cand.get("title") or "").startswith("changed:")
+
+                if norm_u and norm_u in url_to_idx:
+                    existing_idx = url_to_idx[norm_u]
+                    existing_is_changed = (
+                        str(items[existing_idx].get("kind") or "") == "bookmark_changed"
+                        or str(items[existing_idx].get("title") or "").startswith("changed:")
                     )
+                    if is_changed and not existing_is_changed:
+                        items[existing_idx] = cand
+                    continue
+
+                if dom and dom != "mail" and domain_counts[dom] >= 2:
+                    continue
+
+                if norm_u:
+                    url_to_idx[norm_u] = len(items)
+                if dom and dom != "mail":
+                    domain_counts[dom] += 1
+                items.append(cand)
+                if len(items) >= 8:
+                    break
+
             return {"items": items[:8], "digest": raw}
 
     def get_knowledge_summary(self) -> dict[str, Any]:
@@ -2583,10 +3015,52 @@ class SatzSidecarRuntime:
                 "passages": passages,
             }
 
+    def _cascade_orphan_edges_and_queries(self) -> None:
+        self.store.db.execute(
+            """
+            DELETE FROM queries
+            WHERE LOWER(COALESCE(entity, '')) NOT IN (
+                SELECT LOWER(entity) FROM passages WHERE entity IS NOT NULL AND entity != ''
+            )
+            """
+        )
+        self.store.db.execute(
+            """
+            DELETE FROM edges
+            WHERE LOWER(COALESCE(src, '')) NOT IN (
+                SELECT LOWER(entity) FROM passages WHERE entity IS NOT NULL AND entity != ''
+            )
+               OR LOWER(COALESCE(dst, '')) NOT IN (
+                SELECT LOWER(entity) FROM passages WHERE entity IS NOT NULL AND entity != ''
+            )
+            """
+        )
+
     def delete_passage(self, passage_id: str) -> dict[str, Any]:
         with self.store_lock:
             before = self.store.db.execute("SELECT COUNT(*) FROM passages").fetchone()[0]
+            row = self.store.db.execute(
+                "SELECT id, url, text_norm, entity FROM passages WHERE id = ?",
+                (passage_id,),
+            ).fetchone()
             self.store.db.execute("DELETE FROM passages WHERE id = ?", (passage_id,))
+            if row is not None:
+                t_norm = str(row["text_norm"] or "")
+                u_str = str(row["url"] or "")
+                if t_norm:
+                    self.store.db.execute(
+                        "DELETE FROM satz_conv_passages WHERE text_norm = ?",
+                        (t_norm,),
+                    )
+                if u_str:
+                    rem_for_url = self.store.db.execute(
+                        "SELECT COUNT(*) FROM passages WHERE url = ?",
+                        (u_str,),
+                    ).fetchone()[0]
+                    if rem_for_url == 0:
+                        self.store.db.execute("DELETE FROM satz_sources WHERE url = ?", (u_str,))
+                        self.store.db.execute("DELETE FROM satz_conv_passages WHERE url = ?", (u_str,))
+            self._cascade_orphan_edges_and_queries()
             self.store.db.commit()
             after = self.store.db.execute("SELECT COUNT(*) FROM passages").fetchone()[0]
             return {"ok": True, "before": before, "after": after}
@@ -2596,35 +3070,98 @@ class SatzSidecarRuntime:
         return {"ok": deleted, "slug": slug}
 
     def forget_conversation(self, conversation_id: str) -> dict[str, Any]:
+        cid = (conversation_id or "").strip()
         with self.store_lock:
             before = self.store.db.execute("SELECT COUNT(*) FROM passages").fetchone()[0]
-            tag_prefix = f"[conv:{conversation_id}]%"
-            self.store.db.execute(
-                "DELETE FROM passages WHERE question LIKE ?",
-                (tag_prefix,),
-            )
-            self.store.db.execute(
-                """
-                DELETE FROM passages
-                WHERE text_norm IN (
-                    SELECT text_norm FROM satz_conv_passages WHERE conversation_id = ?
+            if cid.startswith("mail:") or cid.startswith("satzmail://message/"):
+                msg_id = (
+                    cid.split("mail:", 1)[1].strip()
+                    if cid.startswith("mail:")
+                    else cid.split("satzmail://message/", 1)[1].strip()
                 )
-                """,
-                (conversation_id,),
-            )
-            self.store.db.execute(
-                "DELETE FROM satz_conv_passages WHERE conversation_id = ?",
-                (conversation_id,),
-            )
-            self.store.db.execute(
-                "DELETE FROM satz_sources WHERE conversation_id = ?",
-                (conversation_id,),
-            )
+                mail_url = f"satzmail://message/{msg_id}"
+                src_id = f"mail:{msg_id}"
+                self.store.db.execute("DELETE FROM passages WHERE url = ?", (mail_url,))
+                self.store.db.execute(
+                    """
+                    DELETE FROM passages
+                    WHERE text_norm IN (
+                        SELECT text_norm FROM satz_conv_passages WHERE url = ?
+                    )
+                    """,
+                    (mail_url,),
+                )
+                self.store.db.execute("DELETE FROM satz_conv_passages WHERE url = ?", (mail_url,))
+                self.store.db.execute(
+                    "DELETE FROM satz_sources WHERE source_id = ? OR url = ?",
+                    (src_id, mail_url),
+                )
+                if not getattr(self.brain, "locked", False):
+                    try:
+                        reg = self.brain._load_registry()
+                        to_del = [
+                            slug
+                            for slug, meta in (reg.get("entities") or {}).items()
+                            if str((meta.get("attributes") or {}).get("$source") or "") == src_id
+                            or str((meta.get("attributes") or {}).get("source_url") or "") in (src_id, mail_url)
+                        ]
+                        for slug in to_del:
+                            self.brain.delete_entity(slug)
+                    except Exception:
+                        pass
+            elif cid == "mail":
+                self.store.db.execute(
+                    "DELETE FROM passages WHERE question LIKE '[conv:mail]%' OR url LIKE 'satzmail://message/%'"
+                )
+                self.store.db.execute(
+                    """
+                    DELETE FROM passages
+                    WHERE text_norm IN (
+                        SELECT text_norm FROM satz_conv_passages WHERE conversation_id = 'mail'
+                    )
+                       OR url IN (
+                        SELECT url FROM satz_conv_passages WHERE conversation_id = 'mail'
+                    )
+                    """
+                )
+                self.store.db.execute(
+                    "DELETE FROM satz_conv_passages WHERE conversation_id = 'mail' OR url LIKE 'satzmail://message/%'"
+                )
+                self.store.db.execute(
+                    "DELETE FROM satz_sources WHERE conversation_id = 'mail' OR url LIKE 'satzmail://message/%'"
+                )
+            else:
+                tag_prefix = f"[conv:{cid}]%"
+                self.store.db.execute(
+                    "DELETE FROM passages WHERE question LIKE ?",
+                    (tag_prefix,),
+                )
+                self.store.db.execute(
+                    """
+                    DELETE FROM passages
+                    WHERE text_norm IN (
+                        SELECT text_norm FROM satz_conv_passages WHERE conversation_id = ?
+                    )
+                       OR url IN (
+                        SELECT url FROM satz_conv_passages WHERE conversation_id = ?
+                    )
+                    """,
+                    (cid, cid),
+                )
+                self.store.db.execute(
+                    "DELETE FROM satz_conv_passages WHERE conversation_id = ?",
+                    (cid,),
+                )
+                self.store.db.execute(
+                    "DELETE FROM satz_sources WHERE conversation_id = ?",
+                    (cid,),
+                )
+            self._cascade_orphan_edges_and_queries()
             self.store.db.commit()
             after = self.store.db.execute("SELECT COUNT(*) FROM passages").fetchone()[0]
             return {
                 "ok": True,
-                "conversation_id": conversation_id,
+                "conversation_id": cid,
                 "passages_before": before,
                 "passages_after": after,
                 "deleted": before - after,
@@ -2806,25 +3343,32 @@ def make_sidecar_server(
                 return self._json(runtime.delete_brain_entity(slug))
 
             if self.path == "/knowledge/upsert_entity":
-                ent = runtime.brain.upsert_entity(
-                    entity_type=str(data.get("type") or "note"),
-                    name=str(data.get("name") or "Note"),
-                    summary=str(data.get("summary") or ""),
-                    attributes=data.get("attributes") if isinstance(data.get("attributes"), dict) else {},
-                    content=str(data.get("content") or ""),
-                    relationships=data.get("relationships"),
-                    aliases=data.get("aliases") if isinstance(data.get("aliases"), list) else [],
-                    source_url=str(data.get("source_url") or ""),
-                    tier=int(data.get("tier") or 1),
-                    actor=str(data.get("actor") or "api/manual"),
-                )
-                return self._json({"ok": True, "entity": ent})
+                try:
+                    ent = runtime.brain.upsert_entity(
+                        entity_type=str(data.get("type") or "note"),
+                        name=str(data.get("name") or "Note"),
+                        summary=str(data.get("summary") or ""),
+                        attributes=data.get("attributes") if isinstance(data.get("attributes"), dict) else {},
+                        content=str(data.get("content") or ""),
+                        relationships=data.get("relationships"),
+                        aliases=data.get("aliases") if isinstance(data.get("aliases"), list) else [],
+                        source_url=str(data.get("source_url") or ""),
+                        tier=int(data.get("tier") or 1),
+                        actor=str(data.get("actor") or "api/manual"),
+                    )
+                    return self._json({"ok": True, "entity": ent})
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
 
             if self.path == "/brain/accept":
                 proposal_id = str(data.get("proposal_id") or "")
                 try:
                     ent = runtime.brain.accept_proposal(proposal_id)
                     return self._json({"ok": True, "entity": ent})
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
                 except Exception as e:
                     return self._json({"ok": False, "error": str(e)}, 400)
 

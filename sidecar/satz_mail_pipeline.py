@@ -890,12 +890,22 @@ class SatzMailPipeline:
                 "last_retrain_at": self.last_retrain_at,
             }
 
-    def enqueue_messages(self, message_ids: list[str]) -> None:
+    def enqueue_messages(self, message_ids: list[str], profile_id: str | None = None) -> None:
         """
-        Section 4.5: Runs on a queue in priority order: newest 300 first, then the rest.
+        Section 4.5 & M18 §4: Runs on a queue in priority order: newest 300 first, then the rest.
+        Each queued job carries `profile_id` bound at enqueue time.
         """
         if not message_ids:
             return
+        bound_profile_id = (
+            profile_id
+            if profile_id is not None
+            else (
+                self.runtime.passwords.active_profile_id
+                if getattr(self.runtime, "passwords", None) and self.runtime.passwords.unlocked
+                else None
+            )
+        )
         with self.mail.db_lock:
             conn = self.mail._ensure_connection()
             placeholders = ",".join("?" for _ in message_ids)
@@ -910,8 +920,15 @@ class SatzMailPipeline:
         prioritized = newest_300 + rest
 
         with self.lock:
-            existing = set(self._queue)
-            added = [mid for mid in prioritized if mid not in existing]
+            existing = {
+                (item["message_id"] if isinstance(item, dict) else str(item))
+                for item in self._queue
+            }
+            added = [
+                {"message_id": mid, "profile_id": bound_profile_id}
+                for mid in prioritized
+                if mid not in existing
+            ]
             if added:
                 self._queue.extend(added)
                 self.processing_total += len(added)
@@ -929,11 +946,15 @@ class SatzMailPipeline:
                 if not self._queue:
                     self.is_processing = False
                     break
-                mid = self._queue.pop(0)
+                job = self._queue.pop(0)
                 self.is_processing = True
             try:
-                self.process_single_message(mid)
-                processed += 1
+                if isinstance(job, dict):
+                    res = self.process_single_message(job["message_id"], profile_id=job.get("profile_id"))
+                else:
+                    res = self.process_single_message(str(job))
+                if res is not None:
+                    processed += 1
             finally:
                 with self.lock:
                     self.processing_done += 1
@@ -952,10 +973,12 @@ class SatzMailPipeline:
                     if not self._queue:
                         self.is_processing = False
                         break
-                    mid = self._queue.pop(0)
+                    job = self._queue.pop(0)
                     self.is_processing = True
+                mid = job["message_id"] if isinstance(job, dict) else str(job)
+                pid = job.get("profile_id") if isinstance(job, dict) else None
                 try:
-                    self.process_single_message(mid)
+                    self.process_single_message(mid, profile_id=pid)
                 except Exception as exc:
                     self.runtime.record_error("mail_pipeline", f"{mid}: {exc}")
                 finally:
@@ -1283,7 +1306,24 @@ class SatzMailPipeline:
         except Exception:
             return "", 0.0
 
-    def process_single_message(self, message_id: str) -> dict[str, Any] | None:
+    def process_single_message(
+        self,
+        message_id: str,
+        profile_id: str | None = "__UNSET__",
+    ) -> dict[str, Any] | None:
+        pm = getattr(self.runtime, "passwords", None)
+        if profile_id != "__UNSET__":
+            # Section 4 (M18): Pipeline binds the Brain at enqueue.
+            # If the profile is locked, switched, or deleted, drop the job immediately.
+            if not profile_id or pm is None or not pm.unlocked or pm.active_profile_id != profile_id:
+                return None
+            profile_vault = pm.get_profile_vault_path(profile_id)
+            if not profile_vault or not profile_vault.exists():
+                return None
+            bound_profile_id: str | None = profile_id
+        else:
+            bound_profile_id = pm.active_profile_id if (pm is not None and pm.unlocked) else None
+
         with self.mail.db_lock:
             conn = self.mail._ensure_connection()
             row = conn.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
@@ -1438,6 +1478,7 @@ class SatzMailPipeline:
             extracts_map=extracts_map,
             sig_meta=sig_meta,
             account_email=account_email,
+            profile_id=bound_profile_id,
         )
 
         return {
@@ -1455,10 +1496,12 @@ class SatzMailPipeline:
         extracts_map: dict[str, tuple[str, str, float]],
         sig_meta: dict[str, str],
         account_email: str,
+        profile_id: str | None = None,
     ) -> None:
         """
-        Section 4.5.5:
+        Section 4.5.5 & M18 §4:
         - Brain (`$source: mail:<message_id>`):
+          - Binds to `profile_id` and drops if the profile is locked or deleted.
           - Create `person` ONLY for senders the user has replied to OR received at least 2 `email`-labelled messages from.
           - Create `organization` from sender domain, skipping `FREE_MAIL_DOMAINS` and `noreply@` / `no-reply@` / `notifications@`.
           - Add `order` (`Entities/Orders`) and `promotion` (`Entities/Promotions`) entities.
@@ -1467,15 +1510,28 @@ class SatzMailPipeline:
           - `add_passages` for `email` and `information` new text (`conversation_id = 'mail'`).
           - Promotions and pings are NOT added to the knowledge store.
         """
+        pm = getattr(self.runtime, "passwords", None)
+        target_pid = profile_id or (pm.active_profile_id if (pm is not None and pm.unlocked) else None)
+        if not target_pid or pm is None or not pm.unlocked or pm.active_profile_id != target_pid:
+            return
+        profile_vault = pm.get_profile_vault_path(target_pid)
+        if not profile_vault or not profile_vault.exists():
+            return
+
+        from satz_brain import SatzBrain
+
+        brain = SatzBrain(
+            pm.get_profile_brain_dir(target_pid),
+            sgs_root=getattr(self.runtime, "sgs_root", None),
+            locked=False,
+        )
+
         message_id = msg["id"]
         from_addr = (msg["from_addr"] or "").strip().lower()
         from_name = (msg["from_name"] or "").strip()
         local_part = from_addr.split("@")[0] if "@" in from_addr else from_addr
         domain = from_addr.split("@")[-1] if "@" in from_addr else ""
         source_tag = f"mail:{message_id}"
-        brain = getattr(self.runtime, "brain", None)
-        if brain is None:
-            return
 
         org_name: str | None = None
         is_free_domain = domain in FREE_MAIL_DOMAINS
@@ -1566,9 +1622,9 @@ class SatzMailPipeline:
                     "merchant": merchant,
                     "order_number": order_no,
                     "tracking_number": tracking_no,
-                    "tracking_url": extracts_map.get("tracking_url", ("", "", 0.0))[0],
                     "status": status_val,
                     "total": extracts_map.get("total", ("", "", 0.0))[0],
+                    "tracking_url": extracts_map.get("tracking_url", ("", "", 0.0))[0],
                     "$source": source_tag,
                 }
                 brain.upsert_entity(
@@ -1649,6 +1705,7 @@ class SatzMailPipeline:
                             "domain": domain or "mail",
                             "title": msg["subject"],
                             "text": new_text[:4000],
+                            "profile_id": target_pid,
                         }
                     )
                 try:

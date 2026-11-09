@@ -78,3 +78,37 @@ Owner: Nikita Gorshkov · Date: 2026-11-09 · Spec: `docs/PLAN_v0.5.md` · Platf
 - `cargo test --manifest-path src-tauri/Cargo.toml`: **PASS** (`12/12` unit tests passing, including `test_canonical_source_url_dedupe` and `test_bookmarks_and_direct_conversation_auto_archive`)
 - `..\sgs\.venv\Scripts\python.exe -m pytest sidecar -q`: **PASS** (`19/19` tests passing: `13` in `test_satz_models.py` + `4` in `test_m16.py` + `2` in `test_m17.py`)
 - Smoke script artifacts saved to `docs/smoke/v0.5/m17/windows/`.
+
+---
+
+## 4. Milestone 18 (M18): Brain & Profile Integrity
+
+### 4.1 Changes Implemented
+- **Profile-Scoped Passage Store (`planck_store.sqlite`) & Legacy Store Migration (`sidecar/satz_passwords.py`, `sidecar/satz_models.py`):**
+  - Added `ProfilePasswordManager.get_profile_store_path(profile_id=None)` returning `profiles/<id>/planck_store.sqlite` while a profile is unlocked, and `Path(":memory:")` (an ephemeral in-memory SQLite store never written to disk) when no profile is unlocked.
+  - Added `_migrate_legacy_shared_store_if_needed(unlocked_profile_id)` in `SatzSidecarRuntime`:
+    - Backs up top-level `planck_store.sqlite` to `planck_store.sqlite.v04.bak`.
+    - Moves `passages`, `satz_sources`, and `satz_conv_passages` with `question LIKE '[conv:mail]%'` or `url LIKE 'satzmail://%'` to the profile that owns `mail.sqlite`; moves all other passages and tables to the first profile unlocked after upgrade.
+    - Rebuilds entities for existing bookmark passages during migration and removes the top-level `planck_store.sqlite` (`-wal`, `-shm`).
+    - Logs migrated passage counts per profile (`self.last_migration_counts`; verified on the 50-passage v0.4 fixture: `{'demo': 50}`).
+- **No-Profile Guard (`sidecar/satz_brain.py`, `sidecar/satz_models.py`, `src/knowledge.ts`):**
+  - When no profile is unlocked (`SatzBrain(..., locked=True)`), `upsert_entity` and `accept_proposal` raise `PermissionError("unlock a profile to save to your Brain")` (returning HTTP `403` with `{"ok": false, "error": "unlock a profile to save to your Brain"}` on `/knowledge/upsert_entity` and `/brain/accept`), and passive enrichment / mail Brain linking are refused.
+  - Updated `src/knowledge.ts` to accurately describe that the password vault (`vault.enc`), Mail (`mail.sqlite`), the Satz Brain (`BRAIN.md`), and the passage store (`planck_store.sqlite`) are scoped to the unlocked profile, while locked browsing uses an ephemeral in-memory store.
+- **Mail Pipeline Profile Binding (`sidecar/satz_mail_pipeline.py`):**
+  - `enqueue_messages` binds `profile_id` on every queued job. `process_single_message` and `_store_and_link_brain_and_passages` verify the bound profile is still unlocked and open `profiles/<profile_id>/brain`, dropping the job if the profile was locked, switched, or deleted.
+- **Clean Bookmark Entities & Digest Deduplication (`sidecar/satz_models.py`):**
+  - Added `_extract_clean_entity` and `_repair_bookmark_entities_in_store` so bookmark passages derive their entity from the page `<title>` or domain (never `"bookmark"` or sentence-verb phrases like `"Here Are"` / `"Click Here"`), store the `[Bookmark]` marker in `question` only, and do not pollute `queries` / `top_topics` with `"bookmark"`.
+  - Deduplicated `get_digest()` by normalized URL (at most 1 item per URL per digest build) and domain (at most 2 per domain), with `changed:` bookmark items replacing non-changed items for the same URL.
+- **Cascading Delete & Mail Forget + Clean `BRAIN.md` + Webmail Upsert + Encoder Visibility (`sidecar/satz_models.py`, `sidecar/satz_brain.py`, `src/knowledge.ts`):**
+  - `delete_passage(passage_id)` cascades to `satz_conv_passages`, `satz_sources` (when no passages remain for that URL), and orphan `edges` and `queries`.
+  - `forget_conversation` supports `mail:<message_id>` (and `satzmail://message/<id>`), deleting matching `passages`, `satz_conv_passages`, `satz_sources`, and linked Brain entities, plus cascading orphan `edges` and `queries`.
+  - Skipped `$`-prefixed internal attributes (`$source`, `$proposals`, `$Vector`) when rendering `BRAIN.md`, entity Markdown bodies, and the UI entity list.
+  - `enrich_from_page` names webmail account entities after the provider (`Gmail`, `Outlook`, `Proton Mail`), stores the address in `attributes.email`, and upserts by `(provider, email)`.
+  - Added `SatzBrain.get_encoder_status()` and surfaced `brain ranking: semantic (planck13)` vs `brain ranking: lexical (planck13 missing)` in `/doctor`, `/knowledge`, and `src/knowledge.ts`.
+
+### 4.2 M18 Verification & Measurements (Windows 11 RTX 4090 Reference Box)
+- `npm run build`: **PASS** (`dist/` built in `366 ms`, 0 TypeScript errors)
+- `cargo check --manifest-path src-tauri/Cargo.toml`: **PASS**
+- `cargo test --manifest-path src-tauri/Cargo.toml`: **PASS** (`12/12` unit tests passing)
+- `..\sgs\.venv\Scripts\python.exe -m pytest sidecar -q`: **PASS** (`20/20` tests passing, including `test_m18_brain_integrity` with all 13 review checks + 50-passage store migration + cross-profile isolation + digest dedupe)
+- Smoke script artifacts saved to `docs/smoke/v0.5/m18/windows/`.

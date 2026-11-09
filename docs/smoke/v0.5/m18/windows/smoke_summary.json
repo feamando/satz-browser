@@ -1,0 +1,27 @@
+{
+  "milestone": "M18",
+  "platform": "windows",
+  "version": "0.5.0",
+  "date": "2026-11-09",
+  "checks": {
+    "profile_scoped_store": "profiles/<id>/planck_store.sqlite when unlocked; :memory: when locked",
+    "legacy_v04_migration": "50 passages migrated to demo profile; planck_store.sqlite.v04.bak created; top-level planck_store.sqlite deleted",
+    "no_profile_guard": "PermissionError('unlock a profile to save to your Brain') on upsert_entity and accept_proposal when locked",
+    "mail_pipeline_profile_binding": "profile_id bound on enqueue; dropped when locked or switched to other profile",
+    "clean_bookmark_entities": "0 passages or top_topics with entity 'bookmark'",
+    "digest_dedupe": "0 repeated URLs over 7 bookmarks; max 2 per domain; changed: replaces in-place",
+    "cascade_delete_and_mail_forget": "delete_passage cascades satz_conv_passages/edges/queries; /forget mail:<id> deletes mail passages",
+    "encoder_visibility": "brain ranking: semantic (planck13) reported in /doctor and /knowledge"
+  },
+  "screenshots": [
+    "01_launch_status_bar.png",
+    "02_dw_tab_toolbar_visible.png",
+    "03_dw_chat_cited_answer.png",
+    "04_zalando_tab_toolbar_visible.png",
+    "05_empty_tab_no_fabrication.png",
+    "06_mail_unlock_inline.png",
+    "07_mail_fixture_lanes.png",
+    "08_brain_entity_clean.png",
+    "09_profile_isolation.png"
+  ]
+}

@@ -237,8 +237,17 @@ class ProfilePasswordManager:
         self._active_pin: str | None = None
         self._unlocked_env_cache: dict[str, str] = {}
         self._last_activity_ts: float = 0.0
+        self.on_profile_change: Any = None
 
         self._ensure_layout()
+
+    def _notify_profile_change(self) -> None:
+        cb = getattr(self, "on_profile_change", None)
+        if callable(cb):
+            try:
+                cb()
+            except Exception:
+                pass
 
     # ── OS Keychain Device Key Management ────────────────────────────────
     def _get_device_key(self, profile_id: str, create_if_missing: bool = False) -> bytes | None:
@@ -342,16 +351,23 @@ class ProfilePasswordManager:
 
     def get_profile_brain_dir(self, profile_id: str | None = None) -> Path:
         self._check_autolock()
-        pid = profile_id or self.active_profile_id
+        pid = profile_id or (self.active_profile_id if self.unlocked else None)
         if not pid:
-            return self.base_dir / "brain"
+            return self.base_dir / "_locked_brain"
         d = self.get_profile_dir(pid) / "brain"
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def get_profile_store_path(self, profile_id: str | None = None) -> Path:
+        self._check_autolock()
+        pid = profile_id or (self.active_profile_id if self.unlocked else None)
+        if not pid:
+            return Path(":memory:")
+        return self.get_profile_dir(pid) / "planck_store.sqlite"
+
     def get_profile_mail_db_path(self, profile_id: str | None = None) -> Path:
         self._check_autolock()
-        pid = profile_id or self.active_profile_id
+        pid = profile_id or (self.active_profile_id if self.unlocked else None)
         if not pid:
             return self.base_dir / "mail.sqlite"
         return self.get_profile_dir(pid) / "mail.sqlite"
@@ -465,8 +481,9 @@ class ProfilePasswordManager:
             self._unlocked_env_cache = {}
             self._last_activity_ts = time.time()
             self._save_touchid_pin(pid, clean_pin)
-
-            return self.list_profiles()
+            res = self.list_profiles()
+        self._notify_profile_change()
+        return res
 
     def _record_failed_pin(self, reg: dict[str, Any], target: dict[str, Any]) -> None:
         fails = int(target.get("failed_attempts") or 0) + 1
@@ -565,8 +582,9 @@ class ProfilePasswordManager:
             self._unlocked_env_cache = dict(env_map)
             self._last_activity_ts = time.time()
             self._save_touchid_pin(profile_id, clean_pin)
-
-            return self.list_profiles()
+            res = self.list_profiles()
+        self._notify_profile_change()
+        return res
 
     def unlock_with_keychain(self, profile_id: str) -> dict[str, Any]:
         """
@@ -612,7 +630,9 @@ class ProfilePasswordManager:
             self._active_pin = None
             self._unlocked_env_cache.clear()
             self._last_activity_ts = 0.0
-            return self.list_profiles()
+            res = self.list_profiles()
+        self._notify_profile_change()
+        return res
 
     def delete_profile(self, profile_id: str, pin: str) -> dict[str, Any]:
         clean_pin = (pin or "").strip()
@@ -642,7 +662,9 @@ class ProfilePasswordManager:
                 self._active_pin = None
                 self._unlocked_env_cache.clear()
             self._save_registry(reg)
-            return self.list_profiles()
+            res = self.list_profiles()
+        self._notify_profile_change()
+        return res
 
     # ── Vault Parsing & Encrypted Persistence ────────────────────────────
     def _parse_env_text(self, raw_text: str) -> dict[str, str]:

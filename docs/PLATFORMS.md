@@ -9,7 +9,7 @@ Nikita Gorshkov · 2026-11-03 · Living doc · SGS / Satz · Windows 11 (RTX 409
 | Area | Windows 11 (4090) | macOS (M3 Pro) | Code | v0.5 |
 | :--- | :--- | :--- | :--- | :--- |
 | Web engine | WebView2 (Edge 131 UA via `default_browser_user_agent()`) | WKWebView (Safari 18.2 UA via `default_browser_user_agent()`) | `webview_manager.rs:29-38` | M16 [done] |
-| Build and tests | `npm run build`, `cargo test` 12/12, `pytest` 19/19 | `npm run build` ok, `cargo test` 12/12, `pytest` 19/19 | n/a | M16-M17 [done] |
+| Build and tests | `npm run build`, `cargo test` 12/12, `pytest` 20/20 | `npm run build` ok, `cargo test` 12/12, `pytest` 20/20 | n/a | M16-M18 [done] |
 | Sidecar spawn defaults | `..\sgs\.venv\Scripts\python.exe`, `..\sgs` | `../sgs/.venv/bin/python` (fallback `python3` -> `python`), `../sgs` | `lib.rs:46-71`, `lib.rs:449-495` | M16 [done] |
 | App data | `%APPDATA%\com.satz.browser` | `~/Library/Application Support/com.satz.browser` | `satz_models.py:77-83` | n/a |
 | Session token RNG | `BCryptGenRandom` | `/dev/urandom` | `lib.rs:379-405` | n/a |
@@ -18,7 +18,7 @@ Nikita Gorshkov · 2026-11-03 · Living doc · SGS / Satz · Windows 11 (RTX 409
 | Gemma weights | `sgs/models/gemma-4-e4b-it` | Same path. Downloaded 2026-11-03 (15 GB, gitignored) | `satz_models.py:567-569` | n/a |
 | Planck 3 web answers | Reader checkpoint present, band 9.0/10; `/doctor` reports `ready` | `/doctor` reports `ready` or `missing` with one-line fix instruction | `satz_models.py:595-680` | M16 [done] |
 | Hertz / Planck readers | int8 CPU readers present; `/doctor` reports `ready` | `/doctor` reports `ready` or `missing` with one-line fix instruction | `satz_models.py:595-680` | M16 [done] |
-| Brain encoder (Planck 1.3) | `/doctor` reports `brain_encoder` state (`ready` or `missing`) + fix path | `/doctor` reports `brain_encoder` state (`ready` or `missing`) + fix path | `satz_models.py:595-680` | M16 [done], M20 |
+| Brain encoder (Planck 1.3) | `/doctor` & `/knowledge` report `brain ranking: semantic (planck13)` or `brain ranking: lexical (planck13 missing)` + fix path | `/doctor` & `/knowledge` report `brain ranking: semantic (planck13)` or `brain ranking: lexical (planck13 missing)` + fix path | `satz_brain.py:137-152`, `satz_models.py:595-685`, `knowledge.ts:100-112` | M16 [done], M18 [done], M20 |
 | Live tab DOM capture | WebView2 `ExecuteScript` with completion callback, SPA wait, findings | WKWebView `evaluateJavaScript_completionHandler` via `objc2-web-kit` + `block2`; timeout records `capture_mode="timeout"` without unauthenticated `web.fetch` | `webview_manager.rs:892-955`, `satz_models.py:845-875` | M16 [done] |
 | Shortcuts inside pages | WebView2 `AcceleratorKeyPressed` on every child webview, incl. `Ctrl+Shift+L` | App menu accelerators incl. `CmdOrCtrl+Shift+L` (`fill_login`) | `webview_manager.rs:460-520`, `lib.rs:535-560` | M16 [done] |
 | Login autofill | Exact-host fill via `webview.eval` | Same code path + `Cmd+Shift+L` menu accelerator + visible toolbar `[fill login]` | `webview_manager.rs:710-835` | M16 [done] |
@@ -51,3 +51,4 @@ Nikita Gorshkov · 2026-11-03 · Living doc · SGS / Satz · Windows 11 (RTX 409
 | 2026-11-03 | First version, from the macOS field test at `4963e38`. |
 | 2026-11-09 | M16: WKWebView `evaluateJavaScript_completionHandler` live DOM capture, `compute_child_webview_bounds` + `window_titlebar_inset` toolbar fix, realistic browser UA on WebView2/WKWebView, MPS/CUDA/CPU Gemma device selection + 5 s SSE heartbeat + 30 s watchdog, per-OS sidecar defaults, `/doctor` endpoint, and `Cmd+Shift+L` macOS accelerator. |
 | 2026-11-09 | M17: Honest source pills (`dom`/`fetch`/`empty [recapture]`), 0-char source exclusion from citations, canonical URL source deduplication, plain-language errors + `[debug]` drawer, ordered `Esc`/click-away dismissal, inline Mail unlock + macOS Touch ID (`unlock_with_keychain`), `about:blank` new tabs, unseeded bookmarks, and `spellcheck="false" autocorrect="off" autocapitalize="off"` across inputs. |
+| 2026-11-09 | M18: Profile-scoped `profiles/<id>/planck_store.sqlite` + `.v04.bak` migration (`:memory:` when locked), no-profile Brain write guard, mail pipeline `profile_id` binding, clean bookmark entities, digest URL/domain deduplication, cascading `delete_passage` and `mail:<id>` `/forget`, hidden `$` attributes in `BRAIN.md`, webmail `(provider, email)` upsert, and encoder mode visibility (`brain ranking: semantic (planck13)` vs `lexical (planck13 missing)`). |

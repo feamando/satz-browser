@@ -36,6 +36,10 @@ export function renderKnowledgeView(
 ): void {
   const kb = state.knowledge;
   const brainEntities = kb.brain?.entities ?? [];
+  const brainRankingLabel =
+    kb.brain?.brain_ranking ??
+    kb.brain?.encoder?.label ??
+    "brain ranking: lexical (planck13 missing)";
   const bookmarksIndexed = kb.bookmarks_indexed ?? [];
   const profileInfo = kb.profile;
   const profilesList = profileInfo?.profiles ?? [];
@@ -101,8 +105,8 @@ export function renderKnowledgeView(
           active profile: ${
             isUnlocked && activeProfile
               ? `${escapeHtml(activeProfile.name)} [unlocked]`
-              : "none [locked - unlock with 6-digit PIN to access profile .env passwords]"
-          } · brain entities: ${brainEntities.length} · indexed bookmarks: ${bookmarksIndexed.length} · ingest queue: ${kb.queue_len}
+              : "none [locked - unlock a profile to save to your Brain, Mail, and password vault; browsing uses an ephemeral in-memory store]"
+          } · brain entities: ${brainEntities.length} · ${escapeHtml(brainRankingLabel)} · indexed bookmarks: ${bookmarksIndexed.length} · ingest queue: ${kb.queue_len}
         </div>
         ${
           state.profileStatusMessage
@@ -202,7 +206,7 @@ export function renderKnowledgeView(
         </div>
         ${
           !isUnlocked
-            ? `<div class="muted">locked: password files (.env) are strictly scoped to a profile. create or unlock a profile with your 6-digit PIN above so the agent and background bookmark indexer can use your stored credentials.</div>`
+            ? `<div class="muted">locked: vault credentials (vault.enc), Mail (mail.sqlite), the Satz Brain (BRAIN.md), and the passage store (planck_store.sqlite) are scoped to an unlocked profile. with no profile unlocked, Brain writes are refused ("unlock a profile to save to your Brain") and passages stay in an ephemeral in-memory store.</div>`
             : `
           <div class="muted">
             profile .env file: ${escapeHtml(vault?.env_path ?? "")} · only accessible while profile "${escapeHtml(activeProfile?.name ?? "")}" is unlocked. used by the agent when prompted and in the background for bookmarks.
@@ -324,28 +328,31 @@ export function renderKnowledgeView(
       <div class="knowledge-section">
         <div class="panel-header">
           <span>satz brain entities (${brainEntities.length})</span>
+          <span class="muted">${escapeHtml(brainRankingLabel)}</span>
         </div>
         ${
-          brainEntities.length === 0
-            ? `<div class="muted">no brain entities stored yet. browse authenticated tabs or ask chat to store addresses, contacts, accounts, or notes.</div>`
-            : brainEntities
-                .map((e) => {
-                  const attrEntries = Object.entries(e.attributes ?? {})
-                    .filter(([k]) => k !== "source_url")
-                    .map(([k, v]) => `${k}: ${String(v)}`)
-                    .join(" · ");
-                  return `
-              <div class="source-row">
-                <div class="source-row-top">
-                  <span>[${escapeHtml(e.type)}] ${escapeHtml(e.name)} <span class="muted">(tier ${e.tier} · ${escapeHtml(e.path)})</span></span>
-                  <button class="rail-menu-btn" data-delete-brain-entity="${escapeHtml(e.slug)}">[delete]</button>
+          !isUnlocked
+            ? `<div class="muted">unlock a profile to save to your Brain.</div>`
+            : brainEntities.length === 0
+              ? `<div class="muted">no brain entities stored yet. browse authenticated tabs or ask chat to store addresses, contacts, accounts, or notes.</div>`
+              : brainEntities
+                  .map((e) => {
+                    const attrEntries = Object.entries(e.attributes ?? {})
+                      .filter(([k]) => k !== "source_url" && !k.startsWith("$"))
+                      .map(([k, v]) => `${k}: ${String(v)}`)
+                      .join(" · ");
+                    return `
+                <div class="source-row">
+                  <div class="source-row-top">
+                    <span>[${escapeHtml(e.type)}] ${escapeHtml(e.name)} <span class="muted">(tier ${e.tier} · ${escapeHtml(e.path)})</span></span>
+                    <button class="rail-menu-btn" data-delete-brain-entity="${escapeHtml(e.slug)}">[delete]</button>
+                  </div>
+                  <div>${escapeHtml(e.summary)}</div>
+                  ${attrEntries ? `<div class="muted">${escapeHtml(attrEntries)}</div>` : ""}
                 </div>
-                <div>${escapeHtml(e.summary)}</div>
-                ${attrEntries ? `<div class="muted">${escapeHtml(attrEntries)}</div>` : ""}
-              </div>
-            `;
-                })
-                .join("")
+              `;
+                  })
+                  .join("")
         }
       </div>
 
