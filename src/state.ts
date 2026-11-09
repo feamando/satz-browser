@@ -85,6 +85,15 @@ export interface AppState {
   mailEvalItems: Array<Record<string, unknown>>;
   mailEvalIdx: number;
   mailEvalReport: Record<string, unknown> | null;
+  mailClassifierInfo: {
+    model_version: string;
+    training_labels: number;
+    target_labels: number;
+    corrections_count: number;
+    status_text: string;
+  };
+  mailOnboardingCandidates: Array<Record<string, unknown>>;
+  mailOnboardingOpen: boolean;
   mailComposeDrafts: Record<
     string,
     {
@@ -100,6 +109,7 @@ export interface AppState {
       confirm_outbox_id?: string;
       confirm_token?: string;
       confirm_line?: string;
+      new_recipients?: string[];
       queued_outbox_id?: string;
       undo_until?: number;
       status_msg?: string;
@@ -181,6 +191,15 @@ export const state: AppState = {
   mailEvalItems: [],
   mailEvalIdx: 0,
   mailEvalReport: null,
+  mailClassifierInfo: {
+    model_version: "cold",
+    training_labels: 0,
+    target_labels: 50,
+    corrections_count: 0,
+    status_text: "classifier: learning · 0 / 50 labels",
+  },
+  mailOnboardingCandidates: [],
+  mailOnboardingOpen: false,
   mailComposeDrafts: {},
 };
 

@@ -137,6 +137,8 @@ export async function refreshMailState(): Promise<void> {
     acctRes.presets && acctRes.presets.length > 0
       ? acctRes.presets
       : DEFAULT_PRESETS;
+  // Reset cached site-tab promo codes so active merchant tabs re-query updated codes
+  state.siteTabPromoCodes = {};
 
   if (acctRes.unlocked && state.mailAccounts.length > 0) {
     await apiEnsureMailConversation();
@@ -149,6 +151,10 @@ export async function refreshMailState(): Promise<void> {
     };
     state.mailLaneRows = laneRes.rows ?? [];
     state.mailLaneGroups = laneRes.groups ?? [];
+    if (laneRes.classifier) {
+      state.mailClassifierInfo = laneRes.classifier;
+    }
+    state.mailOnboardingCandidates = laneRes.onboarding_candidates ?? [];
     if (state.mailActiveLane === "inbox") {
       state.mailInboxRows = laneRes.rows ?? [];
     }
@@ -161,6 +167,7 @@ export async function refreshMailState(): Promise<void> {
     state.mailLaneRows = [];
     state.mailLaneGroups = [];
     state.mailCounts = { inbox_unread: 0, pings: 0, orders: 0, promos: 0 };
+    state.mailOnboardingCandidates = [];
     state.mailTriageOverview = "";
     state.mailTriageSources = [];
   }
@@ -880,7 +887,7 @@ export function renderMailLaneView(
                           <span class="muted">tracking: ${escapeHtml(trackingNo || "link")}</span>
                           ${
                             trackingUrl
-                              ? `<button data-open-site-url="${escapeHtml(trackingUrl)}">[track package]</button>`
+                              ? `<button data-open-site-url="${escapeHtml(trackingUrl)}">[track]</button>`
                               : ""
                           }
                         </div>`
@@ -979,11 +986,63 @@ export function renderMailLaneView(
             .join("");
   }
 
+  const clf = state.mailClassifierInfo;
+  const isCold = clf.model_version === "cold";
+  const onboardingCands = state.mailOnboardingCandidates ?? [];
+  const showOnboardingBtn = isCold && onboardingCands.length > 0;
+  const onboardingHtml =
+    state.mailOnboardingOpen && onboardingCands.length > 0
+      ? `
+      <div class="kb-card" id="mail-onboarding-panel">
+        <div class="kb-card-header">
+          <span>help sort ${onboardingCands.length} email${onboardingCands.length === 1 ? "" : "s"} · ${escapeHtml(clf.status_text)}</span>
+          <button id="mail-onboarding-close-btn">[close]</button>
+        </div>
+        <div class="mail-lane-list">
+          ${onboardingCands
+            .map((cand) => {
+              const cid = String(cand.id ?? "");
+              const cfrom = String(cand.from_name || cand.from_addr || "unknown");
+              const csubj = String(cand.subject || "(no subject)");
+              const csnip = String(cand.snippet || "").slice(0, 140);
+              const cpred = String(cand.pred_label || "email");
+              const yesLabel = cpred === "promotion" ? "promotion" : "promotion";
+              const noLabel = cpred === "promotion" ? "email" : "email";
+              return `
+                <div class="kb-card" data-onboarding-card="${escapeHtml(cid)}">
+                  <div class="rail-row">
+                    <span><strong>${escapeHtml(cfrom)}</strong> · ${escapeHtml(csubj)}</span>
+                    <span class="muted">predicted: [${escapeHtml(cpred)}]</span>
+                  </div>
+                  <div class="muted">${escapeHtml(csnip)}</div>
+                  <div class="rail-row">
+                    <span class="muted">is this a promotion?</span>
+                    <div>
+                      <button data-onboard-msg="${escapeHtml(cid)}" data-onboard-label="${yesLabel}">[y · promos]</button>
+                      <button data-onboard-msg="${escapeHtml(cid)}" data-onboard-label="${noLabel}">[n · inbox]</button>
+                      <button data-onboard-msg="${escapeHtml(cid)}" data-onboard-label="ping">[pings]</button>
+                      <button data-onboard-msg="${escapeHtml(cid)}" data-onboard-label="information">[orders]</button>
+                    </div>
+                  </div>
+                </div>
+              `;
+            })
+            .join("")}
+        </div>
+      </div>
+    `
+      : "";
+
   container.innerHTML = `
     <div class="knowledge-view">
       <div class="kb-header">
-        <span>mail · ${escapeHtml(lane)} (${rows.length}) · keys: j/k move, Enter open, r reply, c compose, e hide, 1-4 move, / search</span>
+        <span>mail · ${escapeHtml(lane)} (${rows.length}) · ${escapeHtml(clf.status_text)} · keys: j/k move, Enter open, r reply, c compose, e hide, 1-4 move, / search</span>
         <div>
+          ${
+            showOnboardingBtn
+              ? `<button id="mail-onboarding-toggle-btn" class="${state.mailOnboardingOpen ? "active" : ""}">[help sort 10 emails]</button>`
+              : ""
+          }
           <input
             id="mail-search-input"
             class="kb-input"
@@ -1003,6 +1062,7 @@ export function renderMailLaneView(
           <button id="mail-lane-refresh-btn">[sync &amp; refresh]</button>
         </div>
       </div>
+      ${onboardingHtml}
       <div class="mail-lane-list">
         ${bodyHtml}
       </div>
@@ -1010,11 +1070,71 @@ export function renderMailLaneView(
     </div>
   `;
 
+  container
+    .querySelector("#mail-onboarding-toggle-btn")
+    ?.addEventListener("click", async () => {
+      state.mailOnboardingOpen = !state.mailOnboardingOpen;
+      await actions.onRefreshState();
+    });
+
+  container
+    .querySelector("#mail-onboarding-close-btn")
+    ?.addEventListener("click", async () => {
+      state.mailOnboardingOpen = false;
+      await actions.onRefreshState();
+    });
+
+  container.querySelectorAll("[data-onboard-msg]").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const el = btn as HTMLElement;
+      const mid = el.getAttribute("data-onboard-msg");
+      const targetLbl = el.getAttribute("data-onboard-label") as
+        | "email"
+        | "ping"
+        | "information"
+        | "promotion"
+        | null;
+      if (!mid || !targetLbl) return;
+      await sidecarLabelMailMessage(mid, targetLbl);
+      await refreshMailState();
+      await actions.onRefreshState();
+    });
+  });
+
   const searchInput = container.querySelector(
     "#mail-search-input"
   ) as HTMLInputElement | null;
+  let searchDebounceTimer: number | null = null;
+  searchInput?.addEventListener("input", () => {
+    if (searchDebounceTimer !== null) {
+      window.clearTimeout(searchDebounceTimer);
+    }
+    searchDebounceTimer = window.setTimeout(async () => {
+      const q = searchInput.value.trim();
+      state.mailSearchQuery = q;
+      if (!q) {
+        state.mailSearchRows = null;
+      } else {
+        const res = await sidecarSearchMail(q);
+        state.mailSearchRows = res.rows ?? [];
+      }
+      await actions.onRefreshState();
+      const refocused = document.getElementById(
+        "mail-search-input"
+      ) as HTMLInputElement | null;
+      if (refocused) {
+        refocused.focus();
+        const len = refocused.value.length;
+        refocused.setSelectionRange(len, len);
+      }
+    }, 220);
+  });
   searchInput?.addEventListener("keydown", async (e) => {
     if (e.key === "Enter") {
+      if (searchDebounceTimer !== null) {
+        window.clearTimeout(searchDebounceTimer);
+      }
       const q = searchInput.value.trim();
       state.mailSearchQuery = q;
       if (!q) {
@@ -1025,6 +1145,9 @@ export function renderMailLaneView(
       }
       await actions.onRefreshState();
     } else if (e.key === "Escape") {
+      if (searchDebounceTimer !== null) {
+        window.clearTimeout(searchDebounceTimer);
+      }
       state.mailSearchQuery = "";
       state.mailSearchRows = null;
       await actions.onRefreshState();
@@ -1299,7 +1422,7 @@ export function renderComposeTabView(
         draft.confirm_token && draft.confirm_line
           ? `<div class="kb-card" id="compose-confirm-bar">
               <div class="rail-row">
-                <span>${escapeHtml(draft.confirm_line)}</span>
+                <span>${escapeHtml(draft.confirm_line).replace(/\[new\]/g, '<span class="source-cut-badge">[new]</span>')}</span>
                 <div>
                   <button id="compose-confirm-send-btn">[confirm]</button>
                   <button id="compose-cancel-send-btn">[cancel]</button>
@@ -1377,6 +1500,15 @@ export function renderComposeTabView(
   container
     .querySelectorAll("input, textarea, select")
     .forEach((el) => el.addEventListener("input", syncFields));
+
+  const bodyTextarea = container.querySelector(
+    "#compose-body-textarea"
+  ) as HTMLTextAreaElement | null;
+  if (bodyTextarea && draft.reply_to_message_id && !draft.confirm_token) {
+    bodyTextarea.focus();
+    bodyTextarea.setSelectionRange(0, 0);
+    bodyTextarea.scrollTop = 0;
+  }
 
   container
     .querySelector("#compose-draft-btn")

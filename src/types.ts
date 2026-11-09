@@ -247,6 +247,14 @@ export interface MailMessageRow {
   platform?: string;
 }
 
+export interface MailClassifierInfo {
+  model_version: string;
+  training_labels: number;
+  target_labels: number;
+  corrections_count: number;
+  status_text: string;
+}
+
 export interface MailLaneResponse {
   unlocked: boolean;
   lane: "inbox" | "pings" | "orders" | "promos";
@@ -254,6 +262,8 @@ export interface MailLaneResponse {
   groups?: Array<Record<string, unknown>>;
   next_cursor?: number | null;
   counts: MailLaneCounts;
+  classifier?: MailClassifierInfo;
+  onboarding_candidates?: Array<Record<string, unknown>>;
 }
 
 export interface DigestEntry {

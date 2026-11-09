@@ -1551,9 +1551,84 @@ class SatzMailManager:
             ).fetchone()
             return int(row["c"] if row else 0)
 
+    @staticmethod
+    def _default_tracking_url_for_number(tracking_no: str) -> str:
+        t = (tracking_no or "").strip()
+        if not t:
+            return ""
+        if t.upper().startswith("1Z"):
+            return f"https://www.ups.com/track?tracknum={t}"
+        if t.upper().startswith("JJD") or (t.isdigit() and len(t) >= 12):
+            return f"https://www.dhl.de/de/privatkunden/pakete-empfangen/verfolgen.html?piececode={t}"
+        return f"https://duckduckgo.com/?q=track+{t}"
+
+    def _compute_classifier_and_onboarding_info(
+        self,
+        conn: sqlite3.Connection,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        model_ver = getattr(self.pipeline, "model_version", "cold") if self.pipeline is not None else "cold"
+        train_row = conn.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM labels l
+            WHERE l.source IN ('gemma', 'user')
+              AND l.message_id NOT IN (SELECT message_id FROM eval_labels)
+            """
+        ).fetchone()
+        training_labels = int(train_row["c"] if train_row else 0)
+        corr_row = conn.execute("SELECT COUNT(*) AS c FROM corrections").fetchone()
+        corr_count = int(corr_row["c"] if corr_row else 0)
+
+        status_text = (
+            f"classifier: learning · {training_labels} / 50 labels"
+            if model_ver == "cold"
+            else f"classifier: {model_ver} · {training_labels} labels"
+        )
+        classifier_info = {
+            "model_version": model_ver,
+            "training_labels": training_labels,
+            "target_labels": 50,
+            "corrections_count": corr_count,
+            "status_text": status_text,
+        }
+
+        onboarding_candidates: list[dict[str, Any]] = []
+        if model_ver == "cold":
+            cand_rows = conn.execute(
+                """
+                SELECT m.id, m.from_name, m.from_addr, m.subject, m.snippet, m.date,
+                       COALESCE(l.label, 'email') AS pred_label,
+                       COALESCE(l.confidence, 0.8) AS pred_confidence
+                FROM messages m
+                LEFT JOIN labels l ON l.message_id = m.id
+                WHERE m.hidden = 0
+                  AND UPPER(m.folder) = 'INBOX'
+                  AND m.id NOT IN (SELECT message_id FROM corrections)
+                ORDER BY
+                  CASE WHEN COALESCE(l.label, 'email') = 'promotion' THEN 0 ELSE 1 END ASC,
+                  m.date DESC
+                LIMIT 10
+                """
+            ).fetchall()
+            for cr in cand_rows:
+                pred = str(cr["pred_label"] or "email")
+                onboarding_candidates.append(
+                    {
+                        "id": cr["id"],
+                        "from_name": cr["from_name"],
+                        "from_addr": cr["from_addr"],
+                        "subject": cr["subject"],
+                        "snippet": cr["snippet"],
+                        "date": cr["date"],
+                        "pred_label": pred,
+                        "proposed_label": "promotion" if pred == "promotion" else pred,
+                    }
+                )
+        return classifier_info, onboarding_candidates
+
     def get_lane(self, name: str = "inbox", cursor: int = 0, limit: int = 50) -> dict[str, Any]:
         """
-        Section 4.1 & 4.8: Returns lane rows (50 per page) for `inbox`, `pings`, `orders`, `promos`.
+        Section 4.1, 4.8 & M19 §5: Returns lane rows (50 per page) for `inbox`, `pings`, `orders`, `promos`.
         """
         self.passwords._check_autolock()
         if not self.passwords.unlocked:
@@ -1563,6 +1638,14 @@ class SatzMailManager:
                 "rows": [],
                 "groups": [],
                 "counts": {"inbox_unread": 0, "pings": 0, "orders": 0, "promos": 0},
+                "classifier": {
+                    "model_version": "cold",
+                    "training_labels": 0,
+                    "target_labels": 50,
+                    "corrections_count": 0,
+                    "status_text": "classifier: learning · 0 / 50 labels",
+                },
+                "onboarding_candidates": [],
             }
 
         lane = (name or "inbox").strip().lower()
@@ -1572,6 +1655,7 @@ class SatzMailManager:
         with self.db_lock:
             conn = self._ensure_connection()
             counts = self._compute_lane_counts(conn)
+            classifier_info, onboarding_candidates = self._compute_classifier_and_onboarding_info(conn)
 
             if lane == "inbox":
                 rows = conn.execute(
@@ -1600,6 +1684,8 @@ class SatzMailManager:
                     "rows": [dict(r) for r in rows],
                     "next_cursor": offset + len(rows) if len(rows) == page_limit else None,
                     "counts": counts,
+                    "classifier": classifier_info,
+                    "onboarding_candidates": onboarding_candidates,
                 }
 
             if lane == "pings":
@@ -1631,9 +1717,19 @@ class SatzMailManager:
                     "rows": items,
                     "groups": list(groups_map.values()),
                     "counts": counts,
+                    "classifier": classifier_info,
+                    "onboarding_candidates": onboarding_candidates,
                 }
 
             if lane == "orders":
+                status_rank = {
+                    "ordered": 1,
+                    "shipped": 2,
+                    "out for delivery": 3,
+                    "delivered": 4,
+                    "cancelled": 5,
+                    "refunded": 5,
+                }
                 rows = conn.execute(
                     """
                     SELECT m.id, m.thread_id, m.from_name, m.from_addr, m.subject, m.snippet, m.date, m.seen
@@ -1655,23 +1751,26 @@ class SatzMailManager:
                     ext = {er["field"]: er["value"] for er in ext_rows}
                     order_no = ext.get("order_number") or ""
                     merchant = ext.get("merchant") or r["from_name"] or r["from_addr"]
-                    key = f"{merchant.lower()}::{order_no}" if order_no else f"thr::{r['thread_id'] or mid}"
+                    key = f"ord::{order_no.lower()}" if order_no else f"thr::{r['thread_id'] or mid}"
                     card = orders_by_key.get(key)
+                    msg_status = (ext.get("status") or "ordered").strip().lower()
                     email_entry = {
                         "id": mid,
                         "subject": r["subject"],
                         "date": r["date"],
                         "snippet": r["snippet"],
-                        "status": ext.get("status") or "",
+                        "status": msg_status,
                     }
                     if not card:
+                        t_no = ext.get("tracking_number") or ""
+                        t_url = ext.get("tracking_url") or (self._default_tracking_url_for_number(t_no) if t_no else "")
                         orders_by_key[key] = {
                             "key": key,
                             "merchant": merchant,
                             "order_number": order_no,
-                            "status": ext.get("status") or "ordered",
-                            "tracking_number": ext.get("tracking_number") or "",
-                            "tracking_url": ext.get("tracking_url") or "",
+                            "status": msg_status,
+                            "tracking_number": t_no,
+                            "tracking_url": t_url,
                             "total": ext.get("total") or "",
                             "last_update": r["date"],
                             "latest_message_id": mid,
@@ -1679,19 +1778,56 @@ class SatzMailManager:
                         }
                     else:
                         card["emails"].append(email_entry)
+                        if status_rank.get(msg_status, 1) > status_rank.get(str(card["status"]).lower(), 1):
+                            card["status"] = msg_status
+                        if float(r["date"] or 0) > float(card["last_update"] or 0):
+                            card["last_update"] = r["date"]
+                            card["latest_message_id"] = mid
                         if not card["order_number"] and order_no:
                             card["order_number"] = order_no
                         if not card["tracking_number"] and ext.get("tracking_number"):
                             card["tracking_number"] = ext["tracking_number"]
                         if not card["tracking_url"] and ext.get("tracking_url"):
                             card["tracking_url"] = ext["tracking_url"]
+                        if not card["tracking_url"] and card["tracking_number"]:
+                            card["tracking_url"] = self._default_tracking_url_for_number(card["tracking_number"])
                         if not card["total"] and ext.get("total"):
                             card["total"] = ext["total"]
+
+                # Merge any fresher status/tracking/total from Brain `order` entities
+                brain = getattr(self.runtime, "brain", None)
+                if brain is not None and not getattr(brain, "locked", False):
+                    try:
+                        brain_orders = [e for e in brain.list_entities() if e.get("type") == "order"]
+                        for card in orders_by_key.values():
+                            ord_no = str(card.get("order_number") or "").lower()
+                            if not ord_no:
+                                continue
+                            for bo in brain_orders:
+                                b_attrs = bo.get("attributes") or {}
+                                b_ord = str(b_attrs.get("order_number") or "").lower()
+                                if b_ord == ord_no or ord_no in str(bo.get("name") or "").lower():
+                                    b_st = str(b_attrs.get("status") or "").strip().lower()
+                                    if status_rank.get(b_st, 0) > status_rank.get(str(card["status"]).lower(), 0):
+                                        card["status"] = b_st
+                                    if not card["tracking_number"] and b_attrs.get("tracking_number"):
+                                        card["tracking_number"] = str(b_attrs["tracking_number"])
+                                    if not card["tracking_url"] and b_attrs.get("tracking_url"):
+                                        card["tracking_url"] = str(b_attrs["tracking_url"])
+                                    if not card["tracking_url"] and card["tracking_number"]:
+                                        card["tracking_url"] = self._default_tracking_url_for_number(card["tracking_number"])
+                                    if not card["total"] and b_attrs.get("total"):
+                                        card["total"] = str(b_attrs["total"])
+                    except Exception:
+                        pass
+
                 return {
                     "unlocked": True,
                     "lane": "orders",
                     "rows": list(orders_by_key.values()),
                     "counts": counts,
+                    "classifier": classifier_info,
+                    "onboarding_candidates": onboarding_candidates,
                 }
 
             if lane == "promos":
@@ -1756,9 +1892,18 @@ class SatzMailManager:
                     "lane": "promos",
                     "rows": list(companies.values()),
                     "counts": counts,
+                    "classifier": classifier_info,
+                    "onboarding_candidates": onboarding_candidates,
                 }
 
-            return {"unlocked": True, "lane": lane, "rows": [], "counts": counts}
+            return {
+                "unlocked": True,
+                "lane": lane,
+                "rows": [],
+                "counts": counts,
+                "classifier": classifier_info,
+                "onboarding_candidates": onboarding_candidates,
+            }
 
     def _compute_lane_counts(self, conn: sqlite3.Connection) -> dict[str, int]:
         inbox_unread = conn.execute(
@@ -2273,17 +2418,35 @@ class SatzMailManager:
                     prev_refs = (orig["references"] or "").strip()
                     references = f"{prev_refs} {in_reply_to}".strip()
 
-            # Check known vs new recipients
+            # Section 5 (M19): `[new]` badge when the recipient has never received mail from this account
             new_recipients: list[str] = []
+            from_low = (from_email or "").strip().lower()
             for rcpt in to_list + cc_list + bcc_list:
-                rcpt_low = rcpt.lower()
+                rcpt_m = re.search(r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+)", rcpt)
+                rcpt_low = (rcpt_m.group(1) if rcpt_m else rcpt).strip().lower()
                 known = conn.execute(
                     """
                     SELECT 1 FROM messages
-                    WHERE LOWER(from_addr) = ? OR LOWER(to_json) LIKE ? OR LOWER(cc_json) LIKE ?
+                    WHERE account_id = ?
+                      AND (LOWER(from_addr) = ? OR UPPER(folder) IN ('SENT', 'SENT MESSAGES', 'SENT ITEMS'))
+                      AND (LOWER(to_json) LIKE ? OR LOWER(cc_json) LIKE ?)
+                    UNION ALL
+                    SELECT 1 FROM outbox
+                    WHERE account_id = ?
+                      AND status = 'sent'
+                      AND (LOWER(to_json) LIKE ? OR LOWER(cc_json) LIKE ? OR LOWER(bcc_json) LIKE ?)
                     LIMIT 1
                     """,
-                    (rcpt_low, f"%{rcpt_low}%", f"%{rcpt_low}%"),
+                    (
+                        account_id,
+                        from_low,
+                        f"%{rcpt_low}%",
+                        f"%{rcpt_low}%",
+                        account_id,
+                        f"%{rcpt_low}%",
+                        f"%{rcpt_low}%",
+                        f"%{rcpt_low}%",
+                    ),
                 ).fetchone()
                 if not known:
                     new_recipients.append(rcpt)

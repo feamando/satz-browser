@@ -464,10 +464,10 @@ def split_email_parts(
             quote_lines = [html_quote]
 
     # 2. Separate Footer block from `pre_quote_lines`
-    # Scan from the bottom or first footer block in the lower half of the message
+    # Scan from the bottom or first footer block after the opening body line
     footer_start: int | None = None
     for li, ln in enumerate(pre_quote_lines):
-        if FOOTER_LINE_RE.search(ln):
+        if li > 0 and FOOTER_LINE_RE.search(ln):
             # Treat from this line onward as footer
             footer_start = li
             break
@@ -1032,24 +1032,185 @@ class SatzMailPipeline:
                 return None
         return None
 
+    @staticmethod
+    def count_promo_heuristic_signals(
+        from_str: str,
+        subject: str,
+        body_text: str,
+    ) -> tuple[int, list[str]]:
+        """
+        Section 5 (M19): Promo cold-start heuristic without `List-Unsubscribe`.
+        Evaluates the 4 promo signals:
+        1) `code_pattern`: `[A-Z0-9]{5,}` next to code/gutschein/voucher/rabattcode/coupon
+        2) `discount_pattern`: `\\d+\\s?%` (with off/rabatt/discount/sparen/save) or `\\d+\\s?(EUR|€|$) off`
+        3) `unsubscribe_body`: unsubscribe / abbestellen / opt-out / marketing preferences text in body
+        4) `sender_local_part`: sender local-part in (`newsletter`, `news`, `deals`, `promo`, `marketing`, `angebote`, `offers`, or `noreply` + discount)
+        """
+        combined = f"{subject or ''}\n{body_text or ''}"
+        signals: list[str] = []
+
+        # 1. Code pattern: [A-Z0-9]{5,} next to code / gutschein / voucher
+        has_code = False
+        code_re = re.compile(
+            r"\b(?:promo\s*code|gutscheincode|rabattcode|coupon\s*code|voucher\s*code|voucher|gutschein|code|coupon)\b[\s:=\-#]*([A-Z0-9_-]{5,20})\b",
+            re.IGNORECASE,
+        )
+        for m in code_re.finditer(combined):
+            cand = m.group(1).strip().strip(".,;:!?)(")
+            if len(cand) >= 5 and is_valid_extracted_code(cand):
+                has_code = True
+                break
+        if not has_code:
+            for pat in VOUCHER_CODE_PATTERNS:
+                for m in pat.finditer(combined):
+                    cand = m.group(1).strip().strip(".,;:!?)(")
+                    if len(cand) >= 5 and is_valid_extracted_code(cand):
+                        has_code = True
+                        break
+                if has_code:
+                    break
+        if has_code:
+            signals.append("code_pattern")
+
+        # 2. Discount pattern: `\d+\s?%` or `\d+\s?(EUR|€) off`
+        discount_re = re.compile(
+            r"(?:"
+            r"\b\d{1,3}\s?%\s*(?:off|rabatt|discount|sparen)\b|"
+            r"\b(?:save|sparen(?:\s+sie)?|special)\s+\d{1,3}\s?%|"
+            r"\b(?:\d{1,3}(?:[.,]\d{1,2})?\s?(?:EUR|USD|GBP|€|\$|£)|(?:EUR|USD|GBP|€|\$|£)\s?\d{1,3}(?:[.,]\d{1,2})?)\s*(?:off|rabatt|gutschein|discount|voucher)\b"
+            r")",
+            re.IGNORECASE,
+        )
+        has_discount = bool(discount_re.search(combined))
+        if has_discount:
+            signals.append("discount_pattern")
+
+        # 3. Unsubscribe text in body
+        unsub_re = re.compile(
+            r"\b(?:unsubscribe|abbestellen|newsletter\s+abmelden|abmelden|opt[\s-]?out|marketing\s+preferences|manage\s+preferences|stop\s+receiving\s+marketing)\b",
+            re.IGNORECASE,
+        )
+        if unsub_re.search(body_text or ""):
+            signals.append("unsubscribe_body")
+
+        # 4. Sender local-part in (`newsletter`, `news`, `deals`, `promo`, `marketing`, `angebote`, `offers`, `noreply` + discount)
+        email_m = re.search(r"([A-Za-z0-9._%+-]+)@([A-Za-z0-9.-]+)", from_str or "")
+        local_part = email_m.group(1).lower() if email_m else (from_str or "").strip().lower().split("@")[0]
+        promo_locals = {
+            "newsletter",
+            "news",
+            "deals",
+            "promo",
+            "promotions",
+            "marketing",
+            "angebote",
+            "offers",
+        }
+        noreply_locals = {"noreply", "no-reply", "no_reply", "donotreply", "do-not-reply"}
+        if local_part in promo_locals or any(local_part.startswith(f"{p}.") or local_part.startswith(f"{p}-") or local_part.startswith(f"{p}_") for p in promo_locals):
+            signals.append("sender_local_part")
+        elif local_part in noreply_locals and has_discount:
+            signals.append("sender_local_part")
+
+        return len(signals), signals
+
+    @staticmethod
+    def compute_gemma_label_from_logits(
+        label_logits: dict[str, float],
+    ) -> tuple[str, float, str]:
+        """
+        Section 5 (M19): Computes probability distribution over the 4 label token logits
+        (`email`, `ping`, `information`, `promotion`).
+        If the winning probability is below `CONFIDENCE_THRESHOLD` (`0.75`), falls back to
+        `email` (safe direction).
+        Returns `(final_label, confidence, raw_argmax_label)`.
+        """
+        import math
+
+        clean_logits = {lbl: float(label_logits.get(lbl, -100.0)) for lbl in LABELS}
+        max_l = max(clean_logits.values())
+        exps = {lbl: math.exp(max(-60.0, clean_logits[lbl] - max_l)) for lbl in LABELS}
+        total = sum(exps.values()) or 1.0
+        probs = {lbl: exps[lbl] / total for lbl in LABELS}
+        raw_best = max(LABELS, key=lambda l: probs[l])
+        conf = float(probs[raw_best])
+        if conf < CONFIDENCE_THRESHOLD:
+            return "email", conf, raw_best
+        return raw_best, conf, raw_best
+
     def _label_with_gemma(
         self,
         from_str: str,
         subject: str,
         new_text: str,
         header_hints: str,
-    ) -> str:
+        full_body_text: str = "",
+    ) -> tuple[str, float]:
         """
-        Section 4.5.3: Cold start or below threshold: Gemma labels with a fixed prompt listing
-        the 4 labels and their definitions, greedy decoding, output one word. Unparseable -> `email`.
+        Section 4.5.3 & M19 §5: Cold start or below threshold:
+        Gemma labels return a confidence from the logits of the four label tokens instead of
+        the fixed `0.85`. Below `0.75` -> `email` (safe direction).
+        Without `List-Unsubscribe`, classifies as `promotion` when >= 2 of the 4 promo heuristic
+        signals hold.
         """
+        body_for_rules = full_body_text or new_text or ""
+
         if self.gemma_label_fn is not None:
             raw_out = self.gemma_label_fn(from_str, subject, new_text, header_hints)
-            word = (raw_out or "").strip().lower().split()[0] if (raw_out or "").strip() else ""
+            if isinstance(raw_out, dict):
+                final_lbl, conf, _ = self.compute_gemma_label_from_logits(raw_out)
+                return final_lbl, conf
+            if isinstance(raw_out, tuple) and len(raw_out) >= 2:
+                raw_w = str(raw_out[0] or "").strip().lower()
+                conf = float(raw_out[1])
+                word = raw_w if raw_w in LABELS else "email"
+                if conf < CONFIDENCE_THRESHOLD:
+                    return "email", conf
+                return word, conf
+            word = (str(raw_out or "")).strip().lower().split()[0] if (str(raw_out or "")).strip() else ""
             word = re.sub(r"[^a-z]", "", word)
-            return word if word in LABELS else "email"
+            return (word if word in LABELS else "email"), 0.85
 
-        # If Gemma is loaded in runtime, run greedy 1-word generation
+        # Deterministic cold-start rules (Promo heuristic >= 2 of 4 signals, Ping platform, Order patterns)
+        plat = match_ping_platform(from_str)
+        if plat:
+            return "ping", 0.92
+
+        comb_full = f"{subject}\n{body_for_rules[:2000]}"
+        comb_low = comb_full.lower()
+
+        promo_sig_count, _promo_sigs = self.count_promo_heuristic_signals(
+            from_str=from_str,
+            subject=subject,
+            body_text=body_for_rules,
+        )
+        has_list_unsub = (
+            "list-unsubscribe" in (header_hints or "").lower()
+            or "precedence: bulk" in (header_hints or "").lower()
+        )
+        has_order_pat = any(
+            m.search(comb_full) for m in (ORDER_NUMBER_PATTERNS + TRACKING_NUMBER_PATTERNS)
+        ) or any(
+            w in comb_low
+            for w in ("order confirmed", "bestellbestätigung", "versandt", "has shipped", "was delivered", "processing your order", "invoice", "rechnung")
+        )
+
+        if not has_order_pat and (
+            promo_sig_count >= 2
+            or (
+                has_list_unsub
+                and any(
+                    w in comb_low
+                    for w in ("% off", "rabatt", "gutschein", "promo", "sale", "deal", "newsletter", "angebot", "voucher", "discount")
+                )
+            )
+        ):
+            return "promotion", 0.92
+
+        if has_order_pat:
+            return "information", 0.90
+
+        # If Gemma is loaded in runtime, score the 4 label token logits directly
         if getattr(self.runtime, "gemma_model", None) is not None:
             try:
                 prompt = (
@@ -1064,29 +1225,20 @@ class SatzMailPipeline:
                     f"[BODY] {new_text[:1000]}\n\n"
                     "Output one word only (email, ping, information, or promotion):"
                 )
+                if hasattr(self.runtime, "_score_gemma_mail_labels"):
+                    logits_map = self.runtime._score_gemma_mail_labels(prompt)
+                    if logits_map:
+                        final_lbl, conf, _ = self.compute_gemma_label_from_logits(logits_map)
+                        return final_lbl, conf
                 raw = self.runtime._generate_gemma_short(prompt, max_new_tokens=6)
                 word = (raw or "").strip().lower().split()[0] if (raw or "").strip() else ""
                 word = re.sub(r"[^a-z]", "", word)
                 if word in LABELS:
-                    return word
+                    return word, 0.80
             except Exception:
                 pass
 
-        # Deterministic heuristic when Gemma model is not loaded in memory
-        plat = match_ping_platform(from_str)
-        if plat:
-            return "ping"
-        comb = f"{subject}\n{new_text[:1000]}".lower()
-        if any(
-            m.search(f"{subject}\n{new_text[:1000]}")
-            for m in (ORDER_NUMBER_PATTERNS + TRACKING_NUMBER_PATTERNS)
-        ) or any(w in comb for w in ("order confirmed", "bestellbestätigung", "versandt", "shipped", "invoice", "rechnung")):
-            return "information"
-        if ("list-unsubscribe" in (header_hints or "").lower() or "precedence: bulk" in (header_hints or "").lower()) and any(
-            w in comb for w in ("% off", "rabatt", "gutschein", "promo", "sale", "deal", "newsletter", "angebot")
-        ):
-            return "promotion"
-        return "email"
+        return "email", 0.80
 
     def classify_message(
         self,
@@ -1095,6 +1247,7 @@ class SatzMailPipeline:
         subject: str,
         new_text: str,
         list_unsubscribe: str = "",
+        full_body_text: str = "",
     ) -> tuple[str, float, str, str]:
         """
         Returns `(label, confidence, source, model_version)`.
@@ -1108,6 +1261,13 @@ class SatzMailPipeline:
         plat = match_ping_platform(from_addr)
         if plat:
             hints.append(f"platform_domain={plat}")
+        sig_cnt, sig_names = self.count_promo_heuristic_signals(
+            from_str=from_str,
+            subject=subject,
+            body_text=full_body_text or new_text,
+        )
+        if sig_cnt >= 2:
+            hints.append(f"promo_signals={','.join(sig_names)}")
         header_hints = ", ".join(hints)
 
         pred = self._predict_with_active_model(input_text)
@@ -1117,9 +1277,15 @@ class SatzMailPipeline:
             if accepted:
                 return accepted_label, float(pred_conf), "model", self.model_version
 
-        # Cold start or confidence below threshold -> Gemma labels it
-        gemma_lbl = self._label_with_gemma(from_str, subject, new_text, header_hints)
-        return gemma_lbl, 0.85, "gemma", self.model_version
+        # Cold start or confidence below threshold -> Gemma / cold-start heuristic labels it
+        gemma_lbl, gemma_conf = self._label_with_gemma(
+            from_str,
+            subject,
+            new_text,
+            header_hints,
+            full_body_text=full_body_text or new_text,
+        )
+        return gemma_lbl, float(gemma_conf), "gemma", self.model_version
 
     def _get_training_samples(self, conn: sqlite3.Connection) -> list[tuple[str, str]]:
         """
@@ -1252,9 +1418,10 @@ class SatzMailPipeline:
 
     def record_user_correction(self, message_id: str, new_label: str) -> dict[str, Any]:
         """
-        Section 4.5.3 & 4.8 (`POST /mail/message/<id>/label`):
+        Section 4.5.3, 4.8 & M19 §5 (`POST /mail/message/<id>/label`):
         A user correction always overrides a Gemma/model label for that message,
-        is stored in `corrections` with `used_in_training = 0`, and triggers retraining at 20 corrections.
+        is stored in `corrections` with `used_in_training = 0`, re-runs extraction and
+        Brain linking for the message under the new label, and triggers retraining at 20 corrections.
         """
         lbl = (new_label or "").strip().lower()
         if lbl not in LABELS:
@@ -1282,12 +1449,15 @@ class SatzMailPipeline:
             )
             conn.commit()
 
-        retrained = self.maybe_trigger_training()
+        # M19 §5: Re-run extraction and Brain linking for the newly assigned label
+        proc_res = self.process_single_message(message_id)
+        retrained = bool((proc_res or {}).get("retrained")) or self.maybe_trigger_training()
         return {
             "ok": True,
             "message_id": message_id,
             "old_label": old_label,
             "new_label": lbl,
+            "extracts": (proc_res or {}).get("extracts", {}),
             "retrained": retrained,
             "model_version": self.model_version,
         }
@@ -1344,6 +1514,7 @@ class SatzMailPipeline:
         # 1. Split into `new`, `quote`, `signature`, `footer`
         split_res = split_email_parts(msg["body_text"] or "", raw_html=raw_html)
         new_text = split_res["new"] or (msg["body_text"] or "").strip()
+        full_body_for_extract = "\n".join(filter(None, [new_text, split_res.get("footer", "")])).strip() or (msg["body_text"] or "").strip()
         sig_meta = extract_signature_metadata(split_res["signature"])
 
         # 2. Classify (preserving user correction if already corrected by user)
@@ -1359,6 +1530,7 @@ class SatzMailPipeline:
                 subject=msg["subject"],
                 new_text=new_text,
                 list_unsubscribe=msg["list_unsubscribe"] or "",
+                full_body_text=full_body_for_extract,
             )
 
         # 3. Extract per label
@@ -1373,7 +1545,7 @@ class SatzMailPipeline:
                 subject=msg["subject"],
                 from_name=msg["from_name"],
                 from_addr=msg["from_addr"],
-                new_text=new_text,
+                new_text=full_body_for_extract,
                 reader_fn=None,
             )
         elif label == "promotion":
@@ -1381,7 +1553,7 @@ class SatzMailPipeline:
                 subject=msg["subject"],
                 from_name=msg["from_name"],
                 from_addr=msg["from_addr"],
-                new_text=new_text,
+                new_text=full_body_for_extract,
                 reader_fn=None,
             )
         elif label == "email":
@@ -1452,6 +1624,7 @@ class SatzMailPipeline:
                         (message_id, fld, val, src_kind, conf),
                     )
 
+            conn.execute("DELETE FROM actions WHERE message_id = ?", (message_id,))
             if action_data is not None:
                 conn.execute(
                     """
@@ -1468,7 +1641,7 @@ class SatzMailPipeline:
             conn.commit()
 
         # Check if we now have >= 50 labelled samples to train the classifier
-        self.maybe_trigger_training()
+        retrained_in_proc = self.maybe_trigger_training()
 
         # 5. Store and link in Brain & Knowledge Store (Section 4.5.5)
         self._store_and_link_brain_and_passages(
@@ -1485,6 +1658,7 @@ class SatzMailPipeline:
             "message_id": message_id,
             "label": label,
             "confidence": confidence,
+            "retrained": retrained_in_proc,
             "extracts": {k: v[0] for k, v in extracts_map.items()},
         }
 
@@ -1520,11 +1694,15 @@ class SatzMailPipeline:
 
         from satz_brain import SatzBrain
 
-        brain = SatzBrain(
-            pm.get_profile_brain_dir(target_pid),
-            sgs_root=getattr(self.runtime, "sgs_root", None),
-            locked=False,
-        )
+        active_brain = getattr(self.runtime, "brain", None)
+        if active_brain is not None and not getattr(active_brain, "locked", False) and pm.active_profile_id == target_pid:
+            brain = active_brain
+        else:
+            brain = SatzBrain(
+                pm.get_profile_brain_dir(target_pid),
+                sgs_root=getattr(self.runtime, "sgs_root", None),
+                locked=False,
+            )
 
         message_id = msg["id"]
         from_addr = (msg["from_addr"] or "").strip().lower()

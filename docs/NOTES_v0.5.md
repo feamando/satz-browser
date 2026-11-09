@@ -112,3 +112,29 @@ Owner: Nikita Gorshkov · Date: 2026-11-09 · Spec: `docs/PLAN_v0.5.md` · Platf
 - `cargo test --manifest-path src-tauri/Cargo.toml`: **PASS** (`12/12` unit tests passing)
 - `..\sgs\.venv\Scripts\python.exe -m pytest sidecar -q`: **PASS** (`20/20` tests passing, including `test_m18_brain_integrity` with all 13 review checks + 50-passage store migration + cross-profile isolation + digest dedupe)
 - Smoke script artifacts saved to `docs/smoke/v0.5/m18/windows/`.
+
+---
+
+## 5. Milestone M19: Mail Cold Start & Actionable Extraction
+
+### 5.1 What Changed
+- **Cold-Start Promo Heuristic & Gemma Logit Confidence (`sidecar/satz_mail_pipeline.py`, `sidecar/satz_models.py`):**
+  - Added `SatzMailPipeline.count_promo_heuristic_signals(from_str, subject, body_text)` checking the 4 signals in `docs/PLAN_v0.5.md` §5 (`code_pattern`, `discount_pattern`, `unsubscribe_body`, `sender_local_part`). Without `List-Unsubscribe`, classifies as `promotion` when `>= 2` of the 4 signals hold; retains the `0.90` model threshold so real email is never silently dropped.
+  - Added `SatzMailPipeline.compute_gemma_label_from_logits(label_logits)` and `SatzSidecarRuntime._score_gemma_mail_labels(prompt)` so Gemma mail labels compute softmax confidence over the four label token logits (`email`, `ping`, `information`, `promotion`) and fall back to `email` below `0.75`.
+  - Fixed `split_email_parts` so `FOOTER_LINE_RE` only starts a footer block after line 0 (`li > 0`), preventing single-paragraph promotional emails containing `"unsubscribe"` from having their entire body stripped from `new`.
+- **Relabel Re-Runs Extraction & Brain Linking (`sidecar/satz_mail_pipeline.py`):**
+  - Updated `record_user_correction(message_id, new_label)` to re-run `process_single_message(message_id)` immediately after updating `labels` and `corrections`, populating `extracts`, `actions`, and `BRAIN.md` entities for the new label.
+- **Cold-Start Status & `[help sort 10 emails]` Onboarding (`sidecar/satz_mail.py`, `src/mail.ts`, `src/main.ts`, `src/types.ts`, `src/state.ts`):**
+  - Added `classifier` metadata (`classifier: learning · 12 / 50 labels` vs `classifier: active · v1 · N labels`) and `onboarding_candidates` to `GET /mail/lane`.
+  - Rendered `[help sort 10 emails]` in the Mail lane header, opening y/n onboarding cards (`[y · promos]`, `[n · inbox]`, `[pings]`, `[orders]`) that write `corrections` and re-run extraction.
+- **Actionable Cards, Site Promo Lookup & Compose Polish (`sidecar/satz_mail.py`, `src/mail.ts`, `src/main.ts`):**
+  - Grouped Orders lane items by `ord::<order_number>`, advancing status (`ordered < shipped < out for delivery < delivered`), merging fresher status/tracking from Brain `order` entities, and rendering `[track]` on order cards.
+  - Updated `docs/smoke/mail_fixture/fixture_12.json` to include `ZALANDO25AUTUMN` and expiry `2026-12-31` on the Zalando promo email (without `List-Unsubscribe`), surfacing both on the Promos card and in `[codes (1)]` on `zalando.de` tabs.
+  - Updated `prepare_send` so `[new]` appears in `#compose-confirm-bar` whenever the recipient has never received mail from this account (including first-time replies), placed the reply cursor at `(0, 0)` above the quoted block, and wired live debounced search on `#mail-search-input`.
+
+### 5.2 M19 Verification & Measurements (Windows 11 RTX 4090 Reference Box)
+- `npm run build`: **PASS** (`dist/` built in `326 ms`, 0 TypeScript errors)
+- `cargo check --manifest-path src-tauri/Cargo.toml`: **PASS**
+- `cargo test --manifest-path src-tauri/Cargo.toml`: **PASS** (`12/12` unit tests passing)
+- `..\sgs\.venv\Scripts\python.exe -m pytest sidecar -q`: **PASS** (`22/22` tests passing, including `test_m19.py`: 12/12 fixture lanes without `List-Unsubscribe`, 0 personal in promos, `ZALANDO25AUTUMN` + `2026-12-31` extraction, relabel re-extraction, order grouping + status advancement, and send gate `[new]` badge)
+- Smoke script artifacts saved to `docs/smoke/v0.5/m19/windows/`.

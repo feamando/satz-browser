@@ -29,7 +29,7 @@ class TestM17HonestSourcesAndUnlock(unittest.TestCase):
 
     def tearDown(self):
         try:
-            self.rt.store.db.close()
+            self.rt.close()
         except Exception:
             pass
         shutil.rmtree(self.tmp, ignore_errors=True)

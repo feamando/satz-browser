@@ -1,0 +1,27 @@
+{
+  "milestone": "M19",
+  "platform": "windows",
+  "version": "0.5.0",
+  "date": "2026-11-09",
+  "checks": {
+    "fixture_12_lanes": "12/12 emails into 4 lanes (3 inbox, 4 pings, 2 orders, 3 promos) with 0 personal emails in promos, without List-Unsubscribe",
+    "promo_heuristic_2_of_4": "4 signals (code_pattern, discount_pattern, unsubscribe_body, sender_local_part); >= 2 classifies as promotion; 0.90 model threshold retained",
+    "gemma_logit_confidence": "compute_gemma_label_from_logits over ('email', 'ping', 'information', 'promotion') with < 0.75 fallback to 'email'",
+    "relabel_extraction_and_brain": "POST /mail/message/<id>/label re-runs extraction and Brain entity linking on relabel",
+    "onboarding_and_status": "classifier: learning · 12 / 50 labels and [help sort 10 emails] y/n cards writing corrections",
+    "orders_grouped_by_number": "grouped by ord::<order_number>, advancing status ordered < shipped < out for delivery < delivered, with [track] button",
+    "promo_card_and_site_toolbar": "Zalando promo card shows ZALANDO25AUTUMN and exp 2026-12-31; zalando.de toolbar shows [codes (1)]",
+    "send_gate_new_badge": "reply to first-time recipient shows [new] in #compose-confirm-bar; cursor starts at (0, 0) above quote"
+  },
+  "screenshots": [
+    "01_launch_status_bar.png",
+    "02_dw_tab_toolbar_visible.png",
+    "03_dw_chat_cited_answer.png",
+    "04_zalando_tab_toolbar_visible.png",
+    "05_empty_tab_no_fabrication.png",
+    "06_mail_unlock_inline.png",
+    "07_mail_fixture_lanes.png",
+    "08_brain_entity_clean.png",
+    "09_profile_isolation.png"
+  ]
+}

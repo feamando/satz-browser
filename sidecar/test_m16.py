@@ -35,7 +35,7 @@ class TestM16PlatformParityAndDoctor(unittest.TestCase):
 
     def tearDown(self):
         try:
-            self.runtime.store.db.close()
+            self.runtime.close()
         except Exception:
             pass
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -109,10 +109,10 @@ class TestM16PlatformParityAndDoctor(unittest.TestCase):
         items = json.loads(fixture_path.read_text(encoding="utf-8"))
         self.assertEqual(len(items), 12)
         lanes = [it["expected_lane"] for it in items]
-        self.assertEqual(lanes.count("orders"), 3)
-        self.assertEqual(lanes.count("pings"), 2)
+        self.assertEqual(lanes.count("orders"), 2)
+        self.assertEqual(lanes.count("pings"), 4)
         self.assertEqual(lanes.count("promos"), 3)
-        self.assertEqual(lanes.count("inbox"), 4)
+        self.assertEqual(lanes.count("inbox"), 3)
 
 
 if __name__ == "__main__":

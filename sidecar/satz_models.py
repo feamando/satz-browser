@@ -1135,6 +1135,41 @@ class SatzSidecarRuntime:
             finally:
                 self.gemma_loading = False
 
+    def _score_gemma_mail_labels(self, prompt: str) -> dict[str, float]:
+        """
+        Section 5 (M19): Runs a forward pass on Gemma over `prompt` and returns the
+        next-token logit for each of the 4 mail label words (`email`, `ping`,
+        `information`, `promotion`).
+        """
+        if self.gemma_model is None or self.gemma_tok is None:
+            return {}
+        try:
+            import torch
+
+            tok, model = self.gemma_tok, self.gemma_model
+            msgs = [{"role": "user", "content": prompt}]
+            inputs = tok.apply_chat_template(
+                msgs,
+                add_generation_prompt=True,
+                return_tensors="pt",
+                return_dict=True,
+            ).to(model.device)
+            with torch.no_grad():
+                out = model(**inputs)
+                next_logits = out.logits[0, -1, :]
+
+            scores: dict[str, float] = {}
+            for lbl in ("email", "ping", "information", "promotion"):
+                cand_logits: list[float] = []
+                for variant in (lbl, f" {lbl}", lbl.capitalize(), f" {lbl.capitalize()}"):
+                    ids = tok.encode(variant, add_special_tokens=False)
+                    if ids:
+                        cand_logits.append(float(next_logits[ids[0]].item()))
+                scores[lbl] = max(cand_logits) if cand_logits else -100.0
+            return scores
+        except Exception:
+            return {}
+
     def ensure_reader(self, model_id: str):
         if model_id in self.readers:
             return self.readers[model_id]
@@ -1450,10 +1485,10 @@ class SatzSidecarRuntime:
         from src.planck3.candidates import rank_passages
         from src.planck3.util import norm_text
 
-        while True:
+        while not getattr(self, "_closed", False):
             item = self.ingest_queue.get()
             try:
-                if self.pause_learning:
+                if getattr(self, "_closed", False) or self.pause_learning:
                     continue
                 item_pid = item.get("profile_id")
                 cur_pid = self.passwords.active_profile_id if self.passwords.unlocked else None
@@ -1491,6 +1526,8 @@ class SatzSidecarRuntime:
                 query_str = f"{title} {domain}".strip()
 
                 with self.store_lock:
+                    if getattr(self, "_closed", False):
+                        continue
                     trust = self.store.domain_prior(domain) if domain else 0.5
                     doc = {
                         "url": url,
@@ -1833,15 +1870,46 @@ class SatzSidecarRuntime:
         return dict(self.bookmark_stats)
 
     def _bookmark_indexer_loop(self):
-        while True:
+        while not getattr(self, "_closed", False):
             self.bookmark_wake_event.wait(timeout=30.0)
             self.bookmark_wake_event.clear()
-            if self.pause_learning:
+            if getattr(self, "_closed", False) or self.pause_learning:
                 continue
             try:
                 self.run_bookmark_index_pass()
             except Exception as e:
                 self.record_error("bookmark_loop", e)
+
+    def close(self) -> None:
+        self._closed = True
+        try:
+            while not self.ingest_queue.empty():
+                try:
+                    self.ingest_queue.get_nowait()
+                    self.ingest_queue.task_done()
+                except queue.Empty:
+                    break
+        except Exception:
+            pass
+        try:
+            if getattr(self, "mail", None) is not None and getattr(self.mail, "pipeline", None) is not None:
+                self.mail.pipeline.stop_worker()
+        except Exception:
+            pass
+        try:
+            self.bookmark_wake_event.set()
+        except Exception:
+            pass
+        with self.store_lock:
+            try:
+                self.store.close()
+            except Exception:
+                pass
+        try:
+            if getattr(self, "mail", None) is not None:
+                self.mail._close_active_connection()
+        except Exception:
+            pass
 
     def get_source_capture_mode(self, source_id: str, url: str) -> str:
         if (source_id and source_id.startswith("mail:")) or (url and url.startswith("satzmail://")):

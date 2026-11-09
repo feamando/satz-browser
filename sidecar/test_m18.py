@@ -381,7 +381,7 @@ class TestM18BrainIntegrity(unittest.TestCase):
             self.assertGreaterEqual(contract_rows_in_demo, 1)
         finally:
             try:
-                rt.store.close()
+                rt.close()
             except Exception:
                 pass
 

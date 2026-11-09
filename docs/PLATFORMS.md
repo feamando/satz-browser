@@ -9,7 +9,7 @@ Nikita Gorshkov · 2026-11-03 · Living doc · SGS / Satz · Windows 11 (RTX 409
 | Area | Windows 11 (4090) | macOS (M3 Pro) | Code | v0.5 |
 | :--- | :--- | :--- | :--- | :--- |
 | Web engine | WebView2 (Edge 131 UA via `default_browser_user_agent()`) | WKWebView (Safari 18.2 UA via `default_browser_user_agent()`) | `webview_manager.rs:29-38` | M16 [done] |
-| Build and tests | `npm run build`, `cargo test` 12/12, `pytest` 20/20 | `npm run build` ok, `cargo test` 12/12, `pytest` 20/20 | n/a | M16-M18 [done] |
+| Build and tests | `npm run build`, `cargo test` 12/12, `pytest` 22/22 | `npm run build` ok, `cargo test` 12/12, `pytest` 22/22 | n/a | M16-M19 [done] |
 | Sidecar spawn defaults | `..\sgs\.venv\Scripts\python.exe`, `..\sgs` | `../sgs/.venv/bin/python` (fallback `python3` -> `python`), `../sgs` | `lib.rs:46-71`, `lib.rs:449-495` | M16 [done] |
 | App data | `%APPDATA%\com.satz.browser` | `~/Library/Application Support/com.satz.browser` | `satz_models.py:77-83` | n/a |
 | Session token RNG | `BCryptGenRandom` | `/dev/urandom` | `lib.rs:379-405` | n/a |
@@ -24,7 +24,7 @@ Nikita Gorshkov · 2026-11-03 · Living doc · SGS / Satz · Windows 11 (RTX 409
 | Login autofill | Exact-host fill via `webview.eval` | Same code path + `Cmd+Shift+L` menu accelerator + visible toolbar `[fill login]` | `webview_manager.rs:710-835` | M16 [done] |
 | Site toolbar | Clamped `child_y >= toolbar_bottom` across single-tab, 2-up, 4-up, resize | Clamped `child_y >= toolbar_bottom + titlebar_inset` (`window_titlebar_inset`), never overlaps `.site-tab-toolbar` | `tabs.ts:166-215`, `webview_manager.rs:44-84` | M16 [done] |
 | `satzmail://` scheme | Works | Works (email body rendered) | `lib.rs:720-760` | n/a |
-| Mail sync (IMAP) | Works (fixtures) | Works against a local IMAP server, 12/12 messages | `satz_mail.py` | n/a |
+| Mail sync (IMAP) | Works (12/12 fixture -> 3 inbox, 4 pings, 2 orders, 3 promos without `List-Unsubscribe`; `[codes (1)]` on `zalando.de`; `[new]` send gate badge) | Works against a local IMAP server, 12/12 messages into 4 lanes | `satz_mail.py`, `satz_mail_pipeline.py` | M19 [done] |
 | Hidden console for sidecar | `CREATE_NO_WINDOW` | n/a | `lib.rs:483-488` | n/a |
 | Default desktop fix | `ensure_default_desktop_on_windows` | n/a | `lib.rs:533` | n/a |
 | Text input autocorrect | `spellcheck="false" autocorrect="off" autocapitalize="off"` on all URL, start, rail filter, chat, mail search, and PIN inputs | `spellcheck="false" autocorrect="off" autocapitalize="off"` on all URL, start, rail filter, chat, mail search, and PIN inputs | `start.ts`, `rail.ts`, `chat.ts`, `mail.ts`, `knowledge.ts`, `main.ts` | M17 [done] |
@@ -52,3 +52,4 @@ Nikita Gorshkov · 2026-11-03 · Living doc · SGS / Satz · Windows 11 (RTX 409
 | 2026-11-09 | M16: WKWebView `evaluateJavaScript_completionHandler` live DOM capture, `compute_child_webview_bounds` + `window_titlebar_inset` toolbar fix, realistic browser UA on WebView2/WKWebView, MPS/CUDA/CPU Gemma device selection + 5 s SSE heartbeat + 30 s watchdog, per-OS sidecar defaults, `/doctor` endpoint, and `Cmd+Shift+L` macOS accelerator. |
 | 2026-11-09 | M17: Honest source pills (`dom`/`fetch`/`empty [recapture]`), 0-char source exclusion from citations, canonical URL source deduplication, plain-language errors + `[debug]` drawer, ordered `Esc`/click-away dismissal, inline Mail unlock + macOS Touch ID (`unlock_with_keychain`), `about:blank` new tabs, unseeded bookmarks, and `spellcheck="false" autocorrect="off" autocapitalize="off"` across inputs. |
 | 2026-11-09 | M18: Profile-scoped `profiles/<id>/planck_store.sqlite` + `.v04.bak` migration (`:memory:` when locked), no-profile Brain write guard, mail pipeline `profile_id` binding, clean bookmark entities, digest URL/domain deduplication, cascading `delete_passage` and `mail:<id>` `/forget`, hidden `$` attributes in `BRAIN.md`, webmail `(provider, email)` upsert, and encoder mode visibility (`brain ranking: semantic (planck13)` vs `lexical (planck13 missing)`). |
+| 2026-11-09 | M19: Cold-start promo heuristic (`>= 2` of 4 signals without `List-Unsubscribe`), Gemma 4-label token logit confidence (`< 0.75` fallback to `email`), relabel re-extraction + Brain linking, `classifier: learning · 12 / 50 labels` + `[help sort 10 emails]` onboarding cards, `ord::<order_number>` order grouping + `[track]`, Zalando `ZALANDO25AUTUMN` + `2026-12-31` extraction + `[codes (1)]` toolbar pill, and send-gate `[new]` badge on first-time replies. |

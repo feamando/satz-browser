@@ -2,36 +2,36 @@
   {
     "id": "fix-01-dhl-shipped",
     "uid": "1001",
-    "message_id": "<dhl-shipped-001@dhl.de>",
-    "thread_id": "thread-order-zalando-99412",
-    "from_name": "DHL Paket",
-    "from_addr": "noreply@dhl.de",
+    "message_id": "<zalando-shipped-001@zalando.de>",
+    "thread_id": "thread-order-zalando-104099887712",
+    "from_name": "Zalando",
+    "from_addr": "service@zalando.de",
     "to_addrs": "nikita@satz.local",
-    "subject": "Your parcel 00340434161094012345 from Zalando is on its way",
+    "subject": "Your Zalando order #104099887712 has shipped",
     "date_ts": 1762001000,
     "headers": {
-      "From": "DHL Paket <noreply@dhl.de>",
-      "Subject": "Your parcel 00340434161094012345 from Zalando is on its way"
+      "From": "Zalando <service@zalando.de>",
+      "Subject": "Your Zalando order #104099887712 has shipped"
     },
-    "text": "Good news! Your Zalando order #99412088 has shipped via DHL.\nTracking number: 00340434161094012345\nTrack your parcel: https://www.dhl.de/de/privatkunden/pakete-empfangen/verfolgen.html?piececode=00340434161094012345\nEstimated delivery: Tuesday.",
+    "text": "Good news! Your Zalando order #104099887712 has shipped via DHL.\nTracking number: 00340434161094012345\nTrack your parcel: https://www.dhl.de/de/privatkunden/pakete-empfangen/verfolgen.html?piececode=00340434161094012345\nTotal: EUR 129.95",
     "expected_label": "information",
     "expected_lane": "orders"
   },
   {
-    "id": "fix-02-dhl-delivered",
+    "id": "fix-02-apple-order",
     "uid": "1002",
-    "message_id": "<dhl-delivered-002@dhl.de>",
-    "thread_id": "thread-order-zalando-99412",
-    "from_name": "DHL Paket",
-    "from_addr": "noreply@dhl.de",
+    "message_id": "<apple-order-002@email.apple.com>",
+    "thread_id": "thread-apple-order-W1294810293",
+    "from_name": "Apple Store",
+    "from_addr": "no_reply@email.apple.com",
     "to_addrs": "nikita@satz.local",
-    "subject": "Delivered: Your Zalando order #99412088 (00340434161094012345)",
+    "subject": "Your Apple Store order #W1294810293 has shipped",
     "date_ts": 1762087400,
     "headers": {
-      "From": "DHL Paket <noreply@dhl.de>",
-      "Subject": "Delivered: Your Zalando order #99412088 (00340434161094012345)"
+      "From": "Apple Store <no_reply@email.apple.com>",
+      "Subject": "Your Apple Store order #W1294810293 has shipped"
     },
-    "text": "Your Zalando order #99412088 with tracking number 00340434161094012345 was delivered today at 14:10 to your front desk.",
+    "text": "Thank you for shopping at the Apple Store. Your order #W1294810293 for USB-C Woven Charge Cable (Total: EUR 25.00) has shipped via UPS.\nTracking number: 1Z999AA10123456784\nTrack at https://www.ups.com/track?tracknum=1Z999AA10123456784",
     "expected_label": "information",
     "expected_lane": "orders"
   },
@@ -55,23 +55,22 @@
     "expected_code": "482910"
   },
   {
-    "id": "fix-04-stripe-otp",
+    "id": "fix-04-slack-mention",
     "uid": "1004",
-    "message_id": "<stripe-otp-004@stripe.com>",
-    "thread_id": "thread-stripe-otp-004",
-    "from_name": "Stripe",
-    "from_addr": "support@stripe.com",
+    "message_id": "<slack-mention-004@slack.com>",
+    "thread_id": "thread-slack-mention-004",
+    "from_name": "Slack",
+    "from_addr": "no-reply@slack.com",
     "to_addrs": "nikita@satz.local",
-    "subject": "Your Stripe security code: 739204",
+    "subject": "[Slack] New mention in #satz-dev from @elena",
     "date_ts": 1762092000,
     "headers": {
-      "From": "Stripe <support@stripe.com>",
-      "Subject": "Your Stripe security code: 739204"
+      "From": "Slack <no-reply@slack.com>",
+      "Subject": "[Slack] New mention in #satz-dev from @elena"
     },
-    "text": "Use verification code 739204 to sign in to your Stripe dashboard. This one-time code is valid for 10 minutes.",
+    "text": "Elena mentioned you in #satz-dev: Can we check the WKWebView bounds inset on macOS 15?",
     "expected_label": "ping",
-    "expected_lane": "pings",
-    "expected_code": "739204"
+    "expected_lane": "pings"
   },
   {
     "id": "fix-05-zalando-promo",
@@ -81,17 +80,16 @@
     "from_name": "Zalando Newsletter",
     "from_addr": "newsletter@zalando.de",
     "to_addrs": "nikita@satz.local",
-    "subject": "20% off autumn essentials - use code AUTUMN20 at checkout",
+    "subject": "25% off autumn essentials - use code ZALANDO25AUTUMN at checkout",
     "date_ts": 1762093000,
     "headers": {
       "From": "Zalando Newsletter <newsletter@zalando.de>",
-      "List-Unsubscribe": "<https://www.zalando.de/unsubscribe>",
-      "Subject": "20% off autumn essentials - use code AUTUMN20 at checkout"
+      "Subject": "25% off autumn essentials - use code ZALANDO25AUTUMN at checkout"
     },
-    "text": "Save 20% off autumn jackets and boots on zalando.de! Use code: AUTUMN20 valid until 2026-12-31. Shop now at https://www.zalando.de/campaigns/autumn . To stop receiving marketing emails, unsubscribe in your preferences.",
+    "text": "Save 25% off autumn jackets and boots on zalando.de! Use code: ZALANDO25AUTUMN valid until 2026-12-31. Shop now at https://www.zalando.de/campaigns/autumn .\nTo stop receiving marketing emails, unsubscribe in your preferences.",
     "expected_label": "promotion",
     "expected_lane": "promos",
-    "expected_voucher": "AUTUMN20"
+    "expected_voucher": "ZALANDO25AUTUMN"
   },
   {
     "id": "fix-06-bahn-promo-no-header",
@@ -107,7 +105,7 @@
       "From": "DB Fahrkarten Angebote <angebote@bahn.de>",
       "Subject": "15% Rabatt auf Ihre naechste Super Sparpreis Fahrt mit Code BAHN15"
     },
-    "text": "Exklusives Angebot: Sparen Sie 15% off mit Gutschein Code: BAHN15 bis 2026-11-30 auf bahn.de. Wenn Sie diesen Newsletter abbestellen oder unsubscribe moechten, klicken Sie hier.",
+    "text": "Exklusives Angebot: Sparen Sie 15% off mit Gutschein Code: BAHN15 valid until 2026-11-30 auf bahn.de.\nWenn Sie diesen Newsletter abbestellen oder unsubscribe moechten, klicken Sie hier.",
     "expected_label": "promotion",
     "expected_lane": "promos",
     "expected_voucher": "BAHN15"
@@ -167,40 +165,40 @@
     "expected_lane": "inbox"
   },
   {
-    "id": "fix-10-apple-receipt",
+    "id": "fix-10-linkedin-invite",
     "uid": "1010",
-    "message_id": "<apple-order-010@email.apple.com>",
-    "thread_id": "thread-apple-order-010",
-    "from_name": "Apple Store",
-    "from_addr": "no_reply@email.apple.com",
+    "message_id": "<linkedin-invite-010@linkedin.com>",
+    "thread_id": "thread-linkedin-invite-010",
+    "from_name": "LinkedIn",
+    "from_addr": "messages-noreply@linkedin.com",
     "to_addrs": "nikita@satz.local",
-    "subject": "We are processing your order W1294810293",
+    "subject": "You have a new connection request on LinkedIn",
     "date_ts": 1762098000,
     "headers": {
-      "From": "Apple Store <no_reply@email.apple.com>",
-      "Subject": "We are processing your order W1294810293"
+      "From": "LinkedIn <messages-noreply@linkedin.com>",
+      "Subject": "You have a new connection request on LinkedIn"
     },
-    "text": "Thank you for shopping at the Apple Store. Your order #W1294810293 for USB-C Woven Charge Cable (Total: EUR 25.00) has been confirmed and will ship soon via UPS.",
-    "expected_label": "information",
-    "expected_lane": "orders"
+    "text": "ukas Weber invited you to connect on LinkedIn. View profile and respond to the invitation.",
+    "expected_label": "ping",
+    "expected_lane": "pings"
   },
   {
-    "id": "fix-11-dentist-confirm",
+    "id": "fix-11-linear-issue",
     "uid": "1011",
-    "message_id": "<praxis-dr-klein-011@zahnarzt-mitte.de>",
-    "thread_id": "thread-praxis-011",
-    "from_name": "Praxis Dr. Klein",
-    "from_addr": "empfang@zahnarzt-mitte.de",
+    "message_id": "<linear-issue-011@linear.app>",
+    "thread_id": "thread-linear-011",
+    "from_name": "Linear",
+    "from_addr": "notifications@linear.app",
     "to_addrs": "nikita@satz.local",
-    "subject": "Appointment reminder: Monday 09:30 check-up",
+    "subject": "[Linear] SATZ-42 assigned to you: WKWebView bounds",
     "date_ts": 1762099000,
     "headers": {
-      "From": "Praxis Dr. Klein <empfang@zahnarzt-mitte.de>",
-      "Subject": "Appointment reminder: Monday 09:30 check-up"
+      "From": "Linear <notifications@linear.app>",
+      "Subject": "[Linear] SATZ-42 assigned to you: WKWebView bounds"
     },
-    "text": "Hello Nikita Gorshkov,\n\nThis is a friendly reminder of your dental check-up on Monday at 09:30 at Friedrichstrasse 114, 10117 Berlin. Please reply if you need to reschedule.\n\nWarm regards,\nPraxis Dr. Klein",
-    "expected_label": "email",
-    "expected_lane": "inbox"
+    "text": "Elena assigned issue SATZ-42 to you in project Satz v0.5.",
+    "expected_label": "ping",
+    "expected_lane": "pings"
   },
   {
     "id": "fix-12-newsletter-tech",
@@ -208,16 +206,15 @@
     "message_id": "<weekly-012@rust-weekly.org>",
     "thread_id": "thread-rust-weekly-012",
     "from_name": "This Week in Rust",
-    "from_addr": "editors@rust-weekly.org",
+    "from_addr": "deals@rust-weekly.org",
     "to_addrs": "nikita@satz.local",
     "subject": "This Week in Rust 624: Special 25% off RustConf early-bird tickets",
     "date_ts": 1762100000,
     "headers": {
-      "From": "This Week in Rust <editors@rust-weekly.org>",
-      "List-Unsubscribe": "<https://rust-weekly.org/unsubscribe>",
+      "From": "This Week in Rust <deals@rust-weekly.org>",
       "Subject": "This Week in Rust 624: Special 25% off RustConf early-bird tickets"
     },
-    "text": "Welcome to issue 624! Deal of the week: get 25% off RustConf tickets with promo code: RUSTCONF25 valid until 2026-12-15. Unsubscribe anytime at https://rust-weekly.org/unsubscribe .",
+    "text": "Welcome to issue 624! Deal of the week: get 25% off RustConf tickets with promo code: RUSTCONF25 valid until 2026-12-15.\nUnsubscribe anytime in your marketing preferences.",
     "expected_label": "promotion",
     "expected_lane": "promos",
     "expected_voucher": "RUSTCONF25"

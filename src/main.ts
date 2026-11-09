@@ -873,21 +873,27 @@ function renderSiteTabViewport(viewport: HTMLElement): void {
   }
 
   const tabDomain = extractDomain(tab.url);
+  const promoCacheKey = `${tab.id}:${tabDomain}`;
   if (
     tabDomain &&
-    state.siteTabPromoCodes[tab.id] === undefined &&
+    tab.url !== "about:blank" &&
+    state.siteTabPromoCodes[promoCacheKey] === undefined &&
     state.sidecar.online
   ) {
-    state.siteTabPromoCodes[tab.id] = [];
+    state.siteTabPromoCodes[promoCacheKey] = [];
     void (async () => {
       const codes = await sidecarGetMailCodes(tabDomain);
+      state.siteTabPromoCodes[promoCacheKey] = codes;
       state.siteTabPromoCodes[tab.id] = codes;
       if (codes.length > 0 && state.activeTabId === tab.id) {
         renderViewportRegion();
       }
     })();
   }
-  const activePromoCodes = state.siteTabPromoCodes[tab.id] ?? [];
+  const activePromoCodes =
+    state.siteTabPromoCodes[promoCacheKey] ??
+    state.siteTabPromoCodes[tab.id] ??
+    [];
   const showCodesPopover =
     state.openCodesPopoverTabId === tab.id && activePromoCodes.length > 0;
 
