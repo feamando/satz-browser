@@ -2,7 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { extractDomain, state } from "./state";
 import type {
   BookmarkItem,
+  BrainCitationItem,
   BrainProposalItem,
+  BrainSearchResponse,
   BrowserTab,
   ChatMessage,
   CitationCheckEntry,
@@ -537,6 +539,7 @@ export async function sidecarFetchKnowledge(): Promise<KnowledgeSummary | null> 
     const rawDomains = (raw.top_domains ?? []) as Array<Record<string, unknown>>;
     const rawTopics = (raw.top_topics ?? []) as Array<Record<string, unknown>>;
     const rawPassages = (raw.passages ?? []) as Array<Record<string, unknown>>;
+    const rawThisWeek = (raw.this_week ?? []) as Array<Record<string, unknown>>;
     const rawBrain = (raw.brain ?? null) as Record<string, unknown> | null;
     const rawEntities = (rawBrain?.entities ?? []) as Array<Record<string, unknown>>;
     const rawBookmarks = (raw.bookmarks_indexed ?? []) as Array<Record<string, unknown>>;
@@ -551,6 +554,24 @@ export async function sidecarFetchKnowledge(): Promise<KnowledgeSummary | null> 
             brain_dir: String(rawBrain.brain_dir ?? ""),
             brain_md: String(rawBrain.brain_md ?? ""),
             entity_count: Number(rawBrain.entity_count ?? rawEntities.length),
+            locked: Boolean(rawBrain.locked),
+            message: rawBrain.message ? String(rawBrain.message) : undefined,
+            brain_ranking: rawBrain.brain_ranking
+              ? String(rawBrain.brain_ranking)
+              : undefined,
+            encoder: rawBrain.encoder
+              ? {
+                  mode: String(
+                    (rawBrain.encoder as Record<string, unknown>).mode ?? ""
+                  ),
+                  state: String(
+                    (rawBrain.encoder as Record<string, unknown>).state ?? ""
+                  ),
+                  label: String(
+                    (rawBrain.encoder as Record<string, unknown>).label ?? ""
+                  ),
+                }
+              : undefined,
             entities: rawEntities.map((e) => ({
               slug: String(e.slug ?? ""),
               type: String(e.type ?? "note"),
@@ -558,6 +579,8 @@ export async function sidecarFetchKnowledge(): Promise<KnowledgeSummary | null> 
               tier: Number(e.tier ?? 2),
               summary: String(e.summary ?? ""),
               path: String(e.path ?? ""),
+              source_url: e.source_url ? String(e.source_url) : undefined,
+              body: e.body ? String(e.body) : undefined,
               attributes: (e.attributes ?? {}) as Record<string, unknown>,
               updated: String(e.updated ?? ""),
             })),
@@ -627,13 +650,25 @@ export async function sidecarFetchKnowledge(): Promise<KnowledgeSummary | null> 
         }
       : undefined,
     top_domains: rawDomains.map((d) => {
-      const trustVal = Number(d.trust ?? d.score ?? 0);
+      const trustVal = Number(d.effective ?? d.trust ?? d.score ?? 0);
       return {
         domain: String(d.domain ?? ""),
         visits: Number(d.visits ?? 0),
         dwell_seconds: Number(d.dwell_seconds ?? 0),
         trust: trustVal,
         score: trustVal,
+        system: d.system !== undefined ? Number(d.system) : trustVal,
+        personal:
+          d.personal !== undefined && d.personal !== null
+            ? Number(d.personal)
+            : null,
+        effective: trustVal,
+        band: d.band ? String(d.band) : undefined,
+        band_label: d.band_label ? String(d.band_label) : undefined,
+        category: d.category ? String(d.category) : undefined,
+        why: d.why ? String(d.why) : undefined,
+        scored: d.scored !== undefined ? Boolean(d.scored) : false,
+        conflict: d.conflict !== undefined ? Boolean(d.conflict) : false,
       };
     }),
     top_topics: rawTopics.map((t) => {
@@ -653,6 +688,15 @@ export async function sidecarFetchKnowledge(): Promise<KnowledgeSummary | null> 
       url: String(p.url ?? ""),
       text: String(p.text ?? ""),
       added_at: String(p.added_at ?? p.ts ?? ""),
+    })),
+    this_week: rawThisWeek.map((w) => ({
+      kind: (w.kind === "received" ? "received" : "read") as "read" | "received",
+      title: String(w.title ?? ""),
+      url: String(w.url ?? ""),
+      domain: String(w.domain ?? ""),
+      ts: Number(w.ts ?? 0),
+      label: w.label ? String(w.label) : undefined,
+      message_id: w.message_id ? String(w.message_id) : undefined,
     })),
   };
   } catch {
@@ -696,6 +740,38 @@ export async function sidecarDeleteBrainEntity(slug: string): Promise<void> {
     });
   } catch {
     // Ignore when offline
+  }
+}
+
+export async function sidecarSetDomainTrust(
+  domain: string,
+  personalScore: number | null
+): Promise<Record<string, unknown> | null> {
+  try {
+    const res = await sidecarFetch("/knowledge/domain_trust", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ domain, personal_score: personalScore }),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+export async function sidecarSearchBrain(
+  query: string,
+  limit = 20
+): Promise<BrainSearchResponse | null> {
+  try {
+    const res = await sidecarFetch(
+      `/brain/search?q=${encodeURIComponent(query)}&limit=${limit}`
+    );
+    if (!res.ok) return null;
+    return (await res.json()) as BrainSearchResponse;
+  } catch {
+    return null;
   }
 }
 
@@ -1036,6 +1112,7 @@ export async function sidecarStreamChat(
 ): Promise<{
   source_ids: string[];
   cited_sources?: Array<{ url: string; title: string }>;
+  brain_sources?: BrainCitationItem[];
   proposals?: BrainProposalItem[];
   citation_check?: CitationCheckEntry[];
   citations_ok?: number;
@@ -1067,6 +1144,7 @@ export async function sidecarStreamChat(
   let buffer = "";
   let finalSourceIds: string[] = [];
   let citedSources: Array<{ url: string; title: string }> | undefined;
+  let brainSources: BrainCitationItem[] | undefined;
   let proposals: BrainProposalItem[] | undefined;
   let citationCheck: CitationCheckEntry[] | undefined;
   let citationsOk: number | undefined;
@@ -1116,6 +1194,7 @@ export async function sidecarStreamChat(
             done?: boolean;
             source_ids?: string[];
             cited_sources?: Array<{ url: string; title: string }>;
+            brain_sources?: BrainCitationItem[];
             proposals?: BrainProposalItem[];
             citation_check?: CitationCheckEntry[];
             citations_ok?: number;
@@ -1126,6 +1205,9 @@ export async function sidecarStreamChat(
           };
           if (payload.phase === "heartbeat") {
             continue;
+          }
+          if (payload.brain_sources && Array.isArray(payload.brain_sources)) {
+            brainSources = payload.brain_sources;
           }
           if (payload.source_stats && Array.isArray(payload.source_stats)) {
             sourceStats = payload.source_stats;
@@ -1144,6 +1226,9 @@ export async function sidecarStreamChat(
           if (payload.done) {
             finalSourceIds = payload.source_ids ?? [];
             citedSources = payload.cited_sources;
+            if (payload.brain_sources) {
+              brainSources = payload.brain_sources;
+            }
             proposals = payload.proposals;
             citationCheck = payload.citation_check;
             citationsOk = payload.citations_ok;
@@ -1179,6 +1264,7 @@ export async function sidecarStreamChat(
   return {
     source_ids: finalSourceIds,
     cited_sources: citedSources,
+    brain_sources: brainSources,
     proposals,
     citation_check: citationCheck,
     citations_ok: citationsOk,

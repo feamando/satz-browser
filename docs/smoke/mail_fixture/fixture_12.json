@@ -13,7 +13,7 @@
       "From": "Zalando <service@zalando.de>",
       "Subject": "Your Zalando order #104099887712 has shipped"
     },
-    "text": "Good news! Your Zalando order #104099887712 has shipped via DHL.\nTracking number: 00340434161094012345\nTrack your parcel: https://www.dhl.de/de/privatkunden/pakete-empfangen/verfolgen.html?piececode=00340434161094012345\nTotal: EUR 129.95",
+    "text": "Good news! Your Zalando order #104099887712 has shipped via DHL (estimated delivery: 2026-11-12).\nTracking number: 00340434161094012345\nTrack your parcel: https://www.dhl.de/de/privatkunden/pakete-empfangen/verfolgen.html?piececode=00340434161094012345\nTotal: EUR 129.95",
     "expected_label": "information",
     "expected_lane": "orders"
   },

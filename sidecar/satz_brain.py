@@ -116,6 +116,10 @@ def neutralize_brain_directives_in_source(text: str) -> str:
     return out
 
 
+_SHARED_ENCODERS: dict[str, Any] = {}
+_SHARED_ENCODER_LOCK = threading.RLock()
+
+
 class SatzBrain:
     """Manages the local Satz Brain knowledge graph on disk."""
 
@@ -153,29 +157,37 @@ class SatzBrain:
     def _get_encoder(self) -> Any:
         if self._encoder is not None:
             return self._encoder
-        try:
-            from src.planck3.encoders import make_encoder
-
-            sgs_base = self.sgs_root or (Path(__file__).resolve().parent.parent.parent / "sgs")
-            ckpt = sgs_base / "checkpoints" / "planck13" / "best.pt"
-            tok = sgs_base / "data" / "wikipedia" / "tokenizer.model"
-            if ckpt.exists() and tok.exists():
-                self._encoder = make_encoder(
-                    "planck",
-                    checkpoint=str(ckpt),
-                    tokenizer=str(tok),
-                    device="cpu",
-                )
-            else:
-                self._encoder = make_encoder("hash")
-        except Exception:
+        with _SHARED_ENCODER_LOCK:
+            if self._encoder is not None:
+                return self._encoder
             try:
                 from src.planck3.encoders import make_encoder
 
-                self._encoder = make_encoder("hash")
+                sgs_base = self.sgs_root or (Path(__file__).resolve().parent.parent.parent / "sgs")
+                ckpt = sgs_base / "checkpoints" / "planck13" / "best.pt"
+                tok = sgs_base / "data" / "wikipedia" / "tokenizer.model"
+                cache_key = f"{ckpt}::{tok}" if (ckpt.exists() and tok.exists()) else "hash"
+                if cache_key in _SHARED_ENCODERS:
+                    self._encoder = _SHARED_ENCODERS[cache_key]
+                    return self._encoder
+                if ckpt.exists() and tok.exists():
+                    self._encoder = make_encoder(
+                        "planck",
+                        checkpoint=str(ckpt),
+                        tokenizer=str(tok),
+                        device="cpu",
+                    )
+                else:
+                    self._encoder = make_encoder("hash")
+                _SHARED_ENCODERS[cache_key] = self._encoder
             except Exception:
-                self._encoder = None
-        return self._encoder
+                try:
+                    from src.planck3.encoders import make_encoder
+
+                    self._encoder = make_encoder("hash")
+                except Exception:
+                    self._encoder = None
+            return self._encoder
 
     def get_cached_brain_md(self) -> str:
         if self.locked:
@@ -606,6 +618,14 @@ class SatzBrain:
                     for k, v in raw_attrs.items()
                     if not str(k).startswith("$")
                 }
+                ref = str(meta.get("$ref") or "")
+                body_text = ""
+                if ref:
+                    try:
+                        _, body_text = self._parse_entity_file(self.brain_dir / ref)
+                    except Exception:
+                        body_text = ""
+                source_url = str(raw_attrs.get("source_url") or raw_attrs.get("$source") or "")
                 entities_out.append(
                     {
                         "slug": slug,
@@ -613,7 +633,9 @@ class SatzBrain:
                         "name": str(meta.get("name") or slug),
                         "tier": int(meta.get("tier") or 2),
                         "summary": str(meta.get("summary") or ""),
-                        "path": str(meta.get("$ref") or ""),
+                        "path": ref,
+                        "source_url": source_url,
+                        "body": body_text[:600],
                         "attributes": clean_attrs,
                         "updated": str(meta.get("updated") or ""),
                     }
@@ -622,11 +644,31 @@ class SatzBrain:
                 "brain_dir": str(self.brain_dir),
                 "brain_md": brain_md,
                 "entity_count": len(entities_out),
-                "entities": entities_out[:60],
+                "entities": entities_out[:120],
                 "locked": False,
                 "encoder": enc_status,
                 "brain_ranking": enc_status["label"],
             }
+
+    def search_entities(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
+        if self.locked:
+            return []
+        q_str = (query or "").strip()
+        if not q_str:
+            return list(self.get_brain_summary().get("entities") or [])[:limit]
+        hot = self.load_hot_entities(q_str, open_sources=None, limit=limit)
+        seen_slugs = {h["slug"] for h in hot}
+        q_low = q_str.lower()
+        for ent in self.get_brain_summary().get("entities") or []:
+            if ent["slug"] in seen_slugs:
+                continue
+            hay = f"{ent['slug']} {ent['name']} {ent['type']} {ent['summary']} {json.dumps(ent['attributes'], ensure_ascii=False)} {ent.get('body') or ''}".lower()
+            if q_low in hay or any(tok in hay for tok in re.findall(r"[a-z0-9äöüß]{3,}", q_low)):
+                hot.append(ent)
+                seen_slugs.add(ent["slug"])
+                if len(hot) >= limit:
+                    break
+        return hot[:limit]
 
     def load_hot_entities(
         self,
@@ -649,7 +691,7 @@ class SatzBrain:
 
             query_tokens = [
                 t for t in re.findall(r"[a-z0-9]{3,}", search_blob)
-                if t not in {"the", "and", "for", "from", "with", "this", "that", "what", "where", "when", "give", "show", "tell"}
+                if t not in {"the", "and", "for", "from", "with", "this", "that", "what", "where", "when", "does", "give", "show", "tell"}
             ]
 
             scored: list[tuple[float, str, dict[str, Any]]] = []
@@ -679,7 +721,8 @@ class SatzBrain:
                                 missing_texts.append(txt)
 
                         q_and_missing = [search_blob[:400]] + missing_texts
-                        encoded_batch = enc.encode(q_and_missing).astype(np.float32)
+                        with _SHARED_ENCODER_LOCK:
+                            encoded_batch = enc.encode(q_and_missing).astype(np.float32)
                         q_vec = encoded_batch[0]
                         for m_offset, orig_idx in enumerate(missing_indices):
                             sl = slug_list[orig_idx]
@@ -704,13 +747,25 @@ class SatzBrain:
                 for al in meta.get("aliases") or []:
                     if str(al).lower() in search_blob:
                         score += 4.0
+                matched_name_toks = 0
+                matched_type = False
                 for tok in query_tokens:
-                    if tok in name_l or tok in etype_l:
+                    if tok in name_l:
+                        score += 2.5
+                        matched_name_toks += 1
+                    elif tok in etype_l or tok.rstrip("s") == etype_l:
                         score += 2.0
+                        matched_type = True
                     elif tok in summary_l or tok in attrs_str:
                         score += 1.0
+                if matched_name_toks >= 2 or (matched_name_toks >= 1 and matched_type):
+                    score += 3.0
+                if any(w in search_blob for w in ("arrive", "delivery", "shipped", "tracking", "package", "parcel")) and etype_l == "order":
+                    score += 3.5
+                if any(w in search_blob for w in ("code", "voucher", "discount", "promo", "coupon")) and etype_l == "promotion":
+                    score += 3.5
                 if int(meta.get("tier") or 2) == 1:
-                    score += 0.5
+                    score += 1.0
 
                 sim = sim_scores.get(slug, 0.0)
                 if sim > 0.12:
@@ -721,23 +776,137 @@ class SatzBrain:
 
             scored.sort(key=lambda item: item[0], reverse=True)
             results: list[dict[str, Any]] = []
-            for _sc, slug, meta in scored[:limit]:
+            for sc_val, slug, meta in scored[:limit]:
                 ref = meta.get("$ref")
                 body_text = ""
                 if ref:
                     _, body_text = self._parse_entity_file(self.brain_dir / str(ref))
+                raw_attrs = meta.get("attributes") or {}
+                clean_attrs = {
+                    k: v
+                    for k, v in raw_attrs.items()
+                    if not str(k).startswith("$")
+                }
+                source_url = str(raw_attrs.get("source_url") or raw_attrs.get("$source") or "")
                 results.append(
                     {
                         "slug": slug,
                         "type": meta.get("$type") or "note",
                         "name": meta.get("name") or slug,
+                        "tier": int(meta.get("tier") or 2),
                         "path": ref or "",
+                        "source_url": source_url,
                         "summary": meta.get("summary") or "",
-                        "attributes": meta.get("attributes") or {},
-                        "body": body_text[:800],
+                        "attributes": clean_attrs,
+                        "body": body_text[:1400],
+                        "score": round(float(sc_val), 3),
                     }
                 )
             return results
+
+    def build_model_context_with_citations(
+        self,
+        query: str,
+        open_sources: list[dict[str, Any]] | None = None,
+        max_chars: int = 3400,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """
+        Section 3.2 (M9) & Section 6 (M20):
+        - Keeps BRAIN.md cached in memory (reloaded only when mtime changes).
+        - Numbers Brain items used in the prompt as `[B1]`, `[B2]`, ... in a separate
+          `brain_sources` list so answers can cite `[B1]`, `[B2]` and the citation checker
+          can verify them.
+        """
+        if self.locked:
+            return (
+                (
+                    "SATZ BRAIN (LOCAL KNOWLEDGE GRAPH):\n"
+                    "Brain is locked (unlock a profile to save to your Brain)."
+                )[:max_chars],
+                [],
+            )
+        with self.lock:
+            reg = self._load_registry()
+            entities = reg.get("entities") or {}
+            if not entities:
+                return (
+                    (
+                        "SATZ BRAIN (LOCAL KNOWLEDGE GRAPH):\n"
+                        "No entities stored yet. You can store entities, addresses, contacts, accounts, "
+                        "and notes into the Brain at any time using <brain_store>..."
+                    )[:max_chars],
+                    [],
+                )
+
+            # Warm / validate in-memory BRAIN.md cache via mtime check
+            _ = self.get_cached_brain_md()
+
+            hot = self.load_hot_entities(query, open_sources, limit=5)
+            brain_sources: list[dict[str, Any]] = []
+            seen_slugs: set[str] = set()
+
+            for h in hot:
+                slug = str(h["slug"])
+                if slug in seen_slugs:
+                    continue
+                seen_slugs.add(slug)
+                b_idx = len(brain_sources) + 1
+                cite_lbl = f"B{b_idx}"
+                clean_h_attrs = {
+                    k: v
+                    for k, v in (h.get("attributes") or {}).items()
+                    if not str(k).startswith("$")
+                }
+                attrs_json = json.dumps(clean_h_attrs, ensure_ascii=False) if clean_h_attrs else "{}"
+                body_str = str(h.get("body") or "").strip()
+                full_text = f"{h['name']} ({h['type']}) {h.get('summary') or ''} {attrs_json} {body_str}".strip()
+                brain_sources.append(
+                    {
+                        "id": f"brain:{slug}",
+                        "citation": cite_lbl,
+                        "cite_label": cite_lbl,
+                        "b_index": b_idx,
+                        "slug": slug,
+                        "name": str(h["name"]),
+                        "type": str(h["type"]),
+                        "summary": str(h.get("summary") or ""),
+                        "path": str(h.get("path") or ""),
+                        "source_url": str(h.get("source_url") or ""),
+                        "attributes": clean_h_attrs,
+                        "body": body_str,
+                        "text": full_text[:1200],
+                        "full_text": full_text,
+                    }
+                )
+
+            lines: list[str] = [
+                "# NUMBERED SATZ BRAIN ITEMS (cite inline as [B1], [B2], ... when used):"
+            ]
+            if not brain_sources:
+                lines.append("(no matching Brain entities for this query)")
+            else:
+                for bs in brain_sources:
+                    attrs_json = (
+                        json.dumps(bs["attributes"], ensure_ascii=False)
+                        if bs["attributes"]
+                        else "{}"
+                    )
+                    block = (
+                        f"\n[{bs['cite_label']}] ({bs['type']}) {bs['name']} · {bs['summary']}\n"
+                        f"Attributes: {attrs_json}"
+                    )
+                    if bs["body"]:
+                        block += f"\nDetails: {bs['body'][:900]}"
+                    cur_len = sum(len(x) + 1 for x in lines)
+                    if cur_len + len(block) <= max_chars:
+                        lines.append(block)
+                    else:
+                        rem = max_chars - cur_len
+                        if rem > 80:
+                            lines.append(block[:rem])
+                        break
+
+            return "\n".join(lines)[:max_chars], brain_sources
 
     def build_model_context(
         self,
@@ -745,125 +914,12 @@ class SatzBrain:
         open_sources: list[dict[str, Any]] | None = None,
         max_chars: int = 3000,
     ) -> str:
-        """
-        Section 3.2 (M9):
-        - Keeps BRAIN.md cached in memory (reloaded only when mtime changes).
-        - Sends only Tier 1 rows whose name or alias overlaps the question or open sources,
-          plus hot entities, capped at 3,000 characters for the whole Brain section.
-        """
-        if self.locked:
-            return (
-                "SATZ BRAIN (LOCAL KNOWLEDGE GRAPH):\n"
-                "Brain is locked (unlock a profile to save to your Brain)."
-            )[:max_chars]
-        with self.lock:
-            reg = self._load_registry()
-            entities = reg.get("entities") or {}
-            if not entities:
-                return (
-                    "SATZ BRAIN (LOCAL KNOWLEDGE GRAPH):\n"
-                    "No entities stored yet. You can store entities, addresses, contacts, accounts, "
-                    "and notes into the Brain at any time using <brain_store>..."
-                )[:max_chars]
-
-            # Warm / validate in-memory BRAIN.md cache via mtime check
-            _ = self.get_cached_brain_md()
-
-            search_blob = (query or "").lower()
-            for src in open_sources or []:
-                search_blob += " " + str(src.get("title") or "").lower()
-                search_blob += " " + str(src.get("domain") or "").lower()
-                search_blob += " " + str(src.get("url") or "").lower()
-
-            query_tokens = {
-                t
-                for t in re.findall(r"[a-z0-9]{3,}", search_blob)
-                if t not in {"the", "and", "for", "from", "with", "this", "that", "what", "where", "when", "give", "show", "tell", "http", "https", "www"}
-            }
-
-            scored_tier1_rows: list[tuple[float, str]] = []
-            for slug, meta in entities.items():
-                if int(meta.get("tier") or 2) != 1:
-                    continue
-                name_str = str(meta.get("name") or slug)
-                name_l = name_str.lower()
-                aliases = [str(a).lower() for a in (meta.get("aliases") or [])]
-                name_tokens = set(re.findall(r"[a-z0-9]{3,}", name_l + " " + " ".join(aliases)))
-
-                row_score = 0.0
-                if slug in search_blob or (name_l and name_l in search_blob):
-                    row_score += 10.0
-                if any(al and al in search_blob for al in aliases):
-                    row_score += 8.0
-                overlap_cnt = len(query_tokens & name_tokens)
-                row_score += overlap_cnt * 2.0
-
-                if row_score <= 0.0:
-                    continue
-
-                etype = str(meta.get("$type") or "note")
-                status = str(meta.get("$status") or "active")
-                summary = str(meta.get("summary") or "").replace("|", "/").replace("\n", " ")[:100]
-                ref = str(meta.get("$ref") or "")
-                attrs = meta.get("attributes") or {}
-                attr_pairs = []
-                for k, v in attrs.items():
-                    if k == "source_url" or str(k).startswith("$"):
-                        continue
-                    attr_pairs.append(f"{k}:{str(v).replace('|', '/')[:40]}")
-                    if len(attr_pairs) >= 3:
-                        break
-                attr_str = ",".join(attr_pairs) if attr_pairs else ref
-                row_line = f"{slug}|{etype}|{name_str.replace('|', '/')}|{status}|{summary}|{attr_str}"
-                scored_tier1_rows.append((row_score, row_line))
-
-            scored_tier1_rows.sort(key=lambda item: (-item[0], item[1]))
-
-            header_lines = [
-                "# BRAIN.md (Relevant Tier 1 Index)",
-                "id|type|name|status|summary|attributes",
-            ]
-            if scored_tier1_rows:
-                tier1_budget = max_chars // 2
-                cur_len = sum(len(x) + 1 for x in header_lines)
-                for _sc, rline in scored_tier1_rows[:20]:
-                    if cur_len + len(rline) + 1 > tier1_budget:
-                        break
-                    header_lines.append(rline)
-                    cur_len += len(rline) + 1
-            else:
-                header_lines.append("(no direct Tier 1 match for this query)")
-
-            out = "\n".join(header_lines)
-            hot = self.load_hot_entities(query, open_sources, limit=5)
-            if hot and len(out) < max_chars - 120:
-                out += "\n\n## Hot-Loaded Brain Entities"
-                for h in hot:
-                    clean_h_attrs = {
-                        k: v
-                        for k, v in (h.get("attributes") or {}).items()
-                        if not str(k).startswith("$")
-                    }
-                    attrs_json = (
-                        json.dumps(clean_h_attrs, ensure_ascii=False)
-                        if clean_h_attrs
-                        else "{}"
-                    )
-                    block = (
-                        f"\n### [{h['type'].upper()}] {h['name']} ({h['path']})\n"
-                        f"Summary: {h['summary']}\n"
-                        f"Attributes: {attrs_json}\n"
-                        f"{h['body']}"
-                    )
-                    if len(out) + len(block) <= max_chars:
-                        out += block
-                    else:
-                        rem = max_chars - len(out)
-                        if rem > 80:
-                            out += block[:rem]
-                        break
-
-            return out[:max_chars]
+        ctx, _ = self.build_model_context_with_citations(
+            query=query,
+            open_sources=open_sources,
+            max_chars=max_chars,
+        )
+        return ctx
 
     def enrich_from_page(
         self,

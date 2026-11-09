@@ -2,12 +2,24 @@ import {
   bindMailAccountsEvents,
   renderMailAccountsSectionHtml,
 } from "./mail";
-import { escapeHtml, formatRelativeTime, IS_MAC, state } from "./state";
+import {
+  escapeHtml,
+  formatRelativeTime,
+  IS_MAC,
+  MOD_LABEL,
+  state,
+} from "./state";
+import type { BrainEntityItem } from "./types";
 
 export interface KnowledgeActions {
   onTogglePauseLearning: (paused: boolean) => void;
   onDeletePassage: (passageId: string) => void;
   onDeleteBrainEntity?: (slug: string) => void;
+  onSetDomainTrust?: (domain: string, personalScore: number | null) => void;
+  onSearchBrain?: (query: string) => void;
+  onOpenSourceUrl?: (url: string, title?: string) => void;
+  onSwitchToBrain?: () => void;
+  onSwitchToSettings?: () => void;
   onCreateProfile?: (name: string, pin: string) => void;
   onUnlockProfile?: (profileId: string, pin: string) => void;
   onUnlockProfileKeychain?: (profileId: string) => void;
@@ -29,6 +41,8 @@ export interface KnowledgeActions {
   onMailChanged?: () => Promise<void>;
   onCloseKnowledgeView: () => void;
 }
+
+let brainSearchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function renderKnowledgeView(
   container: HTMLElement,
@@ -93,8 +107,9 @@ export function renderKnowledgeView(
     <div class="knowledge-view">
       <div class="knowledge-section">
         <div class="panel-header">
-          <span>knowledge base · user profiles (6-digit pin) · .env password vault</span>
+          <span>settings · profiles (6-digit pin) · .env password vault · mail accounts</span>
           <div>
+            <button id="kb-open-brain-btn">[brain · ${MOD_LABEL}+b]</button>
             <button id="kb-pause-btn" class="${kb.pause_learning ? "active" : ""}">
               [pause learning: ${kb.pause_learning ? "on" : "off"}]
             </button>
@@ -213,10 +228,10 @@ export function renderKnowledgeView(
           </div>
 
           <div class="vault-form-row">
-            <input id="kb-cred-service" class="vault-input" type="text" placeholder="service/domain (e.g. gmail.com, zalando.de)_" />
-            <input id="kb-cred-username" class="vault-input" type="text" placeholder="username / email_" />
-            <input id="kb-cred-password" class="vault-input" type="password" placeholder="password / app-password_" />
-            <input id="kb-cred-token" class="vault-input" type="password" placeholder="token or cookie (optional)_" />
+            <input id="kb-cred-service" class="vault-input" type="text" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="service/domain (e.g. gmail.com, zalando.de)_" />
+            <input id="kb-cred-username" class="vault-input" type="text" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="username / email_" />
+            <input id="kb-cred-password" class="vault-input" type="password" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="password / app-password_" />
+            <input id="kb-cred-token" class="vault-input" type="password" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="token or cookie (optional)_" />
             <button id="kb-save-cred-btn">[+ save to .env]</button>
           </div>
 
@@ -324,103 +339,14 @@ export function renderKnowledgeView(
                 .join("")
         }
       </div>
-
-      <div class="knowledge-section">
-        <div class="panel-header">
-          <span>satz brain entities (${brainEntities.length})</span>
-          <span class="muted">${escapeHtml(brainRankingLabel)}</span>
-        </div>
-        ${
-          !isUnlocked
-            ? `<div class="muted">unlock a profile to save to your Brain.</div>`
-            : brainEntities.length === 0
-              ? `<div class="muted">no brain entities stored yet. browse authenticated tabs or ask chat to store addresses, contacts, accounts, or notes.</div>`
-              : brainEntities
-                  .map((e) => {
-                    const attrEntries = Object.entries(e.attributes ?? {})
-                      .filter(([k]) => k !== "source_url" && !k.startsWith("$"))
-                      .map(([k, v]) => `${k}: ${String(v)}`)
-                      .join(" · ");
-                    return `
-                <div class="source-row">
-                  <div class="source-row-top">
-                    <span>[${escapeHtml(e.type)}] ${escapeHtml(e.name)} <span class="muted">(tier ${e.tier} · ${escapeHtml(e.path)})</span></span>
-                    <button class="rail-menu-btn" data-delete-brain-entity="${escapeHtml(e.slug)}">[delete]</button>
-                  </div>
-                  <div>${escapeHtml(e.summary)}</div>
-                  ${attrEntries ? `<div class="muted">${escapeHtml(attrEntries)}</div>` : ""}
-                </div>
-              `;
-                  })
-                  .join("")
-        }
-      </div>
-
-      <div class="knowledge-section">
-        <div class="panel-header">
-          <span>top domains (${kb.top_domains.length})</span>
-        </div>
-        ${
-          kb.top_domains.length === 0
-            ? `<div class="muted">no domains recorded yet</div>`
-            : kb.top_domains
-                .map(
-                  (d) => `
-              <div class="rail-row">
-                <span>${escapeHtml(d.domain)}</span>
-                <span class="muted">${d.visits} visits · trust ${Number(d.trust ?? d.score ?? 0).toFixed(1)}</span>
-              </div>
-            `
-                )
-                .join("")
-        }
-      </div>
-
-      <div class="knowledge-section">
-        <div class="panel-header">
-          <span>top topics (${kb.top_topics.length})</span>
-        </div>
-        ${
-          kb.top_topics.length === 0
-            ? `<div class="muted">no topics extracted yet</div>`
-            : kb.top_topics
-                .map(
-                  (t) => `
-              <div class="rail-row">
-                <span>${escapeHtml(t.entity || t.topic || "")}</span>
-                <span class="muted">score ${Number(t.score ?? t.weight ?? 0).toFixed(2)}</span>
-              </div>
-            `
-                )
-                .join("")
-        }
-      </div>
-
-      <div class="knowledge-section">
-        <div class="panel-header">
-          <span>recent passages (${kb.passages.length})</span>
-        </div>
-        ${
-          kb.passages.length === 0
-            ? `<div class="muted">no passages ingested yet</div>`
-            : kb.passages
-                .map(
-                  (p) => `
-              <div class="source-row">
-                <div class="source-row-top">
-                  <span>${escapeHtml(p.entity || p.url)}</span>
-                  <button class="rail-menu-btn" data-delete-passage="${escapeHtml(p.id)}">[delete]</button>
-                </div>
-                <div class="muted">${escapeHtml(p.url)}</div>
-                <div>${escapeHtml(p.text.slice(0, 260))}</div>
-              </div>
-            `
-                )
-                .join("")
-        }
-      </div>
     </div>
   `;
+
+  container.querySelector("#kb-open-brain-btn")?.addEventListener("click", () => {
+    if (actions.onSwitchToBrain) {
+      actions.onSwitchToBrain();
+    }
+  });
 
   container.querySelector("#kb-pause-btn")?.addEventListener("click", () => {
     actions.onTogglePauseLearning(!kb.pause_learning);
@@ -553,10 +479,465 @@ export function renderKnowledgeView(
     });
   });
 
-  container.querySelectorAll("[data-delete-passage]").forEach((btn) => {
+  bindMailAccountsEvents(container, async () => {
+    if (actions.onMailChanged) {
+      await actions.onMailChanged();
+    }
+  });
+}
+
+function renderBrainEntityCardHtml(e: BrainEntityItem): string {
+  const isHighlighted = state.highlightedBrainSlug === e.slug;
+  const attrEntries = Object.entries(e.attributes ?? {})
+    .filter(([k, v]) => k !== "source_url" && !k.startsWith("$") && v !== "" && v !== null && v !== undefined)
+    .map(([k, v]) => `${k}: ${String(v)}`)
+    .join(" · ");
+
+  const rawSrc = String(
+    e.source_url || (e.attributes?.source_url as string | undefined) || ""
+  ).trim();
+  const normalizedSrcUrl = rawSrc.startsWith("mail:")
+    ? `satzmail://message/${rawSrc.slice(5).trim()}`
+    : rawSrc;
+  const sourceBtnHtml =
+    normalizedSrcUrl &&
+    (normalizedSrcUrl.startsWith("http://") ||
+      normalizedSrcUrl.startsWith("https://") ||
+      normalizedSrcUrl.startsWith("satzmail://"))
+      ? `<button class="rail-menu-btn" data-brain-open-source="${escapeHtml(normalizedSrcUrl)}" data-brain-source-title="${escapeHtml(e.name)}">[source]</button>`
+      : "";
+
+  return `
+    <div
+      class="source-row ${isHighlighted ? "active" : ""}"
+      id="brain-card-${escapeHtml(e.slug)}"
+      data-brain-card-slug="${escapeHtml(e.slug)}"
+    >
+      <div class="source-row-top">
+        <span>
+          <button class="citation-link" data-select-brain-slug="${escapeHtml(e.slug)}">
+            [${escapeHtml(e.type)}] <strong>${escapeHtml(e.name)}</strong>
+          </button>
+          <span class="muted">(tier ${e.tier} · ${escapeHtml(e.path)})</span>
+        </span>
+        <div>
+          ${sourceBtnHtml}
+          <button class="rail-menu-btn" data-delete-brain-entity="${escapeHtml(e.slug)}">[forget]</button>
+        </div>
+      </div>
+      <div>${escapeHtml(e.summary)}</div>
+      ${attrEntries ? `<div class="muted">${escapeHtml(attrEntries)}</div>` : ""}
+      ${
+        isHighlighted && e.body
+          ? `<div class="muted">${escapeHtml(e.body)}</div>`
+          : ""
+      }
+    </div>
+  `;
+}
+
+export function renderBrainView(
+  container: HTMLElement,
+  actions: KnowledgeActions
+): void {
+  const prevSearchInput = container.querySelector(
+    "#brain-search-input"
+  ) as HTMLInputElement | null;
+  const wasFocused =
+    prevSearchInput && document.activeElement === prevSearchInput;
+  const selStart = prevSearchInput?.selectionStart ?? null;
+
+  const kb = state.knowledge;
+  const brainEntities = kb.brain?.entities ?? [];
+  const brainRankingLabel =
+    kb.brain?.brain_ranking ??
+    kb.brain?.encoder?.label ??
+    "brain ranking: lexical (planck13 missing)";
+  const profileInfo = kb.profile;
+  const isUnlocked = Boolean(profileInfo?.unlocked && profileInfo?.active_profile);
+  const activeProfile = profileInfo?.active_profile ?? null;
+  const thisWeek = kb.this_week ?? [];
+  const searchRes = state.brainSearchResults;
+  const hasActiveSearch = Boolean(state.brainSearchQuery.trim() && searchRes);
+
+  const typeOrder = [
+    { key: "order", label: "orders" },
+    { key: "person", label: "people" },
+    { key: "organization", label: "organizations" },
+    { key: "promotion", label: "promotions" },
+    { key: "place", label: "places" },
+    { key: "account", label: "accounts" },
+    { key: "note", label: "notes" },
+  ];
+
+  const groupedEntities = new Map<string, BrainEntityItem[]>();
+  for (const tg of typeOrder) {
+    groupedEntities.set(tg.key, []);
+  }
+  const otherEntities: BrainEntityItem[] = [];
+  for (const ent of brainEntities) {
+    const tKey = (ent.type || "note").toLowerCase();
+    if (groupedEntities.has(tKey)) {
+      groupedEntities.get(tKey)!.push(ent);
+    } else {
+      otherEntities.push(ent);
+    }
+  }
+
+  const entityGroupsHtml = !isUnlocked
+    ? `<div class="muted">unlock a profile to save to your Brain.</div>`
+    : brainEntities.length === 0
+      ? `<div class="muted">no brain entities stored yet. sync mail, browse authenticated tabs, or ask chat to store addresses, contacts, orders, or notes.</div>`
+      : [
+          ...typeOrder
+            .filter((tg) => (groupedEntities.get(tg.key)?.length ?? 0) > 0)
+            .map((tg) => {
+              const items = groupedEntities.get(tg.key) ?? [];
+              return `
+                <div class="rail-group-label">
+                  <span>${escapeHtml(tg.label)} (${items.length})</span>
+                </div>
+                ${items.map((item) => renderBrainEntityCardHtml(item)).join("")}
+              `;
+            }),
+          otherEntities.length > 0
+            ? `
+              <div class="rail-group-label">
+                <span>other (${otherEntities.length})</span>
+              </div>
+              ${otherEntities.map((item) => renderBrainEntityCardHtml(item)).join("")}
+            `
+            : "",
+        ].join("");
+
+  const searchResultsSectionHtml = hasActiveSearch && searchRes
+    ? `
+      <div class="knowledge-section" id="brain-search-results-section">
+        <div class="panel-header">
+          <span>search results for "${escapeHtml(state.brainSearchQuery)}" · ${searchRes.entities.length} entities · ${searchRes.passages.length} passages · ${searchRes.mail.length} mail</span>
+          <button id="brain-search-clear-btn">[clear]</button>
+        </div>
+        ${
+          searchRes.entities.length === 0 &&
+          searchRes.passages.length === 0 &&
+          searchRes.mail.length === 0
+            ? `<div class="muted">no matches in entities, passages, or mail.</div>`
+            : `
+              ${
+                searchRes.entities.length > 0
+                  ? `
+                    <div class="rail-group-label"><span>matching entities (${searchRes.entities.length})</span></div>
+                    ${searchRes.entities.map((e) => renderBrainEntityCardHtml(e)).join("")}
+                  `
+                  : ""
+              }
+              ${
+                searchRes.passages.length > 0
+                  ? `
+                    <div class="rail-group-label"><span>matching passages (${searchRes.passages.length})</span></div>
+                    ${searchRes.passages
+                      .map(
+                        (p) => `
+                          <div class="source-row">
+                            <div class="source-row-top">
+                              <button class="citation-link" data-brain-open-source="${escapeHtml(p.url)}" data-brain-source-title="${escapeHtml(p.title || p.entity || p.url)}">
+                                ${escapeHtml(p.title || p.entity || p.url)}
+                              </button>
+                              <button class="rail-menu-btn" data-delete-passage="${escapeHtml(p.id)}">[forget]</button>
+                            </div>
+                            <div class="muted">${escapeHtml(p.url)}</div>
+                            <div>${escapeHtml(p.text.slice(0, 260))}</div>
+                          </div>
+                        `
+                      )
+                      .join("")}
+                  `
+                  : ""
+              }
+              ${
+                searchRes.mail.length > 0
+                  ? `
+                    <div class="rail-group-label"><span>matching mail (${searchRes.mail.length})</span></div>
+                    ${searchRes.mail
+                      .map((m) => {
+                        const mid = String(m.id ?? "");
+                        const sender = String(m.from_name || m.from_addr || "");
+                        const subj = String(m.subject ?? "(no subject)");
+                        const snip = String(m.snippet ?? "");
+                        return `
+                          <div class="source-row">
+                            <div class="source-row-top">
+                              <button class="citation-link" data-brain-open-source="satzmail://message/${escapeHtml(mid)}" data-brain-source-title="${escapeHtml(subj)}">
+                                [mail] ${escapeHtml(sender)} · ${escapeHtml(subj)}
+                              </button>
+                              <span class="muted">[${escapeHtml(String(m.label ?? "email"))}]</span>
+                            </div>
+                            <div class="muted">${escapeHtml(snip.slice(0, 200))}</div>
+                          </div>
+                        `;
+                      })
+                      .join("")}
+                  `
+                  : ""
+              }
+            `
+        }
+      </div>
+    `
+    : "";
+
+  container.innerHTML = `
+    <div class="knowledge-view" id="brain-view-root">
+      <div class="knowledge-section">
+        <div class="panel-header">
+          <span>satz brain · ${MOD_LABEL}+b · ${
+            isUnlocked && activeProfile
+              ? `profile: ${escapeHtml(activeProfile.name)}`
+              : "locked"
+          }</span>
+          <div>
+            <span class="muted">${escapeHtml(brainRankingLabel)}</span>
+            <button id="brain-open-settings-btn">[settings]</button>
+            <button id="brain-close-btn">[close]</button>
+          </div>
+        </div>
+        <div class="vault-form-row">
+          <input
+            id="brain-search-input"
+            class="vault-input"
+            type="text"
+            spellcheck="false"
+            autocorrect="off"
+            autocapitalize="off"
+            placeholder="search entities, passages, and mail (FTS5 + encoder rank)_"
+            value="${escapeHtml(state.brainSearchQuery)}"
+          />
+          <button id="brain-search-btn">[search]</button>
+          ${
+            state.brainSearchQuery
+              ? `<button id="brain-search-reset-btn">[clear]</button>`
+              : ""
+          }
+        </div>
+      </div>
+
+      ${searchResultsSectionHtml}
+
+      <div class="knowledge-section">
+        <div class="panel-header">
+          <span>entity cards by type (${brainEntities.length})</span>
+          <span class="muted">${escapeHtml(brainRankingLabel)}</span>
+        </div>
+        ${entityGroupsHtml}
+      </div>
+
+      <div class="knowledge-section">
+        <div class="panel-header">
+          <span>this week · read &amp; received (${thisWeek.length})</span>
+        </div>
+        ${
+          thisWeek.length === 0
+            ? `<div class="muted">no pages read or emails received in the last 7 days.</div>`
+            : thisWeek
+                .map((item) => {
+                  const badge = item.kind === "received" ? "[received]" : "[read]";
+                  const rel = item.ts > 0 ? formatRelativeTime(String(Math.floor(item.ts))) : "";
+                  return `
+                    <div class="rail-row">
+                      <span>
+                        <span class="muted">${badge}</span>
+                        <button class="citation-link" data-brain-open-source="${escapeHtml(item.url)}" data-brain-source-title="${escapeHtml(item.title)}">
+                          ${escapeHtml(item.title)}
+                        </button>
+                      </span>
+                      <span class="muted">${escapeHtml(item.domain)} · ${escapeHtml(rel)}</span>
+                    </div>
+                  `;
+                })
+                .join("")
+        }
+      </div>
+
+      <div class="knowledge-section">
+        <div class="panel-header">
+          <span>top domains &amp; source trust (${kb.top_domains.length})</span>
+          <span class="muted">effective = 0.7 * system + 0.3 * yours (30% hard cap)</span>
+        </div>
+        ${
+          kb.top_domains.length === 0
+            ? `<div class="muted">no domains recorded yet</div>`
+            : kb.top_domains
+                .map((d) => {
+                  const sysScore = Number(d.system ?? d.trust ?? 5.0);
+                  const hasPersonal =
+                    d.personal !== undefined && d.personal !== null;
+                  const personalScore = hasPersonal
+                    ? Number(d.personal)
+                    : sysScore;
+                  const effScore = Number(
+                    d.effective ??
+                      (0.7 * sysScore + 0.3 * personalScore).toFixed(2)
+                  );
+                  const bandLabel = d.band_label || "Unscored";
+                  const sysReason = d.scored
+                    ? d.why || d.category || "registry"
+                    : "unscored (default 5.0)";
+                  const conflictBadge = d.conflict
+                    ? ` <span class="msg-error-badge" title="|yours - system| >= 3.0">[conflict]</span>`
+                    : "";
+                  return `
+                    <div class="source-row" data-domain-trust-row="${escapeHtml(d.domain)}">
+                      <div class="source-row-top">
+                        <span>
+                          <strong>${escapeHtml(d.domain)}</strong>
+                          <span class="muted">· ${d.visits} visits</span>
+                        </span>
+                        <span>
+                          effective <strong>${effScore.toFixed(2)}</strong> / 10
+                          <span class="muted">[${escapeHtml(bandLabel)}]</span>${conflictBadge}
+                        </span>
+                      </div>
+                      <div class="muted">
+                        system: ${sysScore.toFixed(1)} (${escapeHtml(sysReason)}) · yours: ${
+                          hasPersonal
+                            ? `${personalScore.toFixed(1)} (0.7 * ${sysScore.toFixed(1)} + 0.3 * ${personalScore.toFixed(1)} = ${effScore.toFixed(2)})`
+                            : `default (${sysScore.toFixed(1)})`
+                        }
+                      </div>
+                      <div class="vault-form-row">
+                        <span class="muted">your score (0-10, 30% max blend):</span>
+                        <input
+                          type="range"
+                          min="0"
+                          max="10"
+                          step="0.5"
+                          value="${personalScore}"
+                          data-trust-slider-domain="${escapeHtml(d.domain)}"
+                        />
+                        <span class="muted" data-trust-slider-val="${escapeHtml(d.domain)}">${personalScore.toFixed(1)}</span>
+                        ${
+                          hasPersonal
+                            ? `<button class="rail-menu-btn" data-trust-reset-domain="${escapeHtml(d.domain)}">[reset]</button>`
+                            : ""
+                        }
+                      </div>
+                    </div>
+                  `;
+                })
+                .join("")
+        }
+      </div>
+
+      <div class="knowledge-section">
+        <div class="panel-header">
+          <span>recent passages (${kb.passages.length})</span>
+        </div>
+        ${
+          kb.passages.length === 0
+            ? `<div class="muted">no passages ingested yet</div>`
+            : kb.passages
+                .map(
+                  (p) => `
+              <div class="source-row">
+                <div class="source-row-top">
+                  <span>${escapeHtml(p.entity || p.url)}</span>
+                  <button class="rail-menu-btn" data-delete-passage="${escapeHtml(p.id)}">[forget]</button>
+                </div>
+                <div class="muted">${escapeHtml(p.url)}</div>
+                <div>${escapeHtml(p.text.slice(0, 260))}</div>
+              </div>
+            `
+                )
+                .join("")
+        }
+      </div>
+    </div>
+  `;
+
+  container
+    .querySelector("#brain-open-settings-btn")
+    ?.addEventListener("click", () => {
+      if (actions.onSwitchToSettings) {
+        actions.onSwitchToSettings();
+      }
+    });
+
+  container.querySelector("#brain-close-btn")?.addEventListener("click", () => {
+    actions.onCloseKnowledgeView();
+  });
+
+  const searchInput = container.querySelector(
+    "#brain-search-input"
+  ) as HTMLInputElement | null;
+  if (wasFocused && searchInput) {
+    searchInput.focus();
+    if (selStart !== null) {
+      searchInput.setSelectionRange(selStart, selStart);
+    }
+  }
+
+  const triggerBrainSearch = (q: string) => {
+    state.brainSearchQuery = q;
+    if (actions.onSearchBrain) {
+      actions.onSearchBrain(q);
+    }
+  };
+
+  searchInput?.addEventListener("input", () => {
+    const val = searchInput.value;
+    state.brainSearchQuery = val;
+    if (brainSearchDebounceTimer) {
+      clearTimeout(brainSearchDebounceTimer);
+    }
+    brainSearchDebounceTimer = setTimeout(() => {
+      triggerBrainSearch(val.trim());
+    }, 150);
+  });
+
+  searchInput?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (brainSearchDebounceTimer) {
+        clearTimeout(brainSearchDebounceTimer);
+      }
+      triggerBrainSearch(searchInput.value.trim());
+    }
+  });
+
+  container.querySelector("#brain-search-btn")?.addEventListener("click", () => {
+    triggerBrainSearch(searchInput?.value.trim() ?? "");
+  });
+
+  const clearSearch = () => {
+    state.brainSearchQuery = "";
+    state.brainSearchResults = null;
+    renderBrainView(container, actions);
+  };
+  container
+    .querySelector("#brain-search-clear-btn")
+    ?.addEventListener("click", clearSearch);
+  container
+    .querySelector("#brain-search-reset-btn")
+    ?.addEventListener("click", clearSearch);
+
+  container.querySelectorAll("[data-select-brain-slug]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const id = (btn as HTMLElement).getAttribute("data-delete-passage");
-      if (id) actions.onDeletePassage(id);
+      const slug = (btn as HTMLElement).getAttribute("data-select-brain-slug");
+      if (!slug) return;
+      state.highlightedBrainSlug =
+        state.highlightedBrainSlug === slug ? null : slug;
+      renderBrainView(container, actions);
+    });
+  });
+
+  container.querySelectorAll("[data-brain-open-source]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const url = el.getAttribute("data-brain-open-source") ?? "";
+      const title = el.getAttribute("data-brain-source-title") ?? "";
+      if (url && actions.onOpenSourceUrl) {
+        actions.onOpenSourceUrl(url, title);
+      }
     });
   });
 
@@ -569,9 +950,46 @@ export function renderKnowledgeView(
     });
   });
 
-  bindMailAccountsEvents(container, async () => {
-    if (actions.onMailChanged) {
-      await actions.onMailChanged();
-    }
+  container.querySelectorAll("[data-delete-passage]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = (btn as HTMLElement).getAttribute("data-delete-passage");
+      if (id) actions.onDeletePassage(id);
+    });
   });
+
+  container.querySelectorAll("[data-trust-slider-domain]").forEach((inp) => {
+    const slider = inp as HTMLInputElement;
+    const dom = slider.getAttribute("data-trust-slider-domain") ?? "";
+    slider.addEventListener("input", () => {
+      const valEl = container.querySelector(
+        `[data-trust-slider-val="${dom}"]`
+      );
+      if (valEl) {
+        valEl.textContent = Number(slider.value).toFixed(1);
+      }
+    });
+    slider.addEventListener("change", () => {
+      if (dom && actions.onSetDomainTrust) {
+        actions.onSetDomainTrust(dom, Number(slider.value));
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-trust-reset-domain]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const dom = (btn as HTMLElement).getAttribute("data-trust-reset-domain");
+      if (dom && actions.onSetDomainTrust) {
+        actions.onSetDomainTrust(dom, null);
+      }
+    });
+  });
+
+  if (state.highlightedBrainSlug) {
+    const cardEl = container.querySelector(
+      `#brain-card-${CSS.escape(state.highlightedBrainSlug)}`
+    );
+    if (cardEl && typeof cardEl.scrollIntoView === "function") {
+      cardEl.scrollIntoView({ block: "nearest" });
+    }
+  }
 }

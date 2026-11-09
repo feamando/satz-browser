@@ -499,6 +499,7 @@ fn attach_child_webview_accelerators(app: AppHandle, child_wv: &tauri::Webview) 
                                     (0x4C, true) => Some("fill_login"),           // Ctrl+Shift+L
                                     (0x4E, false) => Some("new_conversation"),     // Ctrl+N
                                     (0x4B, false) => Some("filter_conversations"), // Ctrl+K
+                                    (0x42, false) => Some("toggle_brain"),         // Ctrl+B
                                     (0x54, false) => Some("new_tab"),              // Ctrl+T
                                     (0x57, false) => Some("close_tab"),            // Ctrl+W
                                     (0x4C, false) => Some("focus_address"),        // Ctrl+L

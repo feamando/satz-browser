@@ -1,0 +1,25 @@
+{
+  "milestone": "M20",
+  "platform": "windows",
+  "version": "0.5.0",
+  "date": "2026-11-09",
+  "checks": {
+    "brain_settings_split": "[brain · Mod+B] opens dedicated Brain view (#rail-open-brain-btn); [settings] opens Settings view (#rail-open-knowledge-btn) with profiles, vault, mail accounts, and /doctor",
+    "unified_brain_search": "GET/POST /brain/search queries entities, passages, and mail with encoder + lexical ranking",
+    "entity_cards_and_forget": "Entity cards grouped by type (people, orders, promotions, accounts, places, notes) with [source] and cascading [forget]",
+    "this_week_timeline": "'this week' timeline shows read pages and received emails from the last 7 days",
+    "domain_trust_sliders": "Per-domain personal trust score (0..10) blended 0.7 * system + 0.3 * yours (30% hard cap), system score + reason shown, conflict flag on |personal - system| >= 3.0",
+    "memory_citations_b1": "Asking 'when does my Zalando order arrive?' with 0 open tabs answers from Brain citing [B1] Zalando Order 104099887712 (2026-11-12), verified by check_citations (citations_ok >= 1, citations_flagged == 0)"
+  },
+  "screenshots": [
+    "01_launch_status_bar.png",
+    "02_dw_tab_toolbar_visible.png",
+    "03_dw_chat_cited_answer.png",
+    "04_zalando_tab_toolbar_visible.png",
+    "05_empty_tab_no_fabrication.png",
+    "06_mail_unlock_inline.png",
+    "07_mail_fixture_lanes.png",
+    "08_brain_entity_clean.png",
+    "09_profile_isolation.png"
+  ]
+}

@@ -8,6 +8,7 @@ export interface ShortcutHandlers {
   onSelectTabByNumber: (num: number) => void;
   onFocusAddressBar: () => void;
   onFillLogin?: () => void;
+  onToggleBrain?: () => void;
   onToggleAgentRail: () => void;
   onToggleCompare: () => void;
   onBookmarkCurrentPage: () => void;
@@ -86,6 +87,12 @@ export function bindKeyboardShortcuts(handlers: ShortcutHandlers): void {
     if (key === "d") {
       e.preventDefault();
       handlers.onBookmarkCurrentPage();
+      return;
+    }
+
+    if (key === "b") {
+      e.preventDefault();
+      handlers.onToggleBrain?.();
       return;
     }
 

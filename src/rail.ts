@@ -18,6 +18,7 @@ export interface RailActions {
   onBookmarkCurrent: () => void;
   onRemoveBookmark: (id: string) => void;
   onOpenKnowledgeView: () => void;
+  onOpenBrainView?: () => void;
 }
 
 export function renderRail(actions: RailActions): void {
@@ -159,11 +160,18 @@ export function renderRail(actions: RailActions): void {
 
     <div class="rail-footer">
       <button
+        id="rail-open-brain-btn"
+        class="${state.showBrainView ? "active" : ""}"
+        title="Open Satz Brain (${MOD_LABEL}+B): search entities, passages & mail, view entity cards, this week timeline, and domain trust sliders"
+      >
+        [brain · ${MOD_LABEL}+b]
+      </button>
+      <button
         id="rail-open-knowledge-btn"
         class="${state.showKnowledgeView ? "active" : ""}"
-        title="Open Satz Brain Knowledge Base, User Profiles (6-digit PIN), Mail Accounts, and Encrypted Vault"
+        title="Open Settings: user profiles (6-digit PIN), encrypted .env vault, mail accounts, and pause learning"
       >
-        [${state.knowledge.profile?.unlocked && state.knowledge.profile?.active_profile ? `profile: ${escapeHtml(state.knowledge.profile.active_profile.name)} · kb` : "knowledge · profile"}]
+        [${state.knowledge.profile?.unlocked && state.knowledge.profile?.active_profile ? `settings · ${escapeHtml(state.knowledge.profile.active_profile.name)}` : "settings"}]
       </button>
       <span>v0.5</span>
     </div>
@@ -191,7 +199,7 @@ function renderConversationRow(
 
   return `
     <div>
-      <div class="rail-row ${isActive && !state.showKnowledgeView ? "active" : ""}" data-conv-id="${escapeHtml(c.id)}">
+      <div class="rail-row ${isActive && !state.showKnowledgeView && !state.showBrainView ? "active" : ""}" data-conv-id="${escapeHtml(c.id)}">
         ${
           isRenaming
             ? `<input id="rail-rename-input-${escapeHtml(c.id)}" class="rail-rename-input" type="text" value="${escapeHtml(c.title)}" />`
@@ -257,6 +265,14 @@ function bindRailEvents(container: HTMLElement, actions: RailActions): void {
     .querySelector("#rail-bookmark-current-btn")
     ?.addEventListener("click", () => {
       actions.onBookmarkCurrent();
+    });
+
+  container
+    .querySelector("#rail-open-brain-btn")
+    ?.addEventListener("click", () => {
+      if (actions.onOpenBrainView) {
+        actions.onOpenBrainView();
+      }
     });
 
   container

@@ -138,3 +138,31 @@ Owner: Nikita Gorshkov · Date: 2026-11-09 · Spec: `docs/PLAN_v0.5.md` · Platf
 - `cargo test --manifest-path src-tauri/Cargo.toml`: **PASS** (`12/12` unit tests passing)
 - `..\sgs\.venv\Scripts\python.exe -m pytest sidecar -q`: **PASS** (`22/22` tests passing, including `test_m19.py`: 12/12 fixture lanes without `List-Unsubscribe`, 0 personal in promos, `ZALANDO25AUTUMN` + `2026-12-31` extraction, relabel re-extraction, order grouping + status advancement, and send gate `[new]` badge)
 - Smoke script artifacts saved to `docs/smoke/v0.5/m19/windows/`.
+
+---
+
+## 6. Milestone M20: A Brain You Can Use
+
+### 6.1 What Changed
+- **Split Brain (`Mod+B`) and Settings (`src/rail.ts`, `src/knowledge.ts`, `src/keys.ts`, `src/main.ts`, `src-tauri/src/webview_manager.rs`, `src-tauri/src/lib.rs`):**
+  - Split the rail footer into `[brain · Mod+B]` (`#rail-open-brain-btn`) and `[settings]` (`#rail-open-knowledge-btn`), wired `Ctrl+B` / `Cmd+B` across frontend, WebView2 child webview accelerator forwarding, and macOS menu accelerators.
+  - **Settings (`renderKnowledgeView`)** holds profiles, encrypted password vault (`vault.enc`), mail accounts, `/doctor` model status, background bookmark indexing, and pause learning.
+  - **Brain (`renderBrainView`)** holds the unified search box (`#brain-search-input`), entity cards grouped by type (`order`, `promotion`, `person`, `account`, `place`, `organization`, `note`) with `[source]` and `[forget]`, the `"this week"` timeline of read pages and received emails, and top domains with personal trust sliders.
+- **Unified Brain Search & Cascading Entity Forget (`sidecar/satz_brain.py`, `sidecar/satz_models.py`):**
+  - Added `GET /brain/search` and `POST /brain/search` (`SatzSidecarRuntime.search_brain(query, limit)`) searching entities, passages, and mail using encoder similarity + lexical/FTS5 ranking.
+  - Shared a thread-safe process-wide `planck13` encoder cache in `sidecar/satz_brain.py` (`_SHARED_ENCODERS` + `_SHARED_ENCODER_LOCK`).
+  - Updated `delete_brain_entity(slug)` to cascade deletion to matching `passages` and orphan `edges` and `queries`.
+- **Domain Trust Sliders with 30% Hard Cap (`sidecar/satz_models.py`, `src/knowledge.ts`, `src/api.ts`):**
+  - Added `POST /knowledge/domain_trust` (`set_domain_trust(domain, personal_score)`) blending `0.7 * system + 0.3 * yours` via `Store.set_personal` (enforcing the 30% hard cap from v0.2 decision #3), returning `system`, `personal`, `effective`, `band`, `why`, and `conflict` (`|personal - system| >= 3.0`), plus `[reset]` (`personal = None`).
+- **Memory Citations `[B1]`, `[B2]` (`sidecar/satz_brain.py`, `sidecar/satz_models.py`, `src/chat.ts`, `src/main.ts`):**
+  - Added `SatzBrain.build_model_context_with_citations(query, open_sources)` numbering retrieved Brain entities as `[B1]`, `[B2]`, ... in a separate `brain_sources` list.
+  - Updated `STATIC_SYSTEM_PROMPT` and `STATIC_SYSTEM_PROMPT_NO_SOURCES` to instruct citing Brain items inline as `[B1]`, `[B2]`.
+  - Updated `check_citations(answer_text, hydrated_sources, brain_sources=brain_sources)` to verify both `[n]` page/mail citations and `[Bn]` Brain memory citations (replacing out-of-range `[B9]` with `[unsourced]` and verifying numbers, dates, and capitalised names against the cited Brain entity).
+  - Rendered `[B1]` inline badges and clickable `brain memory:` `[B1] <Entity Name>` citation buttons on assistant messages in `src/chat.ts` that open the Brain view with the cited entity card highlighted.
+
+### 6.2 M20 Verification & Measurements (Windows 11 RTX 4090 Reference Box)
+- `npm run build`: **PASS** (`dist/` built in `333 ms`, 0 TypeScript errors)
+- `cargo check --manifest-path src-tauri/Cargo.toml`: **PASS**
+- `cargo test --manifest-path src-tauri/Cargo.toml`: **PASS** (`12/12` unit tests passing)
+- `..\sgs\.venv\Scripts\python.exe -m pytest sidecar -q`: **PASS** (`25/25` tests passing, including `test_m20.py`: domain trust 30% hard cap + conflict flag + reset, `"this week"` timeline with read pages + received mail, unified Brain search across entities/passages/mail, cascading `[forget]`, and no-tab `"when does my Zalando order arrive?"` citing `[B1] Zalando Order 104099887712` with `2026-11-12` and `citations_flagged == 0`)
+- Smoke script artifacts saved to `docs/smoke/v0.5/m20/windows/`.

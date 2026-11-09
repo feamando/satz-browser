@@ -39,6 +39,8 @@ import {
   sidecarRunAnswer,
   sidecarRunRead,
   sidecarSaveRawEnv,
+  sidecarSearchBrain,
+  sidecarSetDomainTrust,
   sidecarSetPauseLearning,
   sidecarStreamChat,
   sidecarSummarizeConversation,
@@ -55,7 +57,7 @@ import {
   updateStreamingStatus,
 } from "./chat";
 import { bindKeyboardShortcuts } from "./keys";
-import { renderKnowledgeView } from "./knowledge";
+import { renderBrainView, renderKnowledgeView } from "./knowledge";
 import {
   refreshMailState,
   renderComposeTabView,
@@ -124,6 +126,7 @@ async function initApp(): Promise<void> {
     onNewConversation: () => {
       state.activeDetail = null;
       state.showKnowledgeView = false;
+      state.showBrainView = false;
       state.compareMode = false;
       renderAllRegions();
     },
@@ -180,6 +183,9 @@ async function initApp(): Promise<void> {
     onBookmarkCurrentPage: () => {
       void handleBookmarkCurrentPage();
     },
+    onToggleBrain: () => {
+      void handleToggleBrainView();
+    },
     onEscape: () => {
       if (
         state.openMenuConvId !== null ||
@@ -195,6 +201,12 @@ async function initApp(): Promise<void> {
       if (state.showErrorLog) {
         state.showErrorLog = false;
         renderStatusLine();
+        return;
+      }
+      if (state.showBrainView) {
+        state.showBrainView = false;
+        state.highlightedBrainSlug = null;
+        renderAllRegions();
         return;
       }
       if (state.showKnowledgeView) {
@@ -267,8 +279,11 @@ function handleMenuShortcut(cmd: string): void {
   if (cmd === "new_conversation") {
     state.activeDetail = null;
     state.showKnowledgeView = false;
+    state.showBrainView = false;
     state.compareMode = false;
     renderAllRegions();
+  } else if (cmd === "toggle_brain") {
+    void handleToggleBrainView();
   } else if (cmd === "filter_conversations") {
     const el = document.getElementById(
       "rail-filter-input"
@@ -451,6 +466,18 @@ function renderWorkspaceRegions(): void {
   renderStatusLine();
 }
 
+async function handleToggleBrainView(): Promise<void> {
+  state.showBrainView = !state.showBrainView;
+  if (state.showBrainView) {
+    state.showKnowledgeView = false;
+    const kb = await sidecarFetchKnowledge();
+    if (kb) state.knowledge = kb;
+  } else {
+    state.highlightedBrainSlug = null;
+  }
+  renderAllRegions();
+}
+
 function renderRailRegion(): void {
   renderRail({
     onSelectConversation: (id) => {
@@ -459,6 +486,7 @@ function renderRailRegion(): void {
     onNewConversation: () => {
       state.activeDetail = null;
       state.showKnowledgeView = false;
+      state.showBrainView = false;
       state.compareMode = false;
       renderAllRegions();
     },
@@ -505,9 +533,13 @@ function renderRailRegion(): void {
       await refreshLists();
       renderRailRegion();
     },
+    onOpenBrainView: () => {
+      void handleToggleBrainView();
+    },
     onOpenKnowledgeView: async () => {
       state.showKnowledgeView = !state.showKnowledgeView;
       if (state.showKnowledgeView) {
+        state.showBrainView = false;
         const [kb, docRoles] = await Promise.all([
           sidecarFetchKnowledge(),
           sidecarFetchDoctor(),
@@ -565,6 +597,98 @@ function renderViewportRegion(): void {
 
   if (resizeObserver) {
     resizeObserver.disconnect();
+  }
+
+  if (state.showBrainView) {
+    renderBrainView(viewport, {
+      onTogglePauseLearning: async (paused) => {
+        const updated = await sidecarSetPauseLearning(paused);
+        state.knowledge.pause_learning = updated;
+        state.sidecar.pause_learning = updated;
+        renderViewportRegion();
+        renderStatusLine();
+      },
+      onDeletePassage: async (passageId) => {
+        await sidecarDeletePassage(passageId);
+        const kb = await sidecarFetchKnowledge();
+        if (kb) state.knowledge = kb;
+        if (state.brainSearchQuery) {
+          state.brainSearchResults = await sidecarSearchBrain(state.brainSearchQuery);
+        }
+        renderViewportRegion();
+      },
+      onDeleteBrainEntity: async (slug) => {
+        await sidecarDeleteBrainEntity(slug);
+        const kb = await sidecarFetchKnowledge();
+        if (kb) state.knowledge = kb;
+        if (state.brainSearchQuery) {
+          state.brainSearchResults = await sidecarSearchBrain(state.brainSearchQuery);
+        }
+        renderViewportRegion();
+      },
+      onSearchBrain: async (query) => {
+        state.brainSearchQuery = query;
+        if (!query) {
+          state.brainSearchResults = null;
+        } else {
+          state.brainSearchResults = await sidecarSearchBrain(query);
+        }
+        renderViewportRegion();
+      },
+      onSetDomainTrust: async (domain, personalScore) => {
+        await sidecarSetDomainTrust(domain, personalScore);
+        const kb = await sidecarFetchKnowledge();
+        if (kb) state.knowledge = kb;
+        renderViewportRegion();
+      },
+      onOpenSourceUrl: (url) => {
+        state.showBrainView = false;
+        state.highlightedBrainSlug = null;
+        if (url.startsWith("satzmail://message/")) {
+          const mid = url.replace("satzmail://message/", "").split("/")[0].trim();
+          const mailConv = state.conversations.find((c) => c.origin === "mail");
+          if (mailConv && mid) {
+            void (async () => {
+              await selectConversation(mailConv.id);
+              await openEmailMessageTab(mid, "mail");
+            })();
+            return;
+          }
+        }
+        void startDirectBrowsing(url);
+      },
+      onSwitchToSettings: async () => {
+        state.showBrainView = false;
+        state.showKnowledgeView = true;
+        const [kb, docRoles] = await Promise.all([
+          sidecarFetchKnowledge(),
+          sidecarFetchDoctor(),
+        ]);
+        if (kb) state.knowledge = kb;
+        state.doctorRoles = docRoles;
+        await refreshMailState();
+        renderAllRegions();
+      },
+      onCreateProfile: async () => {},
+      onUnlockProfile: async () => {},
+      onUnlockProfileKeychain: async () => {},
+      onLockProfile: async () => {},
+      onDeleteProfile: async () => {},
+      onUpsertPassword: async () => {},
+      onSaveRawEnv: async () => {},
+      onImportEnvFile: async () => {},
+      onDeletePassword: async () => {},
+      onRevealPassword: async () => {},
+      onAutofillActiveTab: async () => {},
+      onMailChanged: async () => {},
+      onCloseKnowledgeView: () => {
+        state.showBrainView = false;
+        state.highlightedBrainSlug = null;
+        renderAllRegions();
+      },
+    });
+    scheduleWebviewLayoutSync();
+    return;
   }
 
   if (state.showKnowledgeView) {
@@ -1155,6 +1279,16 @@ function getChatActions() {
     onClickCitation: (citationIndex: number, sourceId: string | null) => {
       void handleCitationClick(citationIndex, sourceId);
     },
+    onClickBrainCitation: (slug: string) => {
+      void (async () => {
+        state.highlightedBrainSlug = slug;
+        state.showBrainView = true;
+        state.showKnowledgeView = false;
+        const kb = await sidecarFetchKnowledge();
+        if (kb) state.knowledge = kb;
+        renderAllRegions();
+      })();
+    },
     onOpenUrlAsTab: (url: string, title: string) => {
       void handleOpenUrlAsTab(url, title);
     },
@@ -1210,6 +1344,8 @@ function getChatActions() {
 
 async function selectConversation(conversationId: string): Promise<void> {
   state.showKnowledgeView = false;
+  state.showBrainView = false;
+  state.highlightedBrainSlug = null;
   state.compareMode = false;
   state.compareTabIds = [];
   const detail = await apiGetConversation(conversationId);
@@ -1686,6 +1822,9 @@ async function handleSendChatMessage(text: string): Promise<void> {
     if (streamRes.findings && streamRes.findings.length > 0) {
       state.messageFindings[savedMsg.id] = streamRes.findings;
     }
+    if (streamRes.brain_sources && streamRes.brain_sources.length > 0) {
+      state.messageBrainSources[savedMsg.id] = streamRes.brain_sources;
+    }
     state.activeDetail = await apiGetConversation(convId);
     if (state.activeDetail) {
       const msgObj = state.activeDetail.messages.find(
@@ -1697,6 +1836,9 @@ async function handleSendChatMessage(text: string): Promise<void> {
         }
         if (state.messageFindings[savedMsg.id]) {
           msgObj.findings = state.messageFindings[savedMsg.id];
+        }
+        if (state.messageBrainSources[savedMsg.id]) {
+          msgObj.brain_sources = state.messageBrainSources[savedMsg.id];
         }
         if (streamRes.cited_sources && streamRes.cited_sources.length > 0) {
           msgObj.cited_sources = streamRes.cited_sources;

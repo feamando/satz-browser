@@ -40,11 +40,23 @@ export interface SourceItem {
 }
 
 export interface CitationCheckEntry {
-  n: number;
+  n: number | string;
   sentence_idx: number;
   ok: boolean;
   out_of_range?: boolean;
   missing: string[];
+}
+
+export interface BrainCitationItem {
+  id: string;
+  cite_label: string;
+  b_index: number;
+  slug: string;
+  name: string;
+  type: string;
+  summary: string;
+  path?: string;
+  source_url?: string;
 }
 
 export interface SourceStatEntry {
@@ -81,6 +93,7 @@ export interface ChatMessage {
   citation_check_json?: string | null;
   citation_check?: CitationCheckEntry[];
   cited_sources?: Array<{ url: string; title: string; domain?: string }>;
+  brain_sources?: BrainCitationItem[];
   proposals?: BrainProposalItem[];
   findings?: FindingItem[];
 }
@@ -281,8 +294,28 @@ export interface BrainEntityItem {
   tier: number;
   summary: string;
   path: string;
+  source_url?: string;
+  body?: string;
   attributes: Record<string, unknown>;
   updated: string;
+}
+
+export interface BrainSearchResponse {
+  ok: boolean;
+  query: string;
+  entities: BrainEntityItem[];
+  passages: Array<{
+    id: string;
+    url: string;
+    domain: string;
+    title: string;
+    text: string;
+    entity: string;
+    ts: number;
+    score: number;
+  }>;
+  mail: Array<Record<string, unknown>>;
+  brain_ranking: string;
 }
 
 export interface BookmarkIndexStatus {
@@ -357,6 +390,15 @@ export interface KnowledgeSummary {
     trust: number;
     score?: number;
     dwell_seconds?: number;
+    system?: number;
+    personal?: number | null;
+    effective?: number;
+    band?: string;
+    band_label?: string;
+    category?: string;
+    why?: string;
+    scored?: boolean;
+    conflict?: boolean;
   }>;
   top_topics: Array<{
     entity: string;
@@ -371,5 +413,14 @@ export interface KnowledgeSummary {
     url: string;
     text: string;
     added_at: string;
+  }>;
+  this_week?: Array<{
+    kind: "read" | "received";
+    title: string;
+    url: string;
+    domain: string;
+    ts: number;
+    label?: string;
+    message_id?: string;
   }>;
 }

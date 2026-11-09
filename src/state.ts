@@ -1,6 +1,8 @@
 import type {
   BookmarkItem,
+  BrainCitationItem,
   BrainProposalItem,
+  BrainSearchResponse,
   BrowserTab,
   Conversation,
   ConversationDetail,
@@ -32,6 +34,10 @@ export interface AppState {
   agentRailOpen: boolean;
   showArchived: boolean;
   showKnowledgeView: boolean;
+  showBrainView: boolean;
+  brainSearchQuery: string;
+  brainSearchResults: BrainSearchResponse | null;
+  highlightedBrainSlug: string | null;
   railFilter: string;
   openMenuConvId: string | null;
   renamingConvId: string | null;
@@ -55,6 +61,7 @@ export interface AppState {
   tabCanFillLogin: Record<string, boolean>;
   messageProposals: Record<string, BrainProposalItem[]>;
   messageFindings: Record<string, FindingItem[]>;
+  messageBrainSources: Record<string, BrainCitationItem[]>;
   expandedDebugMessages: Record<string, boolean>;
   revealedPasswords: Record<string, string>;
   sourceStats: Record<string, SourceStatEntry>;
@@ -127,6 +134,10 @@ export const state: AppState = {
   agentRailOpen: true,
   showArchived: false,
   showKnowledgeView: false,
+  showBrainView: false,
+  brainSearchQuery: "",
+  brainSearchResults: null,
+  highlightedBrainSlug: null,
   railFilter: "",
   openMenuConvId: null,
   renamingConvId: null,
@@ -167,6 +178,7 @@ export const state: AppState = {
   tabCanFillLogin: {},
   messageProposals: {},
   messageFindings: {},
+  messageBrainSources: {},
   expandedDebugMessages: {},
   revealedPasswords: {},
   sourceStats: {},

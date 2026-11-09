@@ -5,6 +5,7 @@ import {
   state,
 } from "./state";
 import type {
+  BrainCitationItem,
   BrainProposalItem,
   CitationCheckEntry,
   FindingItem,
@@ -25,6 +26,7 @@ export interface ChatActions {
   onToggleWeb: () => void;
   onToggleMail?: () => void;
   onClickCitation: (citationIndex: number, sourceId: string | null) => void;
+  onClickBrainCitation?: (slug: string, citeLabel: string) => void;
   onOpenUrlAsTab: (url: string, title: string) => void;
   onSelectTab?: (tabId: string) => void;
   onCloseTab?: (tabId: string) => void;
@@ -212,7 +214,8 @@ export function renderChatPanel(
                     m.citation_check,
                     m.citations_ok,
                     m.citations_flagged,
-                    m.findings ?? state.messageFindings[m.id]
+                    m.findings ?? state.messageFindings[m.id],
+                    m.brain_sources ?? state.messageBrainSources[m.id]
                   )
                 )
                 .join("")
@@ -371,7 +374,8 @@ function renderMessageBlock(
   citationCheck?: CitationCheckEntry[],
   citationsOk?: number | null,
   citationsFlagged?: number | null,
-  findings?: FindingItem[]
+  findings?: FindingItem[],
+  brainSources?: BrainCitationItem[]
 ): string {
   let sourceIds: string[] = [];
   if (sourceIdsJson) {
@@ -394,7 +398,7 @@ function renderMessageBlock(
   const debugExpanded = Boolean(state.expandedDebugMessages[msgId]);
   const formattedBody = plainErr
     ? escapeHtml(plainErr.summary)
-    : formatCitationsInText(content, sourceIds, citationCheck);
+    : formatCitationsInText(content, sourceIds, citationCheck, brainSources);
   const modelLabel = model ? `model: ${escapeHtml(model)}` : "";
   const srcCountLabel =
     sourceIds.length > 0 ? ` · ${sourceIds.length} src` : "";
@@ -533,6 +537,35 @@ function renderMessageBlock(
     `
       : "";
 
+  const citedBrainItems =
+    role === "assistant" && !isErrorMsg && brainSources && brainSources.length > 0
+      ? brainSources.filter(
+          (bs) =>
+            content.includes(`[${bs.cite_label}]`) ||
+            (sourceIds.length === 0 && bs.b_index === 1)
+        )
+      : [];
+  const brainCitationsListHtml =
+    citedBrainItems.length > 0
+      ? `
+      <div class="composer-controls">
+        <span class="muted">brain memory:</span>
+        ${citedBrainItems
+          .map(
+            (bs) => `
+          <button
+            class="citation-link"
+            data-brain-cite="${escapeHtml(bs.cite_label)}"
+            data-brain-slug="${escapeHtml(bs.slug)}"
+            title="open Brain card: ${escapeHtml(bs.name)}"
+          >[${escapeHtml(bs.cite_label)}] ${escapeHtml(bs.name)}</button>
+        `
+          )
+          .join("")}
+      </div>
+    `
+      : "";
+
   return `
     <div class="msg-block ${isErrorMsg ? "msg-error-block" : ""}">
       <div class="msg-header">
@@ -541,6 +574,7 @@ function renderMessageBlock(
       </div>
       <div class="msg-body">${formattedBody}</div>
       ${readFooterHtml}
+      ${brainCitationsListHtml}
       ${findingsHtml}
       ${proposalsHtml}
       ${retryButtonHtml}
@@ -552,13 +586,14 @@ function renderMessageBlock(
 export function formatCitationsInText(
   text: string,
   sourceIds: string[],
-  citationCheck?: CitationCheckEntry[]
+  citationCheck?: CitationCheckEntry[],
+  brainSources?: BrainCitationItem[]
 ): string {
   const escaped = escapeHtml(text).replace(
     /\[unsourced\]/g,
     `<span class="msg-error-badge" title="citation index outside source list">[unsourced]</span>`
   );
-  return escaped.replace(/\[(\d+)\]/g, (_match, digits) => {
+  const withSrcCites = escaped.replace(/\[(\d+)\]/g, (_match, digits) => {
     const idx = Number(digits);
     const outOfRangeCheck = citationCheck?.find(
       (c) => c.n === idx && c.out_of_range
@@ -582,6 +617,32 @@ export function formatCitationsInText(
       return `<button class="citation-link msg-error-badge" data-citation-idx="${idx}" data-citation-src="${escapeHtml(sourceId)}" title="${escapeHtml(tooltip)}">[${idx}?]</button>`;
     }
     return `<button class="citation-link" data-citation-idx="${idx}" data-citation-src="${escapeHtml(sourceId)}">[${idx}]</button>`;
+  });
+
+  return withSrcCites.replace(/\[B(\d+)\]/g, (_match, digits) => {
+    const bIdx = Number(digits);
+    const bKey = `B${bIdx}`;
+    const outOfRangeCheck = citationCheck?.find(
+      (c) => String(c.n) === bKey && c.out_of_range
+    );
+    const maxB = brainSources?.length ?? 0;
+    if (bIdx < 1 || (maxB > 0 && bIdx > maxB) || outOfRangeCheck) {
+      return `<span class="msg-error-badge" title="brain citation [${bKey}] outside ${maxB} brain item(s)">[unsourced]</span>`;
+    }
+    const bs = brainSources?.[bIdx - 1];
+    const slug = bs?.slug ?? "";
+    const labelName = bs?.name ?? bKey;
+    const flaggedEntries = (citationCheck ?? []).filter(
+      (c) => String(c.n) === bKey && !c.ok
+    );
+    if (flaggedEntries.length > 0) {
+      const missingItems = Array.from(
+        new Set(flaggedEntries.flatMap((e) => e.missing ?? []))
+      );
+      const tooltip = `not found in brain [${bKey}] (${labelName}): ${missingItems.join(", ")}`;
+      return `<button class="citation-link msg-error-badge" data-brain-cite="${escapeHtml(bKey)}" data-brain-slug="${escapeHtml(slug)}" title="${escapeHtml(tooltip)}">[${escapeHtml(bKey)}?]</button>`;
+    }
+    return `<button class="citation-link" data-brain-cite="${escapeHtml(bKey)}" data-brain-slug="${escapeHtml(slug)}" title="open Brain card: ${escapeHtml(labelName)}">[${escapeHtml(bKey)}]</button>`;
   });
 }
 
@@ -642,6 +703,17 @@ function bindChatEvents(container: HTMLElement, actions: ChatActions): void {
       const idx = Number(el.getAttribute("data-citation-idx"));
       const srcId = el.getAttribute("data-citation-src") || null;
       actions.onClickCitation(idx, srcId);
+    });
+  });
+
+  container.querySelectorAll("[data-brain-slug]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const slug = el.getAttribute("data-brain-slug") || "";
+      const citeLabel = el.getAttribute("data-brain-cite") || "B1";
+      if (actions.onClickBrainCitation) {
+        actions.onClickBrainCitation(slug, citeLabel);
+      }
     });
   });
 

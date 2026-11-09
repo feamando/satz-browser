@@ -537,6 +537,7 @@ fn setup_app_menu_accelerators(app: &tauri::App) -> tauri::Result<()> {
     let shortcuts: &[(&str, &str, &str)] = &[
         ("new_conversation", "New Conversation", "CmdOrCtrl+N"),
         ("filter_conversations", "Filter Conversations", "CmdOrCtrl+K"),
+        ("toggle_brain", "Open Brain", "CmdOrCtrl+B"),
         ("new_tab", "New Tab", "CmdOrCtrl+T"),
         ("close_tab", "Close Tab", "CmdOrCtrl+W"),
         ("tab_chat", "Chat Tab", "CmdOrCtrl+1"),
