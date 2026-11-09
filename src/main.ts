@@ -44,6 +44,8 @@ import {
   sidecarSummarizeConversation,
   sidecarSyncBookmarks,
   sidecarUnlockProfile,
+  sidecarUnlockProfileKeychain,
+  sidecarUpsertBrainEntity,
   sidecarUpsertPassword,
 } from "./api";
 import {
@@ -179,11 +181,57 @@ async function initApp(): Promise<void> {
       void handleBookmarkCurrentPage();
     },
     onEscape: () => {
+      if (
+        state.openMenuConvId !== null ||
+        state.openCodesPopoverTabId !== null ||
+        state.renamingConvId !== null
+      ) {
+        state.openMenuConvId = null;
+        state.openCodesPopoverTabId = null;
+        state.renamingConvId = null;
+        renderAllRegions();
+        return;
+      }
+      if (state.showErrorLog) {
+        state.showErrorLog = false;
+        renderStatusLine();
+        return;
+      }
+      if (state.showKnowledgeView) {
+        state.showKnowledgeView = false;
+        renderAllRegions();
+        return;
+      }
       if (state.compareMode) {
         state.compareMode = false;
         renderWorkspaceRegions();
       }
     },
+  });
+
+  window.addEventListener("click", (e: MouseEvent) => {
+    const target = e.target as HTMLElement | null;
+    if (!target) return;
+    let changed = false;
+    if (
+      state.openMenuConvId !== null &&
+      !target.closest(".rail-popover-menu") &&
+      !target.closest("[data-menu-conv-id]")
+    ) {
+      state.openMenuConvId = null;
+      changed = true;
+    }
+    if (
+      state.openCodesPopoverTabId !== null &&
+      !target.closest("[data-codes-pill-tab]") &&
+      !target.closest("[data-copy-promo-code]")
+    ) {
+      state.openCodesPopoverTabId = null;
+      changed = true;
+    }
+    if (changed) {
+      renderAllRegions();
+    }
   });
 
   window.addEventListener("keydown", (e: KeyboardEvent) => {
@@ -476,6 +524,7 @@ function renderRailRegion(): void {
 function renderTabStripRegion(): void {
   renderTabStrip({
     onSelectTab: (tabId) => {
+      state.openMenuConvId = null;
       state.compareMode = false;
       state.activeTabId = tabId;
       if (tabId.startsWith("lane:")) {
@@ -556,6 +605,18 @@ function renderViewportRegion(): void {
         state.profileStatusMessage = res.ok
           ? `profile "${profileId}" unlocked.`
           : `error: ${res.error ?? "invalid 6-digit PIN"}`;
+        const kb = await sidecarFetchKnowledge();
+        if (kb) state.knowledge = kb;
+        await refreshMailState();
+        await refreshLists();
+        renderAllRegions();
+      },
+      onUnlockProfileKeychain: async (profileId) => {
+        state.revealedPasswords = {};
+        const res = await sidecarUnlockProfileKeychain(profileId);
+        state.profileStatusMessage = res.ok
+          ? `profile "${profileId}" unlocked via Touch ID / keychain.`
+          : `error: ${res.error ?? "Touch ID / keychain unlock unavailable"}`;
         const kb = await sidecarFetchKnowledge();
         if (kb) state.knowledge = kb;
         await refreshMailState();
@@ -745,6 +806,9 @@ function renderViewportRegion(): void {
         onJumpToSource: (src) => {
           void handleCitationClick(1, src.id);
         },
+        onRecaptureTab: () => {
+          void handleRecaptureAllTabs();
+        },
       });
     }
     scheduleWebviewLayoutSync();
@@ -797,19 +861,11 @@ function renderSiteTabViewport(viewport: HTMLElement): void {
           state.agentRailOpen
             ? `<aside class="right-panel" id="site-tab-agent-rail">
                 ${renderEmailAgentRailCardsHtml(cachedDetail)}
-                <div id="email-tab-chat-container"></div>
               </aside>`
             : ""
         }
       </div>
     `;
-
-    const chatEl =
-      document.getElementById("email-tab-chat-container") ??
-      document.getElementById("site-tab-agent-rail");
-    if (chatEl) {
-      renderChatPanel(chatEl, getChatActions());
-    }
 
     bindEmailTabHeaderEvents(viewport, mid, cachedDetail);
     bindToolbarEvents(viewport);
@@ -847,7 +903,11 @@ function renderSiteTabViewport(viewport: HTMLElement): void {
             class="address-input"
             data-address-tab="${escapeHtml(tab.id)}"
             type="text"
-            value="${escapeHtml(tab.url)}"
+            spellcheck="false"
+            autocorrect="off"
+            autocapitalize="off"
+            placeholder="enter a url or search query_"
+            value="${escapeHtml(tab.url === "about:blank" ? "" : tab.url)}"
           />
           ${
             activePromoCodes.length > 0
@@ -944,7 +1004,11 @@ function renderCompareViewport(viewport: HTMLElement): void {
                   class="address-input"
                   data-address-tab="${escapeHtml(tab.id)}"
                   type="text"
-                  value="${escapeHtml(tab.url)}"
+                  spellcheck="false"
+                  autocorrect="off"
+                  autocapitalize="off"
+                  placeholder="enter a url or search query_"
+                  value="${escapeHtml(tab.url === "about:blank" ? "" : tab.url)}"
                 />
               </div>
               <div id="webview-slot-${escapeHtml(tab.id)}" class="webview-slot">
@@ -1099,6 +1163,12 @@ function getChatActions() {
     onNewTab: () => {
       void handleCreateNewTab();
     },
+    onRecaptureTab: () => {
+      void handleRecaptureAllTabs();
+    },
+    onRecaptureAllTabs: () => {
+      void handleRecaptureAllTabs();
+    },
     onAcceptProposal: (proposalId: string, msgId: string) => {
       void (async () => {
         const res = await sidecarAcceptBrainProposal(proposalId);
@@ -1201,6 +1271,14 @@ async function startDirectBrowsing(rawUrl: string): Promise<void> {
   renderAllRegions();
 }
 
+async function handleRecaptureAllTabs(): Promise<void> {
+  if (!state.activeDetail) return;
+  const convId = state.activeDetail.conversation.id;
+  await apiCaptureOpenTabs(convId);
+  state.activeDetail = await apiGetConversation(convId);
+  renderAllRegions();
+}
+
 async function handleCreateNewTab(): Promise<void> {
   if (!state.activeDetail) {
     const conv = await apiCreateConversation("new session", "direct");
@@ -1209,7 +1287,7 @@ async function handleCreateNewTab(): Promise<void> {
   if (!state.activeDetail) return;
   const tab = await apiOpenTab(
     state.activeDetail.conversation.id,
-    "https://en.wikipedia.org",
+    "about:blank",
     "new tab"
   );
   state.activeDetail = await apiGetConversation(
@@ -1491,18 +1569,20 @@ async function handleSendChatMessage(text: string): Promise<void> {
       return;
     }
 
+    const readableSources = activeTabSources.filter((s) => s.textChars > 0);
+
     if (
       state.selectedModel === "hertz (reader)" ||
       state.selectedModel === "planck (reader)"
     ) {
       updateStreamingStatus(
-        `reading ${activeTabSources.length} open tab source(s) with ${state.selectedModel}...`,
+        `reading ${readableSources.length} open tab source(s) with ${state.selectedModel}...`,
         "reading"
       );
       const res = await sidecarRunRead(
         state.selectedModel,
         text,
-        activeTabSources.map((s) => ({
+        readableSources.map((s) => ({
           id: s.sourceId,
           url: s.url,
           title: s.title,
@@ -1834,6 +1914,35 @@ function bindEmailTabHeaderEvents(
       if (res.ok) {
         el.textContent = "[saved to Downloads]";
       }
+    });
+  });
+
+  viewport.querySelectorAll("[data-email-rail-save-brain]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const el = btn as HTMLElement;
+      const subj =
+        el.getAttribute("data-email-rail-subj") ||
+        String(msg.subject || "Email");
+      const parts = (msg.parts ?? {}) as Record<string, string>;
+      const bodyTxt = parts.new || String(msg.body_text || "");
+      const res = await sidecarUpsertBrainEntity({
+        type: "note",
+        name: subj,
+        summary: `Saved from email (${String(msg.from_addr || "")})`,
+        content: bodyTxt.slice(0, 1200),
+        source_url: `satzmail://message/${messageId}`,
+      });
+      el.textContent = res.ok ? "[saved to brain]" : "[unlock profile first]";
+    });
+  });
+
+  viewport.querySelectorAll("[data-email-rail-ask]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const prompt = (btn as HTMLElement).getAttribute("data-email-rail-ask");
+      if (!prompt) return;
+      state.activeTabId = "chat";
+      renderWorkspaceRegions();
+      void handleSendChatMessage(prompt);
     });
   });
 }

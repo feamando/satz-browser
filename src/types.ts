@@ -52,6 +52,7 @@ export interface SourceStatEntry {
   chars_captured: number;
   chars_sent: number;
   was_cut: boolean;
+  capture_mode?: "dom" | "fetch" | "timeout";
 }
 
 export interface FindingItem {

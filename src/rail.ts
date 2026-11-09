@@ -50,6 +50,9 @@ export function renderRail(actions: RailActions): void {
           id="rail-filter-input"
           class="rail-filter-input"
           type="text"
+          spellcheck="false"
+          autocorrect="off"
+          autocapitalize="off"
           placeholder="filter conversations_"
           value="${escapeHtml(state.railFilter)}"
         />
@@ -162,7 +165,7 @@ export function renderRail(actions: RailActions): void {
       >
         [${state.knowledge.profile?.unlocked && state.knowledge.profile?.active_profile ? `profile: ${escapeHtml(state.knowledge.profile.active_profile.name)} · kb` : "knowledge · profile"}]
       </button>
-      <span>v0.4</span>
+      <span>v0.5</span>
     </div>
   `;
 

@@ -2,7 +2,9 @@ import {
   apiEnsureMailConversation,
   sidecarAddMailAccount,
   sidecarConfirmMailSend,
+  sidecarCreateProfile,
   sidecarDraftMailReply,
+  sidecarFetchKnowledge,
   sidecarGetMailAccounts,
   sidecarGetMailEval,
   sidecarGetMailEvalReport,
@@ -20,9 +22,17 @@ import {
   sidecarSyncMail,
   sidecarTestMailAccount,
   sidecarUndoMailSend,
+  sidecarUnlockProfile,
+  sidecarUnlockProfileKeychain,
   sidecarUpdateMailSettings,
 } from "./api";
-import { escapeHtml, formatRelativeTime, MOD_LABEL, state } from "./state";
+import {
+  escapeHtml,
+  formatRelativeTime,
+  IS_MAC,
+  MOD_LABEL,
+  state,
+} from "./state";
 import type { BrowserTab, MailPreset } from "./types";
 
 const DEFAULT_PRESETS: MailPreset[] = [
@@ -631,14 +641,169 @@ export function renderMailLaneView(
   const unlocked = Boolean(state.knowledge.profile?.unlocked);
 
   if (!unlocked) {
+    const profilesList = state.knowledge.profile?.profiles ?? [];
     container.innerHTML = `
       <div class="knowledge-view">
         <div class="kb-header">
           <span>mail · locked</span>
         </div>
-        <div class="muted">unlock your profile in [knowledge · profile] to access mail lanes.</div>
+        ${
+          state.profileStatusMessage
+            ? `<div class="profile-status-banner">${escapeHtml(state.profileStatusMessage)}</div>`
+            : ""
+        }
+        <div class="knowledge-section">
+          ${
+            profilesList.length === 0
+              ? `
+            <div class="muted">create a profile with a 6-digit PIN to unlock mail in place:</div>
+            <div class="vault-form-row">
+              <input
+                id="mail-inline-new-profile-name"
+                class="vault-input"
+                type="text"
+                spellcheck="false"
+                autocorrect="off"
+                autocapitalize="off"
+                placeholder="profile name (e.g. Nikita)_"
+              />
+              <input
+                id="mail-inline-new-profile-pin"
+                class="vault-input vault-pin-input"
+                type="password"
+                inputmode="numeric"
+                maxlength="6"
+                spellcheck="false"
+                autocorrect="off"
+                autocapitalize="off"
+                placeholder="6-digit PIN_"
+              />
+              <button id="mail-inline-create-profile-btn">[+ create &amp; unlock]</button>
+            </div>
+          `
+              : `
+            <div class="muted">enter your 6-digit PIN to unlock mail in place:</div>
+            <div class="vault-form-row">
+              <select id="mail-inline-profile-select" class="vault-input">
+                ${profilesList
+                  .map(
+                    (p) =>
+                      `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)} (${escapeHtml(p.id)})</option>`
+                  )
+                  .join("")}
+              </select>
+              <input
+                id="mail-inline-pin-input"
+                class="vault-input vault-pin-input"
+                type="password"
+                inputmode="numeric"
+                maxlength="6"
+                spellcheck="false"
+                autocorrect="off"
+                autocapitalize="off"
+                placeholder="6-digit PIN_"
+              />
+              <button id="mail-inline-unlock-btn">[unlock]</button>
+              ${
+                IS_MAC
+                  ? `<button id="mail-inline-touchid-btn">[unlock with Touch ID]</button>`
+                  : ""
+              }
+            </div>
+          `
+          }
+        </div>
       </div>
     `;
+
+    const pinInput = container.querySelector(
+      "#mail-inline-pin-input"
+    ) as HTMLInputElement | null;
+    pinInput?.focus();
+
+    const doInlineUnlock = async () => {
+      const sel = container.querySelector(
+        "#mail-inline-profile-select"
+      ) as HTMLSelectElement | null;
+      const pid = sel?.value || profilesList[0]?.id || "";
+      const pin = pinInput?.value.trim() ?? "";
+      if (!pid || !pin) return;
+      const res = await sidecarUnlockProfile(pid, pin);
+      state.profileStatusMessage = res.ok
+        ? ""
+        : `error: ${res.error ?? "invalid 6-digit PIN"}`;
+      const kb = await sidecarFetchKnowledge();
+      if (kb) state.knowledge = kb;
+      await refreshMailState();
+      await actions.onRefreshState();
+    };
+
+    container
+      .querySelector("#mail-inline-unlock-btn")
+      ?.addEventListener("click", () => {
+        void doInlineUnlock();
+      });
+
+    pinInput?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        void doInlineUnlock();
+      }
+    });
+
+    container
+      .querySelector("#mail-inline-touchid-btn")
+      ?.addEventListener("click", async () => {
+        const sel = container.querySelector(
+          "#mail-inline-profile-select"
+        ) as HTMLSelectElement | null;
+        const pid = sel?.value || profilesList[0]?.id || "";
+        if (!pid) return;
+        const res = await sidecarUnlockProfileKeychain(pid);
+        state.profileStatusMessage = res.ok
+          ? ""
+          : `error: ${res.error ?? "Touch ID unlock unavailable"}`;
+        const kb = await sidecarFetchKnowledge();
+        if (kb) state.knowledge = kb;
+        await refreshMailState();
+        await actions.onRefreshState();
+      });
+
+    const doInlineCreate = async () => {
+      const nameEl = container.querySelector(
+        "#mail-inline-new-profile-name"
+      ) as HTMLInputElement | null;
+      const newPinEl = container.querySelector(
+        "#mail-inline-new-profile-pin"
+      ) as HTMLInputElement | null;
+      const name = nameEl?.value.trim() ?? "";
+      const pin = newPinEl?.value.trim() ?? "";
+      if (!name || !pin) return;
+      const res = await sidecarCreateProfile(name, pin);
+      state.profileStatusMessage = res.ok
+        ? ""
+        : `error: ${res.error ?? "failed to create profile"}`;
+      const kb = await sidecarFetchKnowledge();
+      if (kb) state.knowledge = kb;
+      await refreshMailState();
+      await actions.onRefreshState();
+    };
+
+    container
+      .querySelector("#mail-inline-create-profile-btn")
+      ?.addEventListener("click", () => {
+        void doInlineCreate();
+      });
+
+    container
+      .querySelector("#mail-inline-new-profile-pin")
+      ?.addEventListener("keydown", (e) => {
+        if ((e as KeyboardEvent).key === "Enter") {
+          e.preventDefault();
+          void doInlineCreate();
+        }
+      });
+
     return;
   }
 
@@ -823,6 +988,9 @@ export function renderMailLaneView(
             id="mail-search-input"
             class="kb-input"
             type="text"
+            spellcheck="false"
+            autocorrect="off"
+            autocapitalize="off"
             placeholder="search mail [/]..."
             value="${escapeHtml(state.mailSearchQuery)}"
           />
@@ -1036,52 +1204,58 @@ export function renderEmailAgentRailCardsHtml(
   detailObj: Record<string, unknown> | undefined
 ): string {
   const msg = (detailObj?.message ?? detailObj ?? {}) as Record<string, unknown>;
-  if (!msg || !msg.id) return "";
+  if (!msg || !msg.id) {
+    return `
+      <div class="knowledge-section">
+        <div class="muted">loading email context...</div>
+      </div>
+    `;
+  }
 
+  const mid = String(msg.id ?? "");
   const senderCard = msg.sender_card as Record<string, unknown> | null;
-  const recent = (msg.recent_with_sender ?? []) as Array<Record<string, unknown>>;
   const extracts = (msg.extracts ?? {}) as Record<string, string>;
+  const fromDisp = String(msg.from_name || msg.from_addr || "Sender");
+  const subj = String(msg.subject || "(no subject)");
+  const extractPairs = Object.entries(extracts).filter(
+    ([, v]) => v !== undefined && v !== null && String(v).trim() !== ""
+  );
 
   return `
-    <div class="kb-section">
-      ${
-        senderCard
-          ? `<div class="kb-card">
-              <div class="kb-card-header">
-                <span>sender · ${escapeHtml(String(senderCard.name ?? ""))}</span>
-                <span class="muted">${escapeHtml(String(senderCard.type ?? ""))}</span>
-              </div>
-              <div class="muted">${escapeHtml(String(senderCard.summary ?? ""))}</div>
-            </div>`
-          : ""
-      }
-      ${
-        extracts.order_number || extracts.tracking_number
-          ? `<div class="kb-card">
-              <div class="kb-card-header">
-                <span>order · ${escapeHtml(extracts.merchant || "Order")}</span>
-                <span class="source-cut-badge">${escapeHtml(extracts.status || "ordered")}</span>
-              </div>
-              <div class="muted">
-                ${extracts.order_number ? `#${escapeHtml(extracts.order_number)} ` : ""}
-                ${extracts.tracking_number ? `· tracking: ${escapeHtml(extracts.tracking_number)}` : ""}
-              </div>
-            </div>`
-          : ""
-      }
-      ${
-        recent.length > 0
-          ? `<div class="kb-card">
-              <div class="kb-card-header">recent with sender (${recent.length})</div>
-              ${recent
+    <div class="knowledge-section" id="email-focused-rail-cards">
+      <div class="kb-card">
+        <div class="kb-card-header">
+          <span>sender · ${escapeHtml(String(senderCard?.name ?? fromDisp))}</span>
+          <span class="muted">${escapeHtml(String(senderCard?.type ?? "contact"))}</span>
+        </div>
+        <div class="muted">${escapeHtml(String(senderCard?.summary ?? msg.from_addr ?? ""))}</div>
+      </div>
+      <div class="kb-card">
+        <div class="kb-card-header">
+          <span>extracted items</span>
+          <span class="muted">${extractPairs.length}</span>
+        </div>
+        ${
+          extractPairs.length === 0
+            ? `<div class="muted">no structured codes, dates, or order numbers extracted.</div>`
+            : extractPairs
                 .map(
-                  (r) =>
-                    `<div class="rail-row"><span class="truncate">${escapeHtml(String(r.subject ?? ""))}</span></div>`
+                  ([k, v]) =>
+                    `<div class="rail-row"><span class="muted">${escapeHtml(k)}</span><span>${escapeHtml(String(v))}</span></div>`
                 )
-                .join("")}
-            </div>`
-          : ""
-      }
+                .join("")
+        }
+      </div>
+      <div class="vault-form-row">
+        <button class="citation-link" data-email-rail-save-brain="${escapeHtml(mid)}" data-email-rail-subj="${escapeHtml(subj)}">[save to brain]</button>
+        <button class="citation-link" data-email-rail-ask="ask about this email: ${escapeHtml(subj)}">[ask about this email]</button>
+      </div>
+      <div class="vault-form-row">
+        <span class="muted">focused:</span>
+        <button class="citation-link" data-email-rail-ask="summarize this email">[summarize]</button>
+        <button class="citation-link" data-email-rail-ask="draft a reply to this email">[draft reply]</button>
+        <button class="citation-link" data-email-rail-ask="extract dates and action items from this email">[extract dates]</button>
+      </div>
     </div>
   `;
 }

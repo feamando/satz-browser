@@ -128,6 +128,50 @@ pub fn extract_domain(raw_url: &str) -> String {
     raw_url.to_string()
 }
 
+pub fn canonicalize_source_url(raw_url: &str) -> String {
+    let trimmed = raw_url.trim();
+    if let Ok(mut parsed) = Url::parse(trimmed) {
+        parsed.set_fragment(None);
+        if parsed.scheme() == "http" || parsed.scheme() == "https" {
+            let kept_pairs: Vec<(String, String)> = parsed
+                .query_pairs()
+                .filter(|(k, _)| !k.to_lowercase().starts_with("utm_"))
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect();
+            if kept_pairs.is_empty() {
+                parsed.set_query(None);
+            } else {
+                let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+                for (k, v) in kept_pairs {
+                    serializer.append_pair(&k, &v);
+                }
+                let q = serializer.finish();
+                parsed.set_query(Some(&q));
+            }
+            let path = parsed.path().to_string();
+            if path.len() > 1 && path.ends_with('/') {
+                let trimmed_path = path.trim_end_matches('/').to_string();
+                parsed.set_path(&trimmed_path);
+            }
+        }
+        let mut s = parsed.to_string();
+        if (parsed.scheme() == "http" || parsed.scheme() == "https")
+            && parsed.path() == "/"
+            && parsed.query().is_none()
+            && s.ends_with('/')
+        {
+            s.pop();
+        }
+        return s;
+    }
+    trimmed
+        .split('#')
+        .next()
+        .unwrap_or(trimmed)
+        .trim_end_matches('/')
+        .to_string()
+}
+
 impl DbState {
     pub fn init(db_path: PathBuf) -> SqlResult<Self> {
         if let Some(parent) = db_path.parent() {
@@ -320,35 +364,23 @@ impl DbState {
             }
         }
 
-        let bookmarks_seeded: Option<String> = conn
+        let unseeded_v05: Option<String> = conn
             .query_row(
-                "SELECT value FROM meta WHERE key = 'bookmarks_seeded'",
+                "SELECT value FROM meta WHERE key = 'v05_unseeded_bookmarks'",
                 [],
                 |r| r.get(0),
             )
             .optional()?;
 
-        if bookmarks_seeded.is_none() {
-            let existing_bms: i64 = conn
-                .query_row("SELECT COUNT(*) FROM bookmarks", [], |r| r.get(0))
-                .unwrap_or(0);
-            if existing_bms == 0 {
-                let ts = now_epoch_secs_str();
-                let defaults = [
-                    ("bm-1", "dw.com", "https://www.dw.com/en"),
-                    ("bm-2", "bbc.com/news", "https://www.bbc.com/news"),
-                    ("bm-3", "reuters.com", "https://www.reuters.com"),
-                    ("bm-4", "en.wikipedia.org", "https://en.wikipedia.org"),
-                    ("bm-5", "news.ycombinator.com", "https://news.ycombinator.com"),
-                    ("bm-6", "github.com", "https://github.com"),
-                ];
-                for (pos, (id, title, url)) in defaults.iter().enumerate() {
-                    conn.execute(
-                        "INSERT INTO bookmarks (id, title, url, position, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                        params![id, title, url, pos as i32, ts],
-                    )?;
-                }
-            }
+        if unseeded_v05.is_none() {
+            conn.execute(
+                "DELETE FROM bookmarks WHERE id IN ('bm-1', 'bm-2', 'bm-3', 'bm-4', 'bm-5', 'bm-6')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('v05_unseeded_bookmarks', '1')",
+                [],
+            )?;
             conn.execute(
                 "INSERT OR REPLACE INTO meta (key, value) VALUES ('bookmarks_seeded', '1')",
                 [],
@@ -891,17 +923,46 @@ impl DbState {
             params![tab_id, conversation_id, next_pos, url, tab_title, ts, resolved_kind],
         )?;
 
+        let canonical_target = canonicalize_source_url(url);
+        let existing_src_id: Option<String> = if resolved_kind != "mail" && resolved_kind != "compose" {
+            let mut stmt = conn.prepare(
+                "SELECT id, url FROM sources WHERE conversation_id = ?1 ORDER BY added_at DESC, id DESC",
+            )?;
+            let rows = stmt.query_map(params![conversation_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            let mut found = None;
+            for item in rows.flatten() {
+                if canonicalize_source_url(&item.1) == canonical_target {
+                    found = Some(item.0);
+                    break;
+                }
+            }
+            found
+        } else {
+            None
+        };
+
         let src_id = if resolved_kind == "mail" {
             let msg_id = url.strip_prefix("satzmail://message/").unwrap_or(&tab_id);
             format!("mail:{}", msg_id)
+        } else if let Some(existing_id) = existing_src_id {
+            existing_id
         } else {
             gen_id("src")
         };
 
-        if resolved_kind != "compose" {
+        if resolved_kind != "compose" && url != "about:blank" {
             conn.execute(
-                "INSERT OR REPLACE INTO sources (id, conversation_id, tab_id, url, title, domain, in_context, added_at, captured_at, text_chars)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, NULL, NULL)",
+                "INSERT INTO sources (id, conversation_id, tab_id, url, title, domain, in_context, added_at, captured_at, text_chars)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, NULL, NULL)
+                 ON CONFLICT(id) DO UPDATE SET
+                     tab_id = excluded.tab_id,
+                     url = excluded.url,
+                     title = excluded.title,
+                     domain = excluded.domain,
+                     in_context = 1,
+                     added_at = excluded.added_at",
                 params![src_id, conversation_id, tab_id, url, tab_title, domain, ts],
             )?;
 
@@ -1015,18 +1076,21 @@ impl DbState {
         };
 
         let final_url = new_url.unwrap_or(&cur_url).to_string();
-        let url_changed = final_url != cur_url;
+        let raw_url_changed = final_url != cur_url;
+        let canonical_cur = canonicalize_source_url(&cur_url);
+        let canonical_final = canonicalize_source_url(&final_url);
+        let canonical_changed = canonical_final != canonical_cur;
 
         let final_title = match new_title {
             Some(t) if !t.trim().is_empty() => t.to_string(),
-            _ if url_changed => extract_domain(&final_url),
+            _ if canonical_changed => extract_domain(&final_url),
             _ => cur_title.clone(),
         };
         let title_changed = final_title != cur_title;
 
         let ts = now_epoch_secs_str();
 
-        if url_changed {
+        if canonical_changed {
             conn.execute(
                 "UPDATE tabs SET url = ?2, title = ?3 WHERE id = ?1",
                 params![tab_id, final_url, final_title],
@@ -1039,19 +1103,62 @@ impl DbState {
             )?;
 
             let domain = extract_domain(&final_url);
-            let src_id = gen_id("src");
-            conn.execute(
-                "INSERT INTO sources (id, conversation_id, tab_id, url, title, domain, in_context, added_at, captured_at, text_chars)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, NULL, NULL)",
-                params![src_id, conv_id, tab_id, final_url, final_title, domain, ts],
-            )?;
+            let existing_src: Option<(String, Option<String>, Option<i64>)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT id, url, captured_at, text_chars FROM sources WHERE conversation_id = ?1 ORDER BY added_at DESC, id DESC",
+                )?;
+                let rows = stmt.query_map(params![conv_id], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<i64>>(3)?,
+                    ))
+                })?;
+                let mut found = None;
+                for item in rows.flatten() {
+                    if canonicalize_source_url(&item.1) == canonical_final {
+                        found = Some((item.0, item.2, item.3));
+                        break;
+                    }
+                }
+                found
+            };
 
-            let hist_id = gen_id("hist");
-            conn.execute(
-                "INSERT INTO history_log (id, conversation_id, tab_id, url, title, visited_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![hist_id, conv_id, tab_id, final_url, final_title, ts],
-            )?;
+            let (src_id, prev_captured_at, prev_text_chars) = existing_src
+                .unwrap_or_else(|| (gen_id("src"), None, None));
+
+            if final_url != "about:blank" {
+                conn.execute(
+                    "INSERT INTO sources (id, conversation_id, tab_id, url, title, domain, in_context, added_at, captured_at, text_chars)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, ?9)
+                     ON CONFLICT(id) DO UPDATE SET
+                         tab_id = excluded.tab_id,
+                         url = excluded.url,
+                         title = excluded.title,
+                         domain = excluded.domain,
+                         in_context = 1,
+                         added_at = excluded.added_at",
+                    params![
+                        src_id,
+                        conv_id,
+                        tab_id,
+                        final_url,
+                        final_title,
+                        domain,
+                        ts,
+                        prev_captured_at,
+                        prev_text_chars
+                    ],
+                )?;
+
+                let hist_id = gen_id("hist");
+                conn.execute(
+                    "INSERT INTO history_log (id, conversation_id, tab_id, url, title, visited_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![hist_id, conv_id, tab_id, final_url, final_title, ts],
+                )?;
+            }
 
             conn.execute(
                 "UPDATE conversations SET last_active_at = ?2 WHERE id = ?1",
@@ -1077,24 +1184,24 @@ impl DbState {
                 domain,
                 in_context: true,
                 added_at: ts,
-                captured_at: None,
-                text_chars: None,
+                captured_at: prev_captured_at,
+                text_chars: prev_text_chars,
             };
             return Ok(Some((updated_tab, Some(new_source))));
         }
 
-        if title_changed {
+        if raw_url_changed || title_changed {
             conn.execute(
-                "UPDATE tabs SET title = ?2 WHERE id = ?1",
-                params![tab_id, final_title],
-            )?;
-            conn.execute(
-                "UPDATE sources SET title = ?3 WHERE tab_id = ?1 AND url = ?2",
+                "UPDATE tabs SET url = ?2, title = ?3 WHERE id = ?1",
                 params![tab_id, final_url, final_title],
             )?;
             conn.execute(
-                "UPDATE history_log SET title = ?3 WHERE tab_id = ?1 AND url = ?2",
+                "UPDATE sources SET url = ?2, title = ?3 WHERE tab_id = ?1",
                 params![tab_id, final_url, final_title],
+            )?;
+            conn.execute(
+                "UPDATE history_log SET url = ?2, title = ?3 WHERE tab_id = ?1 AND url = ?4",
+                params![tab_id, final_url, final_title, cur_url],
             )?;
         }
 
@@ -1435,13 +1542,13 @@ mod tests {
             db_path: PathBuf::from(":memory:"),
         };
 
-        // Default bookmarks (6 seeded)
+        // First-run in v0.5 has 0 seeded bookmarks
         let bms = state.list_bookmarks().unwrap();
-        assert_eq!(bms.len(), 6);
+        assert_eq!(bms.len(), 0);
         let added = state.add_bookmark("Rust Docs", "https://doc.rust-lang.org").unwrap();
-        assert_eq!(state.list_bookmarks().unwrap().len(), 7);
+        assert_eq!(state.list_bookmarks().unwrap().len(), 1);
         state.remove_bookmark(&added.id).unwrap();
-        assert_eq!(state.list_bookmarks().unwrap().len(), 6);
+        assert_eq!(state.list_bookmarks().unwrap().len(), 0);
 
         // Insert a 25-hour-old untouched direct conversation (0 messages, 0 open tabs)
         let stale_ts = (now_epoch_secs_str().parse::<u64>().unwrap_or(1_700_100_000).saturating_sub(90_000)).to_string();
@@ -1645,5 +1752,44 @@ mod tests {
             )
             .unwrap();
         assert_eq!(compose_tab.kind, "compose");
+    }
+
+    #[test]
+    fn test_canonical_source_url_dedupe() {
+        assert_eq!(
+            canonicalize_source_url("https://www.dw.com/en/top-stories?utm_source=rss&utm_medium=web#section-2"),
+            canonicalize_source_url("https://www.dw.com/en/top-stories/")
+        );
+
+        let conn = Connection::open_in_memory().unwrap();
+        DbState::init_connection(&conn).unwrap();
+        let state = DbState {
+            conn: Mutex::new(conn),
+            db_path: PathBuf::from(":memory:"),
+        };
+
+        let conv = state.create_conversation("dedupe test", "chat").unwrap();
+        let (tab, src1) = state
+            .open_tab(&conv.id, "https://www.dw.com/en", Some("DW"))
+            .unwrap();
+        state.mark_source_captured(&src1.id, 4210).unwrap();
+
+        // Redirect/hash/utm on the same canonical URL must NOT create a duplicate source row
+        state
+            .record_tab_navigation_or_title(
+                &tab.id,
+                Some("https://www.dw.com/en/?utm_source=test#top"),
+                Some("DW Top Stories"),
+            )
+            .unwrap();
+
+        let detail = state.get_conversation(&conv.id).unwrap();
+        assert_eq!(
+            detail.sources.len(),
+            1,
+            "Canonical URL variations must deduplicate to a single source row"
+        );
+        assert_eq!(detail.sources[0].id, src1.id);
+        assert_eq!(detail.sources[0].text_chars, Some(4210));
     }
 }

@@ -1473,6 +1473,25 @@ class SatzSidecarRuntime:
             except Exception as e:
                 self.record_error("bookmark_loop", e)
 
+    def get_source_capture_mode(self, source_id: str, url: str) -> str:
+        if (source_id and source_id.startswith("mail:")) or (url and url.startswith("satzmail://")):
+            return "dom"
+        with self.store_lock:
+            row = None
+            if source_id:
+                row = self.store.db.execute(
+                    "SELECT capture_mode FROM satz_sources WHERE source_id = ?",
+                    (source_id,),
+                ).fetchone()
+            if row is None and url:
+                row = self.store.db.execute(
+                    "SELECT capture_mode FROM satz_sources WHERE url = ? ORDER BY updated_at DESC LIMIT 1",
+                    (url,),
+                ).fetchone()
+            if row and row["capture_mode"]:
+                return str(row["capture_mode"])
+        return "dom"
+
     def get_source_text(self, source_id: str, url: str, title: str = "") -> tuple[str, list[str]]:
         # Section 4.6 (M13): Email tab source text comes directly from `mail.sqlite` `parts` (new text first, then quote)
         mail_msg_id = ""
@@ -1498,17 +1517,19 @@ class SatzSidecarRuntime:
             row = None
             if source_id:
                 row = self.store.db.execute(
-                    "SELECT text, extra_json FROM satz_sources WHERE source_id = ?",
+                    "SELECT text, extra_json, capture_mode FROM satz_sources WHERE source_id = ?",
                     (source_id,),
                 ).fetchone()
-            if (row is None or not row["text"]) and url:
+            if (row is None or (not row["text"] and row["capture_mode"] != "timeout")) and url:
                 row = self.store.db.execute(
-                    "SELECT text, extra_json FROM satz_sources WHERE url = ? ORDER BY updated_at DESC LIMIT 1",
+                    "SELECT text, extra_json, capture_mode FROM satz_sources WHERE url = ? ORDER BY updated_at DESC LIMIT 1",
                     (url,),
                 ).fetchone()
             if row and row["text"]:
                 extra = json.loads(row["extra_json"] or "[]")
                 return row["text"], extra
+            if row and str(row["capture_mode"] or "") == "timeout":
+                return "", []
 
         # Fallback: fetch live if not yet captured
         if url and url.startswith(("http://", "https://")):
@@ -1821,6 +1842,7 @@ class SatzSidecarRuntime:
             cite_num = len(used_source_ids) + 1
             used_source_ids.append(sid)
             src_findings = src.get("findings") if isinstance(src.get("findings"), list) else self.get_source_findings(sid, url)
+            src_capture_mode = str(src.get("capture_mode") or "") or self.get_source_capture_mode(sid, url)
             hydrated_sources.append(
                 {
                     "id": sid,
@@ -1832,6 +1854,7 @@ class SatzSidecarRuntime:
                     "chars_captured": chars_captured,
                     "chars_sent": len(snippet),
                     "was_cut": was_cut,
+                    "capture_mode": src_capture_mode,
                     "is_open_tab": is_open_tab,
                     "findings": src_findings,
                 }
@@ -2158,15 +2181,36 @@ class SatzSidecarRuntime:
         context_str, used_source_ids, hydrated_sources = self.assemble_chat_context(user_msg, combined_sources)
         brain_context = self.brain.build_model_context(user_msg, hydrated_sources or combined_sources)
 
-        source_stats_list = [
-            {
-                "id": hs["id"],
-                "chars_captured": hs.get("chars_captured", len(hs.get("text", ""))),
-                "chars_sent": hs.get("chars_sent", len(hs.get("text", ""))),
-                "was_cut": hs.get("was_cut", False),
-            }
-            for hs in hydrated_sources
-        ]
+        hydrated_by_id = {hs["id"]: hs for hs in hydrated_sources}
+        source_stats_list: list[dict[str, Any]] = []
+        seen_stat_ids: set[str] = set()
+        for hs in hydrated_sources:
+            sid = str(hs["id"])
+            seen_stat_ids.add(sid)
+            source_stats_list.append(
+                {
+                    "id": sid,
+                    "chars_captured": hs.get("chars_captured", len(hs.get("text", ""))),
+                    "chars_sent": hs.get("chars_sent", len(hs.get("text", ""))),
+                    "was_cut": hs.get("was_cut", False),
+                    "capture_mode": hs.get("capture_mode", "dom"),
+                }
+            )
+        for cs in combined_sources:
+            sid = str(cs.get("id") or "")
+            if not sid or sid in seen_stat_ids or sid in hydrated_by_id:
+                continue
+            seen_stat_ids.add(sid)
+            url = str(cs.get("url") or "")
+            source_stats_list.append(
+                {
+                    "id": sid,
+                    "chars_captured": 0,
+                    "chars_sent": 0,
+                    "was_cut": False,
+                    "capture_mode": str(cs.get("capture_mode") or "") or self.get_source_capture_mode(sid, url),
+                }
+            )
 
         yield {
             "status": f"assembled {len(used_source_ids)} source(s) ({len(context_str):,} chars) + brain index",
@@ -2813,6 +2857,17 @@ def make_sidecar_server(
                     res = runtime.passwords.unlock_profile(
                         profile_id=str(data.get("profile_id") or ""),
                         pin=str(data.get("pin") or ""),
+                    )
+                    runtime._refresh_active_profile_brain()
+                    runtime.bookmark_wake_event.set()
+                    return self._json({"ok": True, **res})
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/profile/unlock_keychain":
+                try:
+                    res = runtime.passwords.unlock_with_keychain(
+                        profile_id=str(data.get("profile_id") or ""),
                     )
                     runtime._refresh_active_profile_brain()
                     runtime.bookmark_wake_event.set()

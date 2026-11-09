@@ -1,4 +1,9 @@
-import { escapeHtml, getActiveTabSources, state } from "./state";
+import {
+  escapeHtml,
+  formatPlainErrorMessage,
+  getActiveTabSources,
+  state,
+} from "./state";
 import type {
   BrainProposalItem,
   CitationCheckEntry,
@@ -24,6 +29,8 @@ export interface ChatActions {
   onSelectTab?: (tabId: string) => void;
   onCloseTab?: (tabId: string) => void;
   onNewTab?: () => void;
+  onRecaptureTab?: (tabId: string) => void;
+  onRecaptureAllTabs?: () => void;
   onAcceptProposal?: (proposalId: string, msgId: string) => void;
   onRejectProposal?: (proposalId: string, msgId: string) => void;
 }
@@ -65,6 +72,22 @@ export function renderChatPanel(
         ? `ask over ${activeTabSources.length} open tab${activeTabSources.length === 1 ? "" : "s"} in context or type a question_`
         : "ask a question or open a tab [+] to add context_";
 
+  const readableTabSources = activeTabSources.filter((s) => s.textChars > 0);
+  const allOpenTabsEmpty =
+    activeTabSources.length > 0 && readableTabSources.length === 0;
+
+  const emptyContextBannerHtml =
+    allOpenTabsEmpty && !state.webSearchEnabled && !state.isStreaming
+      ? `
+        <div class="composer-context-row">
+          <span class="muted">no readable page in context ·</span>
+          <button id="chat-recapture-all-btn" class="citation-link">[recapture]</button>
+          <button id="chat-enable-web-banner-btn" class="citation-link">[turn on + web]</button>
+          <span class="muted">[ask without pages]</span>
+        </div>
+      `
+      : "";
+
   const contextPillsHtml =
     activeTabSources.length === 0
       ? `
@@ -78,22 +101,50 @@ export function renderChatPanel(
       `
       : `
         <div class="composer-context-row">
-          <span class="muted">context (${activeTabSources.length}):</span>
+          <span class="muted">context (${readableTabSources.length}/${activeTabSources.length}):</span>
           <div class="composer-context-pills">
             ${activeTabSources
               .map((item) => {
                 const stat = state.sourceStats[item.sourceId];
-                const statLabel = stat
-                  ? ` · ${stat.chars_sent}/${stat.chars_captured}c${stat.was_cut ? " [cut]" : ""}`
-                  : "";
+                const charsCaptured = stat?.chars_captured ?? item.textChars;
+                const captureMode = stat?.capture_mode ?? item.captureMode;
+                if (charsCaptured === 0) {
+                  return `
+              <div
+                class="context-pill muted ${state.activeTabId === item.tab.id ? "active" : ""}"
+                data-pill-tab-id="${escapeHtml(item.tab.id)}"
+                title="${escapeHtml(item.title)} (${escapeHtml(item.url)}) - empty capture (excluded from prompt)"
+              >
+                <span class="truncate">${escapeHtml(item.domain)} · ${escapeHtml(item.title.slice(0, 18))} · empty</span>
+                <button
+                  class="citation-link"
+                  data-pill-recapture-tab-id="${escapeHtml(item.tab.id)}"
+                  title="recapture live DOM from this tab"
+                >[recapture]</button>
+                <button
+                  class="tab-close-btn"
+                  data-pill-close-tab-id="${escapeHtml(item.tab.id)}"
+                  title="close tab and remove from context"
+                >x</button>
+              </div>
+            `;
+                }
+                const modeLabel =
+                  captureMode === "fetch" ? " · public fetch" : "";
+                const cutLabel = stat?.was_cut ? " [cut]" : "";
+                const charsLabel = ` · ${charsCaptured.toLocaleString()}c${cutLabel}`;
+                const tooltipText =
+                  captureMode === "fetch"
+                    ? `captured from public URL, not your logged-in tab (${charsCaptured.toLocaleString()} chars)`
+                    : `${item.title} (${item.url}) - ${charsCaptured.toLocaleString()} chars${cutLabel}`;
                 return `
               <div
                 class="context-pill ${state.activeTabId === item.tab.id ? "active" : ""}"
                 data-pill-tab-id="${escapeHtml(item.tab.id)}"
-                title="${escapeHtml(item.title)} (${escapeHtml(item.url)})${stat ? ` - ${stat.chars_sent.toLocaleString()} / ${stat.chars_captured.toLocaleString()} chars${stat.was_cut ? " [cut]" : ""}` : ""}"
+                title="${escapeHtml(tooltipText)}"
               >
-                <span class="muted">[${item.index}]</span>
-                <span class="truncate">${escapeHtml(item.domain)} · ${escapeHtml(item.title.slice(0, 22))}${escapeHtml(statLabel)}</span>
+                <span class="muted">[${item.citeIndex ?? item.index}]</span>
+                <span class="truncate">${escapeHtml(item.domain)} · ${escapeHtml(item.title.slice(0, 20))}${escapeHtml(modeLabel)}${escapeHtml(charsLabel)}</span>
                 <button
                   class="tab-close-btn"
                   data-pill-close-tab-id="${escapeHtml(item.tab.id)}"
@@ -106,6 +157,7 @@ export function renderChatPanel(
             <button id="chat-context-add-tab-btn" class="context-add-btn" title="open a new tab to add to context">[+ tab]</button>
           </div>
         </div>
+        ${emptyContextBannerHtml}
       `;
 
   const stepsHtml = state.streamingSteps
@@ -193,6 +245,9 @@ export function renderChatPanel(
             id="chat-composer-input"
             class="composer-input"
             type="text"
+            spellcheck="false"
+            autocorrect="off"
+            autocapitalize="off"
             placeholder="${escapeHtml(offlineNotice)}"
             ${state.isStreaming ? "disabled" : ""}
           />
@@ -335,7 +390,11 @@ function renderMessageBlock(
       trimmed.startsWith("gemma stopped responding after 30 s.") ||
       trimmed.startsWith("models [offline]"));
 
-  const formattedBody = formatCitationsInText(content, sourceIds, citationCheck);
+  const plainErr = isErrorMsg ? formatPlainErrorMessage(content) : null;
+  const debugExpanded = Boolean(state.expandedDebugMessages[msgId]);
+  const formattedBody = plainErr
+    ? escapeHtml(plainErr.summary)
+    : formatCitationsInText(content, sourceIds, citationCheck);
   const modelLabel = model ? `model: ${escapeHtml(model)}` : "";
   const srcCountLabel =
     sourceIds.length > 0 ? ` · ${sourceIds.length} src` : "";
@@ -351,13 +410,46 @@ function renderMessageBlock(
     ? ` <span class="msg-error-badge">[error]</span>`
     : "";
 
+  let readFooterHtml = "";
+  if (role === "assistant" && !isErrorMsg && sourceIds.length > 0) {
+    let totalSent = 0;
+    let cutCount = 0;
+    for (const sid of sourceIds) {
+      const st = state.sourceStats[sid];
+      if (st) {
+        totalSent += st.chars_sent || st.chars_captured || 0;
+        if (st.was_cut) cutCount += 1;
+      } else {
+        const dbSrc = state.activeDetail?.sources.find((s) => s.id === sid);
+        const chars = dbSrc?.text_chars ?? 0;
+        totalSent += Math.min(6000, chars);
+        if (chars > 6000) cutCount += 1;
+      }
+    }
+    readFooterHtml = `<div class="muted">read ${sourceIds.length} source${sourceIds.length === 1 ? "" : "s"} · ${totalSent.toLocaleString()} chars · ${cutCount} cut</div>`;
+  }
+
   const retryButtonHtml =
-    isErrorMsg && state.lastUserPrompt
+    isErrorMsg
       ? `
       <div class="composer-controls">
-        <button class="citation-link" data-retry-prompt="${escapeHtml(state.lastUserPrompt)}">[retry]</button>
-        <button class="citation-link" data-use-planck-prompt="${escapeHtml(state.lastUserPrompt)}">[use planck instead]</button>
+        ${
+          state.lastUserPrompt
+            ? `<button class="citation-link" data-retry-prompt="${escapeHtml(state.lastUserPrompt)}">[retry]</button>
+               <button class="citation-link" data-use-planck-prompt="${escapeHtml(state.lastUserPrompt)}">[use planck instead]</button>`
+            : ""
+        }
+        ${
+          plainErr && plainErr.rawDetail && plainErr.rawDetail !== plainErr.summary
+            ? `<button class="citation-link" data-toggle-debug-msg="${escapeHtml(msgId)}">[debug]</button>`
+            : ""
+        }
       </div>
+      ${
+        debugExpanded && plainErr
+          ? `<div class="muted">${escapeHtml(plainErr.rawDetail)}</div>`
+          : ""
+      }
     `
       : "";
 
@@ -448,6 +540,7 @@ function renderMessageBlock(
         <span>${modelLabel}${srcCountLabel}${escapeHtml(citeStatsLabel)}</span>
       </div>
       <div class="msg-body">${formattedBody}</div>
+      ${readFooterHtml}
       ${findingsHtml}
       ${proposalsHtml}
       ${retryButtonHtml}
@@ -586,11 +679,51 @@ function bindChatEvents(container: HTMLElement, actions: ChatActions): void {
   container.querySelectorAll("[data-pill-tab-id]").forEach((pill) => {
     pill.addEventListener("click", (e) => {
       const target = e.target as HTMLElement;
-      if (target.closest("[data-pill-close-tab-id]")) return;
+      if (
+        target.closest("[data-pill-close-tab-id]") ||
+        target.closest("[data-pill-recapture-tab-id]")
+      ) {
+        return;
+      }
       const tabId = (pill as HTMLElement).getAttribute("data-pill-tab-id");
       if (tabId && actions.onSelectTab) {
         actions.onSelectTab(tabId);
       }
+    });
+  });
+
+  container.querySelectorAll("[data-pill-recapture-tab-id]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const tabId = (btn as HTMLElement).getAttribute(
+        "data-pill-recapture-tab-id"
+      );
+      if (tabId && actions.onRecaptureTab) {
+        actions.onRecaptureTab(tabId);
+      }
+    });
+  });
+
+  container
+    .querySelector("#chat-recapture-all-btn")
+    ?.addEventListener("click", () => {
+      if (actions.onRecaptureAllTabs) {
+        actions.onRecaptureAllTabs();
+      }
+    });
+
+  container
+    .querySelector("#chat-enable-web-banner-btn")
+    ?.addEventListener("click", () => {
+      actions.onToggleWeb();
+    });
+
+  container.querySelectorAll("[data-toggle-debug-msg]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const mid = (btn as HTMLElement).getAttribute("data-toggle-debug-msg");
+      if (!mid) return;
+      state.expandedDebugMessages[mid] = !state.expandedDebugMessages[mid];
+      renderChatPanel(container, actions);
     });
   });
 

@@ -9,11 +9,11 @@ Nikita Gorshkov · 2026-11-03 · Living doc · SGS / Satz · Windows 11 (RTX 409
 | Area | Windows 11 (4090) | macOS (M3 Pro) | Code | v0.5 |
 | :--- | :--- | :--- | :--- | :--- |
 | Web engine | WebView2 (Edge 131 UA via `default_browser_user_agent()`) | WKWebView (Safari 18.2 UA via `default_browser_user_agent()`) | `webview_manager.rs:29-38` | M16 [done] |
-| Build and tests | `npm run build`, `cargo test` 11/11, `pytest` 17/17 | `npm run build` ok, `cargo test` 11/11, `pytest` 17/17 | n/a | M16 [done] |
+| Build and tests | `npm run build`, `cargo test` 12/12, `pytest` 19/19 | `npm run build` ok, `cargo test` 12/12, `pytest` 19/19 | n/a | M16-M17 [done] |
 | Sidecar spawn defaults | `..\sgs\.venv\Scripts\python.exe`, `..\sgs` | `../sgs/.venv/bin/python` (fallback `python3` -> `python`), `../sgs` | `lib.rs:46-71`, `lib.rs:449-495` | M16 [done] |
 | App data | `%APPDATA%\com.satz.browser` | `~/Library/Application Support/com.satz.browser` | `satz_models.py:77-83` | n/a |
 | Session token RNG | `BCryptGenRandom` | `/dev/urandom` | `lib.rs:379-405` | n/a |
-| Vault device key | Windows Credential Manager (`keyring`) | macOS Keychain (`keyring`), works | `satz_passwords.py` | M17: Touch ID unlock |
+| Vault device key | Windows Credential Manager (`keyring`) | macOS Keychain (`keyring`) + Touch ID unlock (`unlock_with_keychain`, `/profile/unlock_keychain`) | `satz_passwords.py:565-610` | M17 [done] |
 | Gemma 4 E4B device | CUDA (`bfloat16`, `device_map="auto"`), status bar shows `gemma [warm · cuda]` | MPS (`float16`, `.to("mps")`) or CPU (`float32`), status bar shows `gemma [warm · mps]`; 5 s SSE heartbeat + 30 s stall watchdog | `satz_models.py:555-765`, `api.ts:1036-1140` | M16 [done] |
 | Gemma weights | `sgs/models/gemma-4-e4b-it` | Same path. Downloaded 2026-11-03 (15 GB, gitignored) | `satz_models.py:567-569` | n/a |
 | Planck 3 web answers | Reader checkpoint present, band 9.0/10; `/doctor` reports `ready` | `/doctor` reports `ready` or `missing` with one-line fix instruction | `satz_models.py:595-680` | M16 [done] |
@@ -27,8 +27,8 @@ Nikita Gorshkov · 2026-11-03 · Living doc · SGS / Satz · Windows 11 (RTX 409
 | Mail sync (IMAP) | Works (fixtures) | Works against a local IMAP server, 12/12 messages | `satz_mail.py` | n/a |
 | Hidden console for sidecar | `CREATE_NO_WINDOW` | n/a | `lib.rs:483-488` | n/a |
 | Default desktop fix | `ensure_default_desktop_on_windows` | n/a | `lib.rs:533` | n/a |
-| Text input autocorrect | No OS autocorrect in WebView2 inputs | macOS autocorrect fires on URL, start and search inputs ("zalando" → "Calando") | only 1 `spellcheck` attr in `src/` | M17 |
-| UI copy | `C:\Users\...` placeholders | Same Windows placeholders shown on Mac | `knowledge.ts` | M17 |
+| Text input autocorrect | `spellcheck="false" autocorrect="off" autocapitalize="off"` on all URL, start, rail filter, chat, mail search, and PIN inputs | `spellcheck="false" autocorrect="off" autocapitalize="off"` on all URL, start, rail filter, chat, mail search, and PIN inputs | `start.ts`, `rail.ts`, `chat.ts`, `mail.ts`, `knowledge.ts`, `main.ts` | M17 [done] |
+| UI copy | OS-aware path placeholders (`C:\Users\...\.env` on Windows) | OS-aware path placeholders (`~/Downloads/.env` on macOS) | `knowledge.ts:220` | M17 [done] |
 
 ## 2. What "works on Windows" hides
 
@@ -50,3 +50,4 @@ Nikita Gorshkov · 2026-11-03 · Living doc · SGS / Satz · Windows 11 (RTX 409
 | :--- | :--- |
 | 2026-11-03 | First version, from the macOS field test at `4963e38`. |
 | 2026-11-09 | M16: WKWebView `evaluateJavaScript_completionHandler` live DOM capture, `compute_child_webview_bounds` + `window_titlebar_inset` toolbar fix, realistic browser UA on WebView2/WKWebView, MPS/CUDA/CPU Gemma device selection + 5 s SSE heartbeat + 30 s watchdog, per-OS sidecar defaults, `/doctor` endpoint, and `Cmd+Shift+L` macOS accelerator. |
+| 2026-11-09 | M17: Honest source pills (`dom`/`fetch`/`empty [recapture]`), 0-char source exclusion from citations, canonical URL source deduplication, plain-language errors + `[debug]` drawer, ordered `Esc`/click-away dismissal, inline Mail unlock + macOS Touch ID (`unlock_with_keychain`), `about:blank` new tabs, unseeded bookmarks, and `spellcheck="false" autocorrect="off" autocapitalize="off"` across inputs. |

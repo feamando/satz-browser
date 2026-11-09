@@ -36,6 +36,9 @@ export function renderStartScreen(
               id="start-main-input"
               class="start-input-field"
               type="text"
+              spellcheck="false"
+              autocorrect="off"
+              autocapitalize="off"
               placeholder="paste a url, ask something, or both_"
             />
             <span class="caret-blink">▌</span>
@@ -66,7 +69,7 @@ export function renderStartScreen(
             <div class="start-col-header">for you</div>
             ${
               state.digestItems.length === 0
-                ? `<div class="muted">no digest items yet (browse pages to build local store)</div>`
+                ? `<div class="muted">browse or bookmark pages to build your digest</div>`
                 : state.digestItems
                     .map(
                       (item) => `

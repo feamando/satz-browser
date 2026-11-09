@@ -4,6 +4,7 @@ import type { SourceItem } from "./types";
 export interface SourcesPanelActions {
   onToggleSourceInContext: (sourceId: string, inContext: boolean) => void;
   onJumpToSource: (source: SourceItem) => void;
+  onRecaptureTab?: (tabId: string) => void;
 }
 
 export function renderSourcesPanel(
@@ -18,6 +19,7 @@ export function renderSourcesPanel(
 
   const sources = detail.sources;
   const openTabs = detail.tabs.filter((t) => t.is_open);
+  let nextCiteIdx = 1;
 
   container.innerHTML = `
     <div class="panel-header">
@@ -29,7 +31,7 @@ export function renderSourcesPanel(
         sources.length === 0
           ? `<div class="muted">no sources yet. open a site tab [+] to add pages.</div>`
           : sources
-              .map((src, idx) => {
+              .map((src) => {
                 const matchingTabIdx = openTabs.findIndex(
                   (t) => t.id === src.tab_id
                 );
@@ -44,25 +46,38 @@ export function renderSourcesPanel(
                 const timeStr = formatTimeHhMm(src.captured_at || src.added_at);
                 const checkMark = src.in_context ? "[x]" : "[ ]";
                 const stat = state.sourceStats[src.id];
+                const isMailSource =
+                  src.id.startsWith("mail:") ||
+                  src.url.startsWith("satzmail://message/");
                 const charsCaptured =
-                  stat?.chars_captured ?? src.text_chars ?? 0;
+                  stat?.chars_captured ?? src.text_chars ?? (isMailSource ? 1 : 0);
                 const charsSent =
                   stat?.chars_sent ??
                   (src.in_context ? Math.min(6000, charsCaptured) : 0);
                 const wasCut = stat?.was_cut ?? charsCaptured > 6000;
-                const charsBadge = `${charsSent.toLocaleString()} / ${charsCaptured.toLocaleString()} chars${wasCut ? " · cut" : ""}`;
+                const captureMode = stat?.capture_mode ?? "dom";
+                const citeBadgeHtml =
+                  charsCaptured > 0 && src.in_context
+                    ? `<span class="muted">[${nextCiteIdx++}]</span>`
+                    : `<span class="muted">[-]</span>`;
+                const modeLabel =
+                  captureMode === "fetch" ? " · public fetch" : "";
+                const charsBadgeHtml =
+                  charsCaptured > 0
+                    ? `${charsSent.toLocaleString()} / ${charsCaptured.toLocaleString()} chars${escapeHtml(modeLabel)}${wasCut ? " · cut" : ""}`
+                    : `empty ${src.tab_id ? `<button class="citation-link" data-recapture-src-tab="${escapeHtml(src.tab_id)}">[recapture]</button>` : ""}`;
                 return `
-                  <div class="source-row" data-source-id="${escapeHtml(src.id)}">
+                  <div class="source-row ${charsCaptured === 0 ? "muted" : ""}" data-source-id="${escapeHtml(src.id)}">
                     <div class="source-row-top">
                       <button class="rail-menu-btn" data-toggle-src="${escapeHtml(src.id)}" data-current-ctx="${src.in_context ? "1" : "0"}">${checkMark}</button>
-                      <span class="muted">[${idx + 1}]</span>
+                      ${citeBadgeHtml}
                       <span class="truncate">${escapeHtml(src.domain)}</span>
-                      <span class="muted">${escapeHtml(locationLabel)} · captured ${escapeHtml(timeStr)}</span>
+                      <span class="muted">${escapeHtml(locationLabel)} · ${escapeHtml(timeStr)}</span>
                     </div>
                     <div class="source-row-title truncate" data-jump-src="${escapeHtml(src.id)}">
                       ${escapeHtml(src.title || src.url)}
                     </div>
-                    <div class="muted">${escapeHtml(charsBadge)}</div>
+                    <div class="muted">${charsBadgeHtml}</div>
                   </div>
                 `;
               })
@@ -70,6 +85,16 @@ export function renderSourcesPanel(
       }
     </div>
   `;
+
+  container.querySelectorAll("[data-recapture-src-tab]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const tabId = (btn as HTMLElement).getAttribute("data-recapture-src-tab");
+      if (tabId && actions.onRecaptureTab) {
+        actions.onRecaptureTab(tabId);
+      }
+    });
+  });
 
   container.querySelectorAll("[data-toggle-src]").forEach((btn) => {
     btn.addEventListener("click", (e) => {

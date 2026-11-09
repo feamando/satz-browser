@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { extractDomain } from "./state";
+import { extractDomain, state } from "./state";
 import type {
   BookmarkItem,
   BrainProposalItem,
@@ -309,7 +309,15 @@ export async function apiSetConversationSummary(
 
 export async function apiEnsureMailConversation(): Promise<Conversation> {
   const row = await invoke<Record<string, unknown>>("ensure_mail_conversation");
-  return mapConversationRow(row);
+  const conv = mapConversationRow(row);
+  try {
+    state.conversations = await apiListConversations();
+  } catch {
+    if (!state.conversations.some((c) => c.id === conv.id)) {
+      state.conversations = [conv, ...state.conversations];
+    }
+  }
+  return conv;
 }
 
 export async function apiOpenTab(
@@ -707,6 +715,26 @@ export async function sidecarAcceptBrainProposal(
   }
 }
 
+export async function sidecarUpsertBrainEntity(payload: {
+  type: string;
+  name: string;
+  summary: string;
+  attributes?: Record<string, unknown>;
+  content?: string;
+  source_url?: string;
+}): Promise<{ ok: boolean }> {
+  try {
+    const res = await sidecarFetch("/knowledge/upsert_entity", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return { ok: res.ok };
+  } catch {
+    return { ok: false };
+  }
+}
+
 export async function sidecarRejectBrainProposal(
   proposalId: string
 ): Promise<boolean> {
@@ -769,6 +797,22 @@ export async function sidecarUnlockProfile(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ profile_id: profileId, pin }),
+    });
+    const data = (await res.json()) as { ok?: boolean; error?: string };
+    return { ok: Boolean(res.ok && data.ok), error: data.error };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarUnlockProfileKeychain(
+  profileId: string
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await sidecarFetch("/profile/unlock_keychain", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile_id: profileId }),
     });
     const data = (await res.json()) as { ok?: boolean; error?: string };
     return { ok: Boolean(res.ok && data.ok), error: data.error };

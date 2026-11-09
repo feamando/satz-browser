@@ -55,6 +55,7 @@ export interface AppState {
   tabCanFillLogin: Record<string, boolean>;
   messageProposals: Record<string, BrainProposalItem[]>;
   messageFindings: Record<string, FindingItem[]>;
+  expandedDebugMessages: Record<string, boolean>;
   revealedPasswords: Record<string, string>;
   sourceStats: Record<string, SourceStatEntry>;
   showErrorLog: boolean;
@@ -156,6 +157,7 @@ export const state: AppState = {
   tabCanFillLogin: {},
   messageProposals: {},
   messageFindings: {},
+  expandedDebugMessages: {},
   revealedPasswords: {},
   sourceStats: {},
   showErrorLog: false,
@@ -291,34 +293,105 @@ export function formatRelativeTime(isoOrEpoch: string): string {
 
 export interface ActiveTabSource {
   index: number;
+  citeIndex: number | null;
   tab: BrowserTab;
   sourceId: string;
   domain: string;
   title: string;
   url: string;
+  textChars: number;
+  captureMode: "dom" | "fetch" | "timeout";
 }
 
 export function getActiveTabSources(
   detail: ConversationDetail | null = state.activeDetail
 ): ActiveTabSource[] {
   if (!detail) return [];
-  const openTabs = detail.tabs.filter((t) => t.is_open);
+  const openTabs = detail.tabs.filter(
+    (t) => t.is_open && t.kind !== "compose" && t.url !== "about:blank"
+  );
+  let nextCite = 1;
   return openTabs.map((tab, idx) => {
     const matchedSource =
       detail.sources.find((s) => s.tab_id === tab.id && s.in_context) ??
       detail.sources.find((s) => s.tab_id === tab.id && s.url === tab.url) ??
       detail.sources.find((s) => s.tab_id === tab.id);
+    const sourceId = matchedSource?.id ?? tab.id;
     const domain = matchedSource?.domain || extractDomain(tab.url);
     const title = tab.title || matchedSource?.title || domain;
+    const stat = state.sourceStats[sourceId];
+    const isMailTab =
+      tab.kind === "mail" || tab.url.startsWith("satzmail://message/");
+    const textChars =
+      stat?.chars_captured ??
+      matchedSource?.text_chars ??
+      (isMailTab ? 1 : 0);
+    const captureMode: "dom" | "fetch" | "timeout" =
+      stat?.capture_mode ?? (textChars === 0 && matchedSource?.captured_at ? "timeout" : "dom");
+    const citeIndex = textChars > 0 ? nextCite++ : null;
     return {
       index: idx + 1,
+      citeIndex,
       tab,
-      sourceId: matchedSource?.id ?? tab.id,
+      sourceId,
       domain,
       title,
       url: tab.url,
+      textChars,
+      captureMode,
     };
   });
+}
+
+export function stripFilesystemPaths(raw: string): string {
+  return raw
+    .replace(/[A-Za-z]:\\[^\s"'`)\]]+/g, "<path>")
+    .replace(/\/(?:Users|home|var|private|tmp|opt)\/[^\s"'`)\]]+/g, "<path>");
+}
+
+export function formatPlainErrorMessage(raw: string): {
+  summary: string;
+  rawDetail: string;
+} {
+  const cleanRaw = raw.replace(/^\[err\]\s*/i, "").replace(/^\[error:\s*/i, "").trim();
+  const lower = cleanRaw.toLowerCase();
+  if (lower.includes("stopped responding after 30 s")) {
+    return {
+      summary: "gemma stopped responding after 30 s.",
+      rawDetail: cleanRaw,
+    };
+  }
+  if (
+    lower.includes("not found") &&
+    (lower.includes("gemma") || lower.includes("checkpoint") || lower.includes("model"))
+  ) {
+    return {
+      summary: "gemma is not downloaded [how to install]",
+      rawDetail: cleanRaw,
+    };
+  }
+  if (lower.includes("401") || lower.includes("403") || lower.includes("forbidden")) {
+    return {
+      summary: "the site refused the background fetch (401/403).",
+      rawDetail: cleanRaw,
+    };
+  }
+  if (
+    lower.includes("load failed") ||
+    lower.includes("failed to fetch") ||
+    lower.includes("networkerror") ||
+    lower.includes("offline")
+  ) {
+    return {
+      summary: "could not reach the local model service.",
+      rawDetail: cleanRaw,
+    };
+  }
+  const stripped = stripFilesystemPaths(cleanRaw);
+  return {
+    summary: stripped.length > 140 ? `${stripped.slice(0, 140)}...` : stripped,
+    rawDetail: cleanRaw,
+  };
 }
 
 export interface LiveNavigationTarget {

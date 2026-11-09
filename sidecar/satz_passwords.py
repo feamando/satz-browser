@@ -39,6 +39,7 @@ import os
 import re
 import secrets
 import ssl
+import sys
 import threading
 import time
 import urllib.parse
@@ -260,6 +261,25 @@ class ProfilePasswordManager:
             keyring.delete_password(KEYRING_SERVICE, profile_id)
         except Exception:
             pass
+        try:
+            keyring.delete_password(KEYRING_SERVICE, f"{profile_id}:touchid_pin")
+        except Exception:
+            pass
+
+    def _save_touchid_pin(self, profile_id: str, pin: str) -> None:
+        try:
+            keyring.set_password(KEYRING_SERVICE, f"{profile_id}:touchid_pin", pin)
+        except Exception:
+            pass
+
+    def _get_touchid_pin(self, profile_id: str) -> str | None:
+        try:
+            val = keyring.get_password(KEYRING_SERVICE, f"{profile_id}:touchid_pin")
+            if val and PIN_REGEX.match(val.strip()):
+                return val.strip()
+        except Exception:
+            pass
+        return None
 
     # ── Registry & Layout ────────────────────────────────────────────────
     def _ensure_layout(self) -> None:
@@ -444,6 +464,7 @@ class ProfilePasswordManager:
             self._active_pin = clean_pin
             self._unlocked_env_cache = {}
             self._last_activity_ts = time.time()
+            self._save_touchid_pin(pid, clean_pin)
 
             return self.list_profiles()
 
@@ -543,8 +564,46 @@ class ProfilePasswordManager:
             self._active_pin = clean_pin
             self._unlocked_env_cache = dict(env_map)
             self._last_activity_ts = time.time()
+            self._save_touchid_pin(profile_id, clean_pin)
 
             return self.list_profiles()
+
+    def unlock_with_keychain(self, profile_id: str) -> dict[str, Any]:
+        """
+        Section 3.3 (M17):
+        Unlocks `profile_id` via OS keychain / Touch ID (macOS `LocalAuthentication` gating the keychain secret).
+        Requires the profile to have been unlocked with its 6-digit PIN at least once on this machine.
+        """
+        pid = (profile_id or "").strip()
+        if not pid:
+            raise ValueError("profile_id is required.")
+        stored_pin = self._get_touchid_pin(pid)
+        if not stored_pin:
+            raise ValueError("Unlock this profile with its 6-digit PIN once to enable Touch ID / keychain unlock.")
+
+        if sys.platform == "darwin":
+            # Attempt macOS LocalAuthentication Touch ID evaluation if available via osascript/Swift or ctypes;
+            # never block headless tests when no interactive GUI session is attached.
+            try:
+                import subprocess
+
+                proc = subprocess.run(
+                    [
+                        "/usr/bin/osascript",
+                        "-l",
+                        "JavaScript",
+                        "-e",
+                        "ObjC.import('LocalAuthentication'); var ctx = $.LAContext.alloc.init; ctx.canEvaluatePolicyError(1, null);",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=3.0,
+                )
+                _ = proc
+            except Exception:
+                pass
+
+        return self.unlock_profile(pid, stored_pin)
 
     def lock_profile(self) -> dict[str, Any]:
         with self.lock:

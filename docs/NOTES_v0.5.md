@@ -44,3 +44,37 @@ Owner: Nikita Gorshkov · Date: 2026-11-09 · Spec: `docs/PLAN_v0.5.md` · Platf
   - `GET /health` (unauthenticated): `{"ok": true, "version": "0.5.0"}`
   - `GET /health` (authenticated): `gemma-4-e4b` reports `device: "cuda"`
   - `GET /doctor`: all 5 roles (`chat`, `web_answer`, `reader_hertz`, `reader_planck`, `brain_encoder`) report `state: "ready"` (`chat` on `cuda`, readers & `planck13` encoder on `cpu`).
+
+---
+
+## 3. Milestone 17 (M17): Honest Sources & Shell Polish
+
+### 3.1 Changes Implemented
+- **Honest Source Pills, Empty-Source Exclusion & Answer Footer (`sidecar/satz_models.py`, `src/state.ts`, `src/chat.ts`, `src/sources.ts`):**
+  - Updated `get_source_text` and added `get_source_capture_mode` in `sidecar/satz_models.py` so timed-out captures (`capture_mode == "timeout"`) never fall back to an unauthenticated `self.web.fetch(url)` during chat context assembly.
+  - `assemble_chat_context` excludes `0`-char sources from `used_source_ids` and `SOURCES` (preventing empty tabs from receiving `[1]` citation numbers), while `stream_chat` still includes `0`-char sources in `source_stats` with `chars_captured: 0` and `capture_mode: "timeout"`.
+  - Context pills in `src/chat.ts` and rows in `src/sources.ts` display:
+    - Live DOM capture (`chars_captured > 0 && capture_mode === "dom"`): `[1] domain · title · 4,820c`
+    - Public fallback fetch (`chars_captured > 0 && capture_mode === "fetch"`): `[1] domain · title · public fetch · 3,100c` (tooltip `"captured from public URL, not your logged-in tab"`)
+    - Empty capture (`chars_captured === 0`): `domain · title · empty [recapture]` (dimmed, no `[n]` badge, clickable `[recapture]` button).
+  - Pre-send banner when all open tabs have `0` captured chars and `web` is off: `no readable page in context · [recapture] · [turn on + web] · [ask without pages]`.
+  - Answer footer under each assistant message that used sources: `read N sources · X chars · Y cut`.
+- **Source URL Deduplication & Unseeded Bookmarks (`src-tauri/src/db.rs`):**
+  - Added `pub fn canonicalize_source_url(raw_url: &str) -> String` (strips `#fragment`, `utm_*` query parameters, and trailing slash) and deduplicated `sources` rows per `(conversation_id, canonical_url)` in `open_tab_with_kind` and `record_tab_navigation_or_title` (`test_canonical_source_url_dedupe`).
+  - Removed the 6 seeded bookmarks (`bm-1`..`bm-6`) on first run and added one-time `v05_unseeded_bookmarks` cleanup (`test_bookmarks_and_direct_conversation_auto_archive`).
+- **Plain-Language Errors, `[debug]` Drawer & Ordered Overlay Dismissal (`src/state.ts`, `src/chat.ts`, `src/status.ts`, `src/main.ts`, `src/style.css`):**
+  - Added `formatPlainErrorMessage` and `stripFilesystemPaths` in `src/state.ts` so user-facing error bubbles show a one-line summary with `[retry]`, `[use planck instead]`, and a `[debug]` toggle for the raw error detail.
+  - Replaced `[N errors]` in the status bar with `[log (N)]` (hidden when `0`) and capped `#region-error-log-overlay` at `max-height: 200px` so it never covers the chat composer.
+  - Ordered `Esc` and click-outside dismissal: open popover/menu -> open overlay/panel -> Compare View.
+  - Widened `.right-panel` to `360px` (`min-width: 320px; max-width: 480px`) and focused the email tab (`tab.kind === "mail"`) right rail on sender card, extracted items, `[save to brain]`, `[ask about this email]`, and `summarize · draft reply · extract dates`.
+- **Inline Mail Unlock (+ macOS Touch ID / Keychain) & First-Run Input Cleanup (`sidecar/satz_passwords.py`, `sidecar/satz_models.py`, `src/mail.ts`, `src/knowledge.ts`, `src/start.ts`, `src/rail.ts`, `src/main.ts`):**
+  - Added `unlock_with_keychain` and `POST /profile/unlock_keychain` (with macOS `LocalAuthentication` Touch ID evaluation gating the keychain secret).
+  - Rendered an inline PIN unlock / profile creation sheet directly inside locked Mail lanes (`src/mail.ts`), unlocking in place and immediately refreshing `state.conversations` (`apiEnsureMailConversation` + `refreshLists()`).
+  - Updated `[ + ]` new tab to open `about:blank` with `#address-input-<id>` focused and empty (`placeholder="enter a url or search query_"`), and added `spellcheck="false" autocorrect="off" autocapitalize="off"` across URL, start, rail filter, chat, mail search, and PIN inputs.
+
+### 3.2 M17 Verification & Measurements (Windows 11 RTX 4090 Reference Box)
+- `npm run build`: **PASS** (`dist/` built in `390 ms`, 0 TypeScript errors)
+- `cargo check --manifest-path src-tauri/Cargo.toml`: **PASS**
+- `cargo test --manifest-path src-tauri/Cargo.toml`: **PASS** (`12/12` unit tests passing, including `test_canonical_source_url_dedupe` and `test_bookmarks_and_direct_conversation_auto_archive`)
+- `..\sgs\.venv\Scripts\python.exe -m pytest sidecar -q`: **PASS** (`19/19` tests passing: `13` in `test_satz_models.py` + `4` in `test_m16.py` + `2` in `test_m17.py`)
+- Smoke script artifacts saved to `docs/smoke/v0.5/m17/windows/`.

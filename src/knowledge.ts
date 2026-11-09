@@ -2,7 +2,7 @@ import {
   bindMailAccountsEvents,
   renderMailAccountsSectionHtml,
 } from "./mail";
-import { escapeHtml, formatRelativeTime, state } from "./state";
+import { escapeHtml, formatRelativeTime, IS_MAC, state } from "./state";
 
 export interface KnowledgeActions {
   onTogglePauseLearning: (paused: boolean) => void;
@@ -10,6 +10,7 @@ export interface KnowledgeActions {
   onDeleteBrainEntity?: (slug: string) => void;
   onCreateProfile?: (name: string, pin: string) => void;
   onUnlockProfile?: (profileId: string, pin: string) => void;
+  onUnlockProfileKeychain?: (profileId: string) => void;
   onLockProfile?: () => void;
   onDeleteProfile?: (profileId: string, pin: string) => void;
   onUpsertPassword?: (payload: {
@@ -126,6 +127,9 @@ export function renderKnowledgeView(
             id="kb-new-profile-name"
             class="vault-input"
             type="text"
+            spellcheck="false"
+            autocorrect="off"
+            autocapitalize="off"
             placeholder="profile name (e.g. Nikita)_"
           />
           <input
@@ -134,6 +138,9 @@ export function renderKnowledgeView(
             type="password"
             inputmode="numeric"
             maxlength="6"
+            spellcheck="false"
+            autocorrect="off"
+            autocapitalize="off"
             placeholder="6-digit PIN (e.g. 123456)_"
           />
           <button id="kb-create-profile-btn">[+ create profile]</button>
@@ -160,10 +167,18 @@ export function renderKnowledgeView(
                         type="password"
                         inputmode="numeric"
                         maxlength="6"
+                        spellcheck="false"
+                        autocorrect="off"
+                        autocapitalize="off"
                         placeholder="6-digit PIN"
                         data-profile-pin-input="${escapeHtml(p.id)}"
                       />
                       <button data-unlock-profile="${escapeHtml(p.id)}">[unlock]</button>
+                      ${
+                        IS_MAC
+                          ? `<button data-unlock-touchid="${escapeHtml(p.id)}">[unlock with Touch ID]</button>`
+                          : ""
+                      }
                     `
                     }
                     <button class="rail-menu-btn" data-delete-profile="${escapeHtml(p.id)}" title="enter 6-digit PIN to delete profile">[delete]</button>
@@ -202,7 +217,7 @@ export function renderKnowledgeView(
           </div>
 
           <div class="vault-form-row">
-            <input id="kb-import-env-path" class="vault-input" type="text" placeholder="import external .env file path (e.g. C:\\Users\\...\\.env)_" />
+            <input id="kb-import-env-path" class="vault-input" type="text" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="import external .env file path (e.g. ${IS_MAC ? "~/Downloads/.env" : "C:\\Users\\...\\.env"})_" />
             <button id="kb-import-env-btn">[import .env file]</button>
             <input
               id="kb-reveal-pin-input"
@@ -210,6 +225,9 @@ export function renderKnowledgeView(
               type="password"
               inputmode="numeric"
               maxlength="6"
+              spellcheck="false"
+              autocorrect="off"
+              autocapitalize="off"
               placeholder="6-digit PIN to [reveal]_"
             />
           </div>
@@ -430,6 +448,28 @@ export function renderKnowledgeView(
       ) as HTMLInputElement | null;
       const pin = pinInput?.value.trim() ?? "";
       actions.onUnlockProfile(pid, pin);
+    });
+  });
+
+  container.querySelectorAll("[data-profile-pin-input]").forEach((inp) => {
+    inp.addEventListener("keydown", (e) => {
+      if ((e as KeyboardEvent).key === "Enter") {
+        e.preventDefault();
+        const el = inp as HTMLInputElement;
+        const pid = el.getAttribute("data-profile-pin-input");
+        if (pid && actions.onUnlockProfile) {
+          actions.onUnlockProfile(pid, el.value.trim());
+        }
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-unlock-touchid]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const pid = (btn as HTMLElement).getAttribute("data-unlock-touchid");
+      if (pid && actions.onUnlockProfileKeychain) {
+        actions.onUnlockProfileKeychain(pid);
+      }
     });
   });
 

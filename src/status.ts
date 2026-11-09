@@ -30,14 +30,16 @@ export function renderStatusLine(): void {
           : "[ok]";
 
   const sidecarStatus = state.sidecar.online ? "[ok]" : "[offline]";
-  const sourcesInContext = getActiveTabSources(state.activeDetail).length;
+  const sourcesInContext = getActiveTabSources(state.activeDetail).filter(
+    (s) => s.textChars > 0
+  ).length;
   const queueLen = state.sidecar.ingest_queue_len;
   const learnState = state.sidecar.pause_learning ? " [paused]" : "";
   const errors = state.sidecar.errors ?? [];
   const errCount = errors.length;
   const errBtnHtml =
     errCount > 0
-      ? `<button id="status-errors-btn" class="rail-menu-btn msg-error-badge">[${errCount} error${errCount === 1 ? "" : "s"}]</button>`
+      ? `<button id="status-errors-btn" class="rail-menu-btn muted">[log (${errCount})]</button>`
       : "";
 
   const mailStatus = state.sidecar.mail;

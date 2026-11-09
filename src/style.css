@@ -745,18 +745,25 @@ button.inverse,
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 /* Sources Panel & Agent Side Rail */
 .right-panel {
-  width: 300px;
-  min-width: 300px;
+  width: 360px;
+  min-width: 320px;
+  max-width: 480px;
   height: 100%;
   background-color: var(--surface);
   border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+#region-error-log-overlay {
+  max-height: 200px;
+  overflow-y: auto;
 }
 
 .panel-header {
