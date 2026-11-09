@@ -9,6 +9,7 @@ import {
   apiControlTab,
   apiCreateConversation,
   apiDeleteConversation,
+  apiEnsureMailConversation,
   apiGetConversation,
   apiListBookmarks,
   apiListConversations,
@@ -40,6 +41,7 @@ import {
   sidecarRunRead,
   sidecarSaveRawEnv,
   sidecarSearchBrain,
+  sidecarSearchMail,
   sidecarSetDomainTrust,
   sidecarSetPauseLearning,
   sidecarStreamChat,
@@ -73,7 +75,7 @@ import {
 } from "./mail";
 import { renderRail } from "./rail";
 import { renderSourcesPanel } from "./sources";
-import { renderStartScreen } from "./start";
+import { renderCommandBarOverlay, renderStartScreen } from "./start";
 import {
   classifyStartInput,
   escapeHtml,
@@ -86,7 +88,7 @@ import {
 } from "./state";
 import { renderStatusLine } from "./status";
 import { renderTabStrip, scheduleWebviewLayoutSync } from "./tabs";
-import type { LocalModelId, TabPageEvent } from "./types";
+import type { CommandBarRoute, LocalModelId, TabPageEvent } from "./types";
 
 let resizeObserver: ResizeObserver | null = null;
 let streamingTimerId: number | null = null;
@@ -131,11 +133,7 @@ async function initApp(): Promise<void> {
       renderAllRegions();
     },
     onFilterConversations: () => {
-      const el = document.getElementById(
-        "rail-filter-input"
-      ) as HTMLInputElement | null;
-      el?.focus();
-      el?.select();
+      handleToggleCommandBar();
     },
     onNewTab: () => {
       void handleCreateNewTab();
@@ -187,6 +185,11 @@ async function initApp(): Promise<void> {
       void handleToggleBrainView();
     },
     onEscape: () => {
+      if (state.commandBarOpen) {
+        state.commandBarOpen = false;
+        renderCommandBarOverlay(getStartScreenActions());
+        return;
+      }
       if (
         state.openMenuConvId !== null ||
         state.openCodesPopoverTabId !== null ||
@@ -285,11 +288,7 @@ function handleMenuShortcut(cmd: string): void {
   } else if (cmd === "toggle_brain") {
     void handleToggleBrainView();
   } else if (cmd === "filter_conversations") {
-    const el = document.getElementById(
-      "rail-filter-input"
-    ) as HTMLInputElement | null;
-    el?.focus();
-    el?.select();
+    handleToggleCommandBar();
   } else if (cmd === "new_tab") {
     void handleCreateNewTab();
   } else if (cmd === "close_tab") {
@@ -458,6 +457,7 @@ function renderAllRegions(): void {
   renderRailRegion();
   renderWorkspaceRegions();
   renderStatusLine();
+  renderCommandBarOverlay(getStartScreenActions());
 }
 
 function renderWorkspaceRegions(): void {
@@ -535,6 +535,9 @@ function renderRailRegion(): void {
     },
     onOpenBrainView: () => {
       void handleToggleBrainView();
+    },
+    onOpenCommandBar: () => {
+      handleToggleCommandBar();
     },
     onOpenKnowledgeView: async () => {
       state.showKnowledgeView = !state.showKnowledgeView;
@@ -839,37 +842,7 @@ function renderViewportRegion(): void {
   }
 
   if (!state.activeDetail) {
-    renderStartScreen(viewport, {
-      onSubmitStartInput: (raw) => {
-        void handleStartSubmission(raw);
-      },
-      onSelectConversation: (id) => {
-        void selectConversation(id);
-      },
-      onOpenDigestUrl: (url) => {
-        if (url.startsWith("satzmail://message/")) {
-          const mid = url.replace("satzmail://message/", "").split("/")[0].trim();
-          const mailConv = state.conversations.find((c) => c.origin === "mail");
-          if (mailConv && mid) {
-            void (async () => {
-              await selectConversation(mailConv.id);
-              await openEmailMessageTab(mid, "mail");
-            })();
-            return;
-          }
-        }
-        void startDirectBrowsing(url);
-      },
-      onChangeModel: (model) => {
-        state.selectedModel = model;
-        renderViewportRegion();
-        renderStatusLine();
-      },
-      onToggleWeb: () => {
-        state.webSearchEnabled = !state.webSearchEnabled;
-        renderViewportRegion();
-      },
-    });
+    renderStartScreen(viewport, getStartScreenActions());
     scheduleWebviewLayoutSync();
     return;
   }
@@ -1366,6 +1339,190 @@ async function selectConversation(conversationId: string): Promise<void> {
     }
   }
   renderAllRegions();
+}
+
+function handleToggleCommandBar(): void {
+  if (
+    !state.activeDetail &&
+    !state.showBrainView &&
+    !state.showKnowledgeView &&
+    !state.commandBarOpen
+  ) {
+    const startInput = document.getElementById(
+      "start-main-input"
+    ) as HTMLInputElement | null;
+    if (startInput) {
+      startInput.focus();
+      startInput.select();
+      return;
+    }
+  }
+  state.commandBarOpen = !state.commandBarOpen;
+  state.commandBarSelectedIdx = 0;
+  renderCommandBarOverlay(getStartScreenActions());
+}
+
+function getStartScreenActions() {
+  return {
+    onSubmitStartInput: (raw: string) => {
+      void handleStartSubmission(raw);
+    },
+    onExecuteCommandRoute: (route: CommandBarRoute, raw: string) => {
+      void handleExecuteCommandRoute(route, raw);
+    },
+    onSelectConversation: (id: string) => {
+      void selectConversation(id);
+    },
+    onOpenDigestUrl: (url: string) => {
+      if (url.startsWith("satzmail://message/")) {
+        const mid = url.replace("satzmail://message/", "").split("/")[0].trim();
+        const mailConv = state.conversations.find((c) => c.origin === "mail");
+        if (mailConv && mid) {
+          void (async () => {
+            await selectConversation(mailConv.id);
+            await openEmailMessageTab(mid, "mail");
+          })();
+          return;
+        }
+      }
+      void startDirectBrowsing(url);
+    },
+    onChangeModel: (model: LocalModelId) => {
+      state.selectedModel = model;
+      renderViewportRegion();
+      renderStatusLine();
+    },
+    onToggleWeb: () => {
+      state.webSearchEnabled = !state.webSearchEnabled;
+      renderViewportRegion();
+    },
+    onCloseCommandBar: () => {
+      state.commandBarOpen = false;
+      renderCommandBarOverlay(getStartScreenActions());
+    },
+  };
+}
+
+async function handleExecuteCommandRoute(
+  route: CommandBarRoute,
+  raw: string
+): Promise<void> {
+  state.commandBarOpen = false;
+  renderCommandBarOverlay(getStartScreenActions());
+
+  if (route.kind === "run_command") {
+    const cid = route.command_id;
+    if (cid === "new_conversation") {
+      state.activeDetail = null;
+      state.showKnowledgeView = false;
+      state.showBrainView = false;
+      state.compareMode = false;
+      renderAllRegions();
+      return;
+    }
+    if (cid === "bookmark") {
+      await handleBookmarkCurrentPage();
+      return;
+    }
+    if (cid === "compare") {
+      handleToggleCompareMode();
+      return;
+    }
+    if (cid === "lock") {
+      state.revealedPasswords = {};
+      await sidecarLockProfile();
+      state.profileStatusMessage = "profile locked. encrypted vault unloaded.";
+      const kb = await sidecarFetchKnowledge();
+      if (kb) state.knowledge = kb;
+      await refreshMailState();
+      renderAllRegions();
+      return;
+    }
+    if (cid === "brain") {
+      state.showBrainView = true;
+      state.showKnowledgeView = false;
+      const kb = await sidecarFetchKnowledge();
+      if (kb) state.knowledge = kb;
+      renderAllRegions();
+      return;
+    }
+    if (cid === "settings") {
+      state.showKnowledgeView = true;
+      state.showBrainView = false;
+      const [kb, docRoles] = await Promise.all([
+        sidecarFetchKnowledge(),
+        sidecarFetchDoctor(),
+      ]);
+      if (kb) state.knowledge = kb;
+      state.doctorRoles = docRoles;
+      await refreshMailState();
+      renderAllRegions();
+      return;
+    }
+  }
+
+  if (route.kind === "open_url" && route.url) {
+    await startDirectBrowsing(route.url);
+    return;
+  }
+
+  if (route.kind === "url_and_question" && route.url && route.question) {
+    const title = route.question.slice(0, 60);
+    const conv = await apiCreateConversation(title, "chat");
+    await apiOpenTab(conv.id, route.url, extractDomain(route.url));
+    state.activeDetail = await apiGetConversation(conv.id);
+    state.showBrainView = false;
+    state.showKnowledgeView = false;
+    state.activeTabId = "chat";
+    state.agentRailOpen = true;
+    await refreshLists();
+    renderAllRegions();
+    await handleSendChatMessage(route.question);
+    return;
+  }
+
+  if (route.kind === "search_brain") {
+    const q = (route.query ?? raw).trim();
+    state.showBrainView = true;
+    state.showKnowledgeView = false;
+    state.brainSearchQuery = q;
+    const kb = await sidecarFetchKnowledge();
+    if (kb) state.knowledge = kb;
+    state.brainSearchResults = q ? await sidecarSearchBrain(q) : null;
+    renderAllRegions();
+    return;
+  }
+
+  if (route.kind === "search_mail") {
+    const q = (route.query ?? raw).trim();
+    const mailConv =
+      state.conversations.find((c) => c.origin === "mail") ??
+      (await apiEnsureMailConversation());
+    await selectConversation(mailConv.id);
+    state.mailSearchQuery = q;
+    if (q) {
+      const sRes = await sidecarSearchMail(q);
+      state.mailSearchRows = sRes.rows ?? [];
+    } else {
+      state.mailSearchRows = null;
+    }
+    renderAllRegions();
+    return;
+  }
+
+  // Default: ask_model
+  const question = (route.question ?? raw).trim();
+  if (!question) return;
+  const title = question.slice(0, 60);
+  const conv = await apiCreateConversation(title, "chat");
+  state.activeDetail = await apiGetConversation(conv.id);
+  state.showBrainView = false;
+  state.showKnowledgeView = false;
+  state.activeTabId = "chat";
+  state.agentRailOpen = true;
+  await refreshLists();
+  renderAllRegions();
+  await handleSendChatMessage(question);
 }
 
 async function handleStartSubmission(raw: string): Promise<void> {

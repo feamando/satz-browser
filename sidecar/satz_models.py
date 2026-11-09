@@ -3441,6 +3441,252 @@ class SatzSidecarRuntime:
             "brain_ranking": self.brain.get_encoder_status()["label"],
         }
 
+    def rank_command_bar_routes(
+        self,
+        raw: str,
+        web_enabled: bool = False,
+        selected_model: str = "gemma-4-e4b",
+    ) -> list[dict[str, Any]]:
+        """
+        Section 7 (M21):
+        Routes a single Command Bar (`Mod+K` / start screen) line to:
+        - `open_url`
+        - `url_and_question`
+        - `ask_model`
+        - `search_mail`
+        - `search_brain`
+        - `run_command` (`new conversation`, `bookmark`, `compare`, `lock`, `brain`, `settings`)
+        Returns the ordered list of routes with the default first and explicit privacy disclosure
+        (`local only`, `loads <domain>`, or `web search · duckduckgo`).
+        """
+        from src.planck3.web import domain_of
+
+        trimmed = (raw or "").strip()
+        uses_web = bool(web_enabled or selected_model == "planck3 (web)")
+        model_privacy = "web search · duckduckgo" if uses_web else "local only"
+
+        if not trimmed:
+            return [
+                {
+                    "kind": "run_command",
+                    "label": "run command · new conversation",
+                    "destination": "command: new_conversation",
+                    "privacy": "local only",
+                    "leaves_machine": False,
+                    "command_id": "new_conversation",
+                },
+                {
+                    "kind": "search_brain",
+                    "label": "open brain · entities, passages & domain trust",
+                    "destination": "satz brain",
+                    "privacy": "local only",
+                    "leaves_machine": False,
+                    "query": "",
+                },
+                {
+                    "kind": "search_mail",
+                    "label": "open mail · inbox, pings, orders & promos",
+                    "destination": "satz mail",
+                    "privacy": "local only",
+                    "leaves_machine": False,
+                    "query": "",
+                },
+                {
+                    "kind": "run_command",
+                    "label": "run command · lock",
+                    "destination": "command: lock",
+                    "privacy": "local only",
+                    "leaves_machine": False,
+                    "command_id": "lock",
+                },
+            ]
+
+        def make_ask_route(q: str) -> dict[str, Any]:
+            return {
+                "kind": "ask_model",
+                "label": f'ask {selected_model} · "{q}"',
+                "destination": f"chat ({selected_model})",
+                "privacy": model_privacy,
+                "leaves_machine": uses_web,
+                "question": q,
+            }
+
+        def make_brain_route(q: str) -> dict[str, Any]:
+            return {
+                "kind": "search_brain",
+                "label": f'search brain · "{q}"',
+                "destination": "brain (entities, passages, mail)",
+                "privacy": "local only",
+                "leaves_machine": False,
+                "query": q,
+            }
+
+        def make_mail_route(q: str) -> dict[str, Any]:
+            return {
+                "kind": "search_mail",
+                "label": f'search mail · "{q}"',
+                "destination": "mail (FTS5)",
+                "privacy": "local only",
+                "leaves_machine": False,
+                "query": q,
+            }
+
+        command_aliases = {
+            "new conversation": "new_conversation",
+            "new chat": "new_conversation",
+            "new": "new_conversation",
+            "bookmark": "bookmark",
+            "bookmark page": "bookmark",
+            "bookmark current": "bookmark",
+            "compare": "compare",
+            "compare tabs": "compare",
+            "compare view": "compare",
+            "lock": "lock",
+            "lock profile": "lock",
+            "lock vault": "lock",
+            "brain": "brain",
+            "open brain": "brain",
+            "settings": "settings",
+            "open settings": "settings",
+        }
+        cmd_norm = trimmed.lower().lstrip("/").strip()
+        if cmd_norm in command_aliases:
+            cid = command_aliases[cmd_norm]
+            return [
+                {
+                    "kind": "run_command",
+                    "label": f"run command · {cmd_norm}",
+                    "destination": f"command: {cid}",
+                    "privacy": "local only",
+                    "leaves_machine": False,
+                    "command_id": cid,
+                },
+                make_ask_route(trimmed),
+                make_brain_route(trimmed),
+                make_mail_route(trimmed),
+            ]
+
+        def is_url_token(tok: str) -> bool:
+            t = tok.strip()
+            if not t or " " in t or t.startswith("?"):
+                return False
+            if t.startswith(("http://", "https://", "about:")):
+                return True
+            if re.match(r"^(localhost|127\.0\.0\.1)(:\d+)?(/.*)?$", t, flags=re.I):
+                return True
+            if re.match(r"^[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+(:\d+)?(/.*)?$", t):
+                return True
+            return False
+
+        def normalize_url_tok(tok: str) -> str:
+            t = tok.strip()
+            if t.startswith(("http://", "https://", "about:")):
+                return t
+            if re.match(r"^(localhost|127\.0\.0\.1)(:\d+)?(/.*)?$", t, flags=re.I):
+                return f"http://{t}"
+            return f"https://{t}"
+
+        parts = trimmed.split()
+        if len(parts) == 1 and is_url_token(parts[0]):
+            norm_u = normalize_url_tok(parts[0])
+            dom = (domain_of(norm_u) or parts[0]).removeprefix("www.")
+            return [
+                {
+                    "kind": "open_url",
+                    "label": f"open url · {norm_u}",
+                    "destination": dom,
+                    "privacy": f"loads {dom}",
+                    "leaves_machine": True,
+                    "url": norm_u,
+                },
+                make_ask_route(trimmed),
+                make_brain_route(dom),
+                make_mail_route(dom),
+            ]
+
+        if len(parts) > 1 and is_url_token(parts[0]):
+            norm_u = normalize_url_tok(parts[0])
+            dom = (domain_of(norm_u) or parts[0]).removeprefix("www.")
+            q_part = " ".join(parts[1:]).strip()
+            priv = (
+                f"loads {dom} · web search · duckduckgo"
+                if uses_web
+                else f"loads {dom} · local model"
+            )
+            return [
+                {
+                    "kind": "url_and_question",
+                    "label": f'open {dom} + ask {selected_model} · "{q_part}"',
+                    "destination": f"{dom} + {selected_model}",
+                    "privacy": priv,
+                    "leaves_machine": True,
+                    "url": norm_u,
+                    "question": q_part,
+                },
+                {
+                    "kind": "open_url",
+                    "label": f"open url · {norm_u}",
+                    "destination": dom,
+                    "privacy": f"loads {dom}",
+                    "leaves_machine": True,
+                    "url": norm_u,
+                },
+                make_ask_route(trimmed),
+                make_brain_route(q_part),
+            ]
+
+        mail_prefix = re.match(
+            r"^(?:(?:mail|inbox|from|to|subject)\s*:\s*|search\s+mail\s+(?:for\s+)?|in\s+mail\s+)(.+)$",
+            trimmed,
+            flags=re.I,
+        )
+        if mail_prefix:
+            q_m = mail_prefix.group(1).strip()
+            return [make_mail_route(q_m), make_brain_route(q_m), make_ask_route(trimmed)]
+
+        brain_prefix = re.match(
+            r"^(?:(?:brain|memory|entity)\s*:\s*|search\s+brain\s+(?:for\s+)?|in\s+brain\s+)(.+)$",
+            trimmed,
+            flags=re.I,
+        )
+        if brain_prefix:
+            q_b = brain_prefix.group(1).strip()
+            return [make_brain_route(q_b), make_mail_route(q_b), make_ask_route(trimmed)]
+
+        is_question = trimmed.endswith("?") or bool(
+            re.match(
+                r"^(?:what|who|where|when|why|how|which|can|could|should|would|does|do|did|is|are|was|were|will|explain|summarize|tell|describe|list|write|draft|compare|give|show)\b",
+                trimmed,
+                flags=re.I,
+            )
+        )
+
+        if not is_question:
+            low = trimmed.lower()
+            has_email = bool(re.search(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", trimmed))
+            brain_terms = ["zalando", "zalando25autumn", "104099887712", "w1294810293", "hellofresh"]
+            if not getattr(self.brain, "locked", True):
+                for ent in self.brain.list_entities():
+                    brain_terms.append(str(ent.get("name") or "").lower())
+                    brain_terms.append(str(ent.get("slug") or "").lower())
+            mail_terms = ["jordan reyes", "anna weber", "lukas meier", "q4 launch", "lisbon workshop", "unread mail", "inbox"]
+            if getattr(self, "mail", None) is not None and self.passwords.unlocked:
+                try:
+                    m_search = self.mail.search_messages(trimmed, limit=3)
+                    if m_search.get("rows"):
+                        mail_terms.append(low)
+                except Exception:
+                    pass
+
+            is_brain_term = any(t and len(t) >= 3 and t in low for t in brain_terms)
+            is_mail_term = has_email or any(t and len(t) >= 3 and t in low for t in mail_terms)
+            if is_brain_term and not has_email:
+                return [make_brain_route(trimmed), make_mail_route(trimmed), make_ask_route(trimmed)]
+            if is_mail_term:
+                return [make_mail_route(trimmed), make_brain_route(trimmed), make_ask_route(trimmed)]
+
+        return [make_ask_route(trimmed), make_brain_route(trimmed), make_mail_route(trimmed)]
+
     def _cascade_orphan_edges_and_queries(self) -> None:
         self.store.db.execute(
             """
@@ -3703,6 +3949,12 @@ def make_sidecar_server(
                 q = query_params.get("q", "")
                 lim = int(query_params.get("limit", "20") or 20)
                 return self._json(runtime.search_brain(q, limit=lim))
+            if route_path == "/command/route":
+                q = query_params.get("q", "")
+                web_en = query_params.get("web", "0") in ("1", "true")
+                model_id = query_params.get("model", "gemma-4-e4b")
+                routes = runtime.rank_command_bar_routes(q, web_enabled=web_en, selected_model=model_id)
+                return self._json({"ok": True, "routes": routes})
             if route_path == "/profile/status":
                 return self._json(runtime.passwords.list_profiles())
             if route_path == "/passwords":

@@ -424,3 +424,31 @@ export interface KnowledgeSummary {
     message_id?: string;
   }>;
 }
+
+export type CommandRouteKind =
+  | "open_url"
+  | "url_and_question"
+  | "ask_model"
+  | "search_mail"
+  | "search_brain"
+  | "run_command";
+
+export type CommandBarActionId =
+  | "new_conversation"
+  | "bookmark"
+  | "compare"
+  | "lock"
+  | "brain"
+  | "settings";
+
+export interface CommandBarRoute {
+  kind: CommandRouteKind;
+  label: string;
+  destination: string;
+  privacy: string;
+  leaves_machine: boolean;
+  url?: string;
+  question?: string;
+  query?: string;
+  command_id?: CommandBarActionId;
+}

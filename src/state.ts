@@ -4,6 +4,8 @@ import type {
   BrainProposalItem,
   BrainSearchResponse,
   BrowserTab,
+  CommandBarActionId,
+  CommandBarRoute,
   Conversation,
   ConversationDetail,
   DigestEntry,
@@ -35,6 +37,9 @@ export interface AppState {
   showArchived: boolean;
   showKnowledgeView: boolean;
   showBrainView: boolean;
+  commandBarOpen: boolean;
+  commandBarInput: string;
+  commandBarSelectedIdx: number;
   brainSearchQuery: string;
   brainSearchResults: BrainSearchResponse | null;
   highlightedBrainSlug: string | null;
@@ -135,6 +140,9 @@ export const state: AppState = {
   showArchived: false,
   showKnowledgeView: false,
   showBrainView: false,
+  commandBarOpen: false,
+  commandBarInput: "",
+  commandBarSelectedIdx: 0,
   brainSearchQuery: "",
   brainSearchResults: null,
   highlightedBrainSlug: null,
@@ -301,6 +309,254 @@ export function classifyStartInput(raw: string): ParsedStartInput {
     url: null,
     question: trimmed,
   };
+}
+
+const COMMAND_ALIASES: Record<string, CommandBarActionId> = {
+  "new conversation": "new_conversation",
+  "new chat": "new_conversation",
+  new: "new_conversation",
+  bookmark: "bookmark",
+  "bookmark page": "bookmark",
+  "bookmark current": "bookmark",
+  compare: "compare",
+  "compare tabs": "compare",
+  "compare view": "compare",
+  lock: "lock",
+  "lock profile": "lock",
+  "lock vault": "lock",
+  brain: "brain",
+  "open brain": "brain",
+  settings: "settings",
+  "open settings": "settings",
+};
+
+const QUESTION_LEAD_RE =
+  /^(?:what|who|where|when|why|how|which|can|could|should|would|does|do|did|is|are|was|were|will|explain|summarize|tell|describe|list|write|draft|compare|give|show)\b/i;
+
+export function rankCommandBarRoutes(
+  raw: string,
+  opts?: {
+    webSearchEnabled?: boolean;
+    selectedModel?: LocalModelId;
+    brainTerms?: string[];
+    mailTerms?: string[];
+  }
+): CommandBarRoute[] {
+  const trimmed = raw.trim();
+  const webEnabled = Boolean(opts?.webSearchEnabled ?? state.webSearchEnabled);
+  const model = opts?.selectedModel ?? state.selectedModel;
+  const usesWeb = webEnabled || model === "planck3 (web)";
+  const modelPrivacy = usesWeb ? "web search · duckduckgo" : "local only";
+
+  if (!trimmed) {
+    return [
+      {
+        kind: "run_command",
+        label: "run command · new conversation",
+        destination: "command: new_conversation",
+        privacy: "local only",
+        leaves_machine: false,
+        command_id: "new_conversation",
+      },
+      {
+        kind: "search_brain",
+        label: "open brain · entities, passages & domain trust",
+        destination: "satz brain",
+        privacy: "local only",
+        leaves_machine: false,
+        query: "",
+      },
+      {
+        kind: "search_mail",
+        label: "open mail · inbox, pings, orders & promos",
+        destination: "satz mail",
+        privacy: "local only",
+        leaves_machine: false,
+        query: "",
+      },
+      {
+        kind: "run_command",
+        label: "run command · lock",
+        destination: "command: lock",
+        privacy: "local only",
+        leaves_machine: false,
+        command_id: "lock",
+      },
+    ];
+  }
+
+  const makeAskRoute = (q: string): CommandBarRoute => ({
+    kind: "ask_model",
+    label: `ask ${model} · "${q}"`,
+    destination: `chat (${model})`,
+    privacy: modelPrivacy,
+    leaves_machine: usesWeb,
+    question: q,
+  });
+
+  const makeBrainRoute = (q: string): CommandBarRoute => ({
+    kind: "search_brain",
+    label: `search brain · "${q}"`,
+    destination: "brain (entities, passages, mail)",
+    privacy: "local only",
+    leaves_machine: false,
+    query: q,
+  });
+
+  const makeMailRoute = (q: string): CommandBarRoute => ({
+    kind: "search_mail",
+    label: `search mail · "${q}"`,
+    destination: "mail (FTS5)",
+    privacy: "local only",
+    leaves_machine: false,
+    query: q,
+  });
+
+  // 1. Exact command match
+  const cmdNorm = trimmed.toLowerCase().replace(/^\//, "").trim();
+  const matchedCmd = COMMAND_ALIASES[cmdNorm];
+  if (matchedCmd) {
+    return [
+      {
+        kind: "run_command",
+        label: `run command · ${cmdNorm}`,
+        destination: `command: ${matchedCmd}`,
+        privacy: "local only",
+        leaves_machine: false,
+        command_id: matchedCmd,
+      },
+      makeAskRoute(trimmed),
+      makeBrainRoute(trimmed),
+      makeMailRoute(trimmed),
+    ];
+  }
+
+  // 2. Reuse classifyStartInput for URL and URL + question
+  const parsed = classifyStartInput(trimmed);
+  if (parsed.kind === "url_only" && parsed.url) {
+    const dom = extractDomain(parsed.url);
+    return [
+      {
+        kind: "open_url",
+        label: `open url · ${parsed.url}`,
+        destination: dom,
+        privacy: `loads ${dom}`,
+        leaves_machine: true,
+        url: parsed.url,
+      },
+      makeAskRoute(trimmed),
+      makeBrainRoute(dom),
+      makeMailRoute(dom),
+    ];
+  }
+
+  if (parsed.kind === "url_and_text" && parsed.url && parsed.question) {
+    const dom = extractDomain(parsed.url);
+    const priv = usesWeb
+      ? `loads ${dom} · web search · duckduckgo`
+      : `loads ${dom} · local model`;
+    return [
+      {
+        kind: "url_and_question",
+        label: `open ${dom} + ask ${model} · "${parsed.question}"`,
+        destination: `${dom} + ${model}`,
+        privacy: priv,
+        leaves_machine: true,
+        url: parsed.url,
+        question: parsed.question,
+      },
+      {
+        kind: "open_url",
+        label: `open url · ${parsed.url}`,
+        destination: dom,
+        privacy: `loads ${dom}`,
+        leaves_machine: true,
+        url: parsed.url,
+      },
+      makeAskRoute(trimmed),
+      makeBrainRoute(parsed.question),
+    ];
+  }
+
+  // 3. Explicit mail prefix (`mail: ...`, `from: ...`, `inbox: ...`, `search mail ...`)
+  const mailPrefixMatch = trimmed.match(
+    /^(?:(?:mail|inbox|from|to|subject)\s*:\s*|search\s+mail\s+(?:for\s+)?|in\s+mail\s+)(.+)$/i
+  );
+  if (mailPrefixMatch) {
+    const q = mailPrefixMatch[1].trim();
+    return [makeMailRoute(q), makeBrainRoute(q), makeAskRoute(trimmed)];
+  }
+
+  // 4. Explicit brain prefix (`brain: ...`, `memory: ...`, `entity: ...`, `search brain ...`)
+  const brainPrefixMatch = trimmed.match(
+    /^(?:(?:brain|memory|entity)\s*:\s*|search\s+brain\s+(?:for\s+)?|in\s+brain\s+)(.+)$/i
+  );
+  if (brainPrefixMatch) {
+    const q = brainPrefixMatch[1].trim();
+    return [makeBrainRoute(q), makeMailRoute(q), makeAskRoute(trimmed)];
+  }
+
+  const isQuestion =
+    trimmed.endsWith("?") || QUESTION_LEAD_RE.test(trimmed);
+
+  // 5. Non-question mail or brain terms
+  if (!isQuestion) {
+    const low = trimmed.toLowerCase();
+    const hasEmailAddr = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/.test(
+      trimmed
+    );
+    const dynamicMailTerms = (opts?.mailTerms ?? []).map((t) => t.toLowerCase());
+    for (const r of state.mailInboxRows) {
+      if (r.from_name) dynamicMailTerms.push(String(r.from_name).toLowerCase());
+      if (r.from_addr) dynamicMailTerms.push(String(r.from_addr).toLowerCase());
+      if (r.subject) dynamicMailTerms.push(String(r.subject).toLowerCase());
+    }
+    const staticMailHints = [
+      "jordan reyes",
+      "anna weber",
+      "lukas meier",
+      "q4 launch",
+      "lisbon workshop",
+      "unread mail",
+      "inbox",
+    ];
+    const isMailTerm =
+      hasEmailAddr ||
+      staticMailHints.some((h) => low.includes(h)) ||
+      dynamicMailTerms.some((t) => t.length >= 3 && low.includes(t));
+
+    const dynamicBrainTerms = (opts?.brainTerms ?? []).map((t) =>
+      t.toLowerCase()
+    );
+    for (const ent of state.knowledge.brain?.entities ?? []) {
+      dynamicBrainTerms.push(ent.name.toLowerCase());
+      dynamicBrainTerms.push(ent.slug.toLowerCase());
+    }
+    const staticBrainHints = [
+      "zalando",
+      "zalando25autumn",
+      "104099887712",
+      "w1294810293",
+      "hellofresh",
+    ];
+    const isBrainTerm =
+      staticBrainHints.some((h) => low.includes(h)) ||
+      dynamicBrainTerms.some((t) => t.length >= 3 && low.includes(t));
+
+    if (isBrainTerm && !hasEmailAddr) {
+      return [makeBrainRoute(trimmed), makeMailRoute(trimmed), makeAskRoute(trimmed)];
+    }
+    if (isMailTerm) {
+      return [makeMailRoute(trimmed), makeBrainRoute(trimmed), makeAskRoute(trimmed)];
+    }
+  }
+
+  // 6. Default: Question / prompt to model
+  return [
+    makeAskRoute(trimmed),
+    makeBrainRoute(trimmed),
+    makeMailRoute(trimmed),
+  ];
 }
 
 export function formatRelativeTime(isoOrEpoch: string): string {

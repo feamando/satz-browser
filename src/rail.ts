@@ -19,6 +19,7 @@ export interface RailActions {
   onRemoveBookmark: (id: string) => void;
   onOpenKnowledgeView: () => void;
   onOpenBrainView?: () => void;
+  onOpenCommandBar?: () => void;
 }
 
 export function renderRail(actions: RailActions): void {
@@ -45,19 +46,10 @@ export function renderRail(actions: RailActions): void {
     </div>
 
     <div class="rail-controls">
-      <div class="rail-filter-row">
-        <span class="muted">&gt;</span>
-        <input
-          id="rail-filter-input"
-          class="rail-filter-input"
-          type="text"
-          spellcheck="false"
-          autocorrect="off"
-          autocapitalize="off"
-          placeholder="filter conversations_"
-          value="${escapeHtml(state.railFilter)}"
-        />
-      </div>
+      <button id="rail-open-command-bar-btn" class="rail-btn-full">
+        <span>[&gt; command bar]</span>
+        <span class="muted">[${MOD_LABEL}+k]</span>
+      </button>
       <button id="rail-new-conv-btn" class="rail-btn-full">
         <span>[+ new conversation]</span>
         <span class="muted">[${MOD_LABEL}+n]</span>
@@ -247,6 +239,12 @@ function bindRailEvents(container: HTMLElement, actions: RailActions): void {
       }
     });
   }
+
+  container
+    .querySelector("#rail-open-command-bar-btn")
+    ?.addEventListener("click", () => {
+      actions.onOpenCommandBar?.();
+    });
 
   container
     .querySelector("#rail-new-conv-btn")

@@ -166,3 +166,30 @@ Owner: Nikita Gorshkov · Date: 2026-11-09 · Spec: `docs/PLAN_v0.5.md` · Platf
 - `cargo test --manifest-path src-tauri/Cargo.toml`: **PASS** (`12/12` unit tests passing)
 - `..\sgs\.venv\Scripts\python.exe -m pytest sidecar -q`: **PASS** (`25/25` tests passing, including `test_m20.py`: domain trust 30% hard cap + conflict flag + reset, `"this week"` timeline with read pages + received mail, unified Brain search across entities/passages/mail, cascading `[forget]`, and no-tab `"when does my Zalando order arrive?"` citing `[B1] Zalando Order 104099887712` with `2026-11-12` and `citations_flagged == 0`)
 - Smoke script artifacts saved to `docs/smoke/v0.5/m20/windows/`.
+
+---
+
+## 7. Milestone M21: One Command Bar
+
+### 7.1 What Changed
+- **Unified `Mod+K` Command Bar & Start Screen (`src/start.ts`, `src/state.ts`, `src/rail.ts`, `src/main.ts`, `sidecar/satz_models.py`):**
+  - Replaced the separate rail filter input with `[> command bar] [Mod+K]` (`#rail-open-command-bar-btn`) and unified the Start screen input (`#start-command-bar-box`) and the `Mod+K` modal overlay (`#command-bar-overlay`) into a single shared Command Bar component.
+  - Added `rankCommandBarRoutes` (`src/state.ts`) and `SatzSidecarRuntime.rank_command_bar_routes` (`sidecar/satz_models.py`, exposed on `GET /command/route`), reusing `classifyStartInput`.
+  - Before `Enter`, the Command Bar lists the ranked routes with `[default · enter]` first, supports `ArrowUp`/`ArrowDown` and click selection, and displays explicit privacy disclosure on every route (`[local only]`, `[loads <domain>]`, `[loads <domain> · local model]`, or `[web search · duckduckgo]`).
+
+### 7.2 Six Example Command Bar Lines (`docs/PLAN_v0.5.md` §7 Check)
+| # | Input Line | Default Route (`routes[0].kind`) | Destination | Privacy Disclosure |
+| :--- | :--- | :--- | :--- | :--- |
+| 1 | `dw.com` | `open_url` (`https://dw.com`) | `dw.com` | `loads dw.com` |
+| 2 | `dw.com what are the top stories today?` | `url_and_question` (`https://dw.com` + `what are the top stories today?`) | `dw.com + gemma-4-e4b` | `loads dw.com · local model` |
+| 3 | `what is the capital of Portugal?` | `ask_model` | `chat (gemma-4-e4b)` | `local only` (or `web search · duckduckgo` when `web: on`) |
+| 4 | `mail: Jordan Reyes` (or `Jordan Reyes`) | `search_mail` (`Jordan Reyes`) | `mail (FTS5)` | `local only` |
+| 5 | `brain: zalando` (or `zalando`) | `search_brain` (`zalando`) | `brain (entities, passages, mail)` | `local only` |
+| 6 | `lock` (`new conversation`, `bookmark`, `compare`) | `run_command` (`lock`) | `command: lock` | `local only` |
+
+### 7.3 M21 Verification & Measurements (Windows 11 RTX 4090 Reference Box)
+- `npm run build`: **PASS** (`dist/` built in `373 ms`, 0 TypeScript errors)
+- `cargo check --manifest-path src-tauri/Cargo.toml`: **PASS**
+- `cargo test --manifest-path src-tauri/Cargo.toml`: **PASS** (`12/12` unit tests passing)
+- `..\sgs\.venv\Scripts\python.exe -m pytest sidecar -q`: **PASS** (`26/26` tests passing, including `test_m21.py` verifying all 6 example lines and privacy disclosures)
+- Smoke script artifacts saved to `docs/smoke/v0.5/m21/windows/`.
