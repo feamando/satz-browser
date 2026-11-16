@@ -5877,9 +5877,10 @@ def make_sidecar_server(
         allow_reuse_address = sys.platform != "win32"
 
         def server_bind(self):
-            if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            import socket as _sock
+            if sys.platform == "win32" and hasattr(_sock, "SO_EXCLUSIVEADDRUSE"):
                 try:
-                    self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                    self.socket.setsockopt(_sock.SOL_SOCKET, _sock.SO_EXCLUSIVEADDRUSE, 1)
                 except Exception:
                     pass
             super().server_bind()
