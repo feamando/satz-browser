@@ -952,3 +952,53 @@ export function resolveLiveNavigationTarget(
 
   return null;
 }
+
+export function getAvailableModelsForPicker(): Array<{
+  id: LocalModelId;
+  label: string;
+}> {
+  const base: Array<{ id: LocalModelId; label: string }> = [
+    { id: "gemma-4-e4b", label: "gemma-4-e4b (local)" },
+    { id: "planck3 (web)", label: "planck3 (web · local)" },
+    { id: "hertz (reader)", label: "hertz (reader · local)" },
+    { id: "planck (reader)", label: "planck (reader · local)" },
+  ];
+  const seen = new Set<string>(base.map((b) => b.id));
+  const cfg = state.modelConfig ?? state.sidecar.model_config ?? null;
+  for (const prov of cfg?.cloud_providers ?? []) {
+    if (!prov.configured) continue;
+    for (const m of prov.models ?? []) {
+      if (m.id && !seen.has(m.id)) {
+        seen.add(m.id);
+        base.push({
+          id: m.id,
+          label: `${m.id} - ${m.label}`,
+        });
+      }
+    }
+  }
+  if (state.selectedModel && !seen.has(state.selectedModel)) {
+    base.push({ id: state.selectedModel, label: state.selectedModel });
+  }
+  return base;
+}
+
+export function getModelPrivacySummary(modelId: string): string {
+  const m = (modelId || "").toLowerCase();
+  if (m.startsWith("gemini:") || m.startsWith("gemini-")) {
+    return "[cloud · sends context to google gemini api]";
+  }
+  if (m.startsWith("anthropic:") || m.startsWith("claude-")) {
+    return "[cloud · sends context to anthropic api]";
+  }
+  if (m.startsWith("openai:") || m.startsWith("gpt-") || m.startsWith("o1") || m.startsWith("o3") || m.startsWith("o4")) {
+    return "[cloud · sends context to openai api]";
+  }
+  if (m.startsWith("mistral:")) {
+    return "[cloud · sends context to mistral api]";
+  }
+  if (m.includes("cloud")) {
+    return "[cloud · sends context to external api]";
+  }
+  return "[local only]";
+}

@@ -1162,40 +1162,251 @@ class SatzSidecarRuntime:
             "model_config": self.get_model_management_config(),
         }
 
-    # ── Cloud Model & Role Management (Section 7 & 8) ────────────────────
-    def _resolve_gemini_api_key(self) -> tuple[str, str]:
+    # ── Cloud Model Discovery & Role Management (Gemini, Anthropic, OpenAI, Mistral) ──
+    CLOUD_PROVIDERS_SPEC: list[dict[str, str]] = [
+        {
+            "id": "gemini",
+            "label": "Google Gemini API",
+            "env_key": "GEMINI_API_KEY",
+            "alt_keys": "GOOGLE_API_KEY,GEMINI_TOKEN,GEMINI_PASSWORD",
+            "host": "generativelanguage.googleapis.com",
+            "placeholder": "AIzaSy...",
+        },
+        {
+            "id": "anthropic",
+            "label": "Anthropic API (Claude)",
+            "env_key": "ANTHROPIC_API_KEY",
+            "alt_keys": "ANTHROPIC_TOKEN,CLAUDE_API_KEY",
+            "host": "api.anthropic.com",
+            "placeholder": "sk-ant-...",
+        },
+        {
+            "id": "openai",
+            "label": "OpenAI API (GPT / o-series)",
+            "env_key": "OPENAI_API_KEY",
+            "alt_keys": "OPENAI_TOKEN",
+            "host": "api.openai.com",
+            "placeholder": "sk-proj-...",
+        },
+        {
+            "id": "mistral",
+            "label": "Mistral AI API",
+            "env_key": "MISTRAL_API_KEY",
+            "alt_keys": "MISTRAL_TOKEN",
+            "host": "api.mistral.ai",
+            "placeholder": "mistral-...",
+        },
+    ]
+
+    def _resolve_provider_api_key(self, provider_id: str) -> tuple[str, str]:
+        spec = next((p for p in self.CLOUD_PROVIDERS_SPEC if p["id"] == provider_id), None)
+        if not spec:
+            return "", "none"
+        keys_to_check = [spec["env_key"], *[k.strip() for k in spec.get("alt_keys", "").split(",") if k.strip()]]
         if getattr(self, "passwords", None) is not None and self.passwords.unlocked:
             env_map = self.passwords.get_unlocked_credentials_map()
-            for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GEMINI_TOKEN", "GEMINI_PASSWORD"):
+            for k in keys_to_check:
                 v = (env_map.get(k) or "").strip()
                 if v:
                     return v, "vault"
-        env_v = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
-        if env_v:
-            return env_v, "env"
+        for k in keys_to_check:
+            env_v = (os.environ.get(k) or "").strip()
+            if env_v:
+                return env_v, "env"
         return "", "none"
 
-    def _cloud_model_health_entries(self) -> list[dict[str, Any]]:
-        key, src = self._resolve_gemini_api_key()
-        state_val = "ready" if key else "missing"
-        detail_val = f"cloud · key in {src}" if key else "add GEMINI_API_KEY in settings"
-        return [
-            {
-                "id": "gemini-2.5-flash (cloud)",
-                "state": state_val,
-                "device": "cloud",
-                "detail": detail_val,
-            },
-            {
-                "id": "gemini-2.5-pro (cloud)",
-                "state": state_val,
-                "device": "cloud",
-                "detail": detail_val,
-            },
-        ]
+    def _discover_provider_models(self, provider_id: str, api_key: str) -> list[dict[str, str]]:
+        """
+        Pulls available chat/text-generation models directly from the provider's live `/models` API
+        using the configured API key.
+        """
+        if not api_key:
+            return []
 
-    def get_model_management_config(self) -> dict[str, Any]:
-        key, key_src = self._resolve_gemini_api_key()
+        models_out: list[dict[str, str]] = []
+        if provider_id == "gemini":
+            url = f"https://generativelanguage.googleapis.com/v1beta/models?pageSize=100&key={urllib.parse.quote(api_key)}"
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=10.0) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            for m in data.get("models") or []:
+                methods = m.get("supportedGenerationMethods") or []
+                if "generateContent" not in methods:
+                    continue
+                raw_name = str(m.get("name") or "")
+                slug = raw_name.removeprefix("models/").strip()
+                low = slug.lower()
+                if any(skip in low for skip in ("embedding", "imagen", "veo", "aqa", "tts", "whisper", "learnlm")):
+                    continue
+                disp = str(m.get("displayName") or slug).strip()
+                models_out.append(
+                    {
+                        "id": f"gemini:{slug} (cloud)",
+                        "slug": slug,
+                        "label": f"{disp} ({slug})",
+                        "provider": "gemini",
+                    }
+                )
+            models_out.sort(key=lambda x: (0 if "2.5" in x["slug"] or "2.0" in x["slug"] else 1, x["slug"]))
+            return models_out
+
+        if provider_id == "anthropic":
+            url = "https://api.anthropic.com/v1/models?limit=100"
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+                method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=10.0) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            for m in data.get("data") or []:
+                slug = str(m.get("id") or "").strip()
+                if not slug:
+                    continue
+                disp = str(m.get("display_name") or slug).strip()
+                models_out.append(
+                    {
+                        "id": f"anthropic:{slug} (cloud)",
+                        "slug": slug,
+                        "label": f"{disp} ({slug})",
+                        "provider": "anthropic",
+                    }
+                )
+            return models_out
+
+        if provider_id == "openai":
+            url = "https://api.openai.com/v1/models"
+            req = urllib.request.Request(
+                url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=10.0) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            for m in data.get("data") or []:
+                slug = str(m.get("id") or "").strip()
+                low = slug.lower()
+                if not low.startswith(("gpt-", "o1", "o3", "o4", "chatgpt-")):
+                    continue
+                if any(
+                    skip in low
+                    for skip in (
+                        "embedding",
+                        "tts",
+                        "whisper",
+                        "dall-e",
+                        "moderation",
+                        "realtime",
+                        "audio",
+                        "transcribe",
+                        "search-api",
+                        "instruct",
+                    )
+                ):
+                    continue
+                models_out.append(
+                    {
+                        "id": f"openai:{slug} (cloud)",
+                        "slug": slug,
+                        "label": f"OpenAI {slug}",
+                        "provider": "openai",
+                    }
+                )
+            models_out.sort(key=lambda x: x["slug"], reverse=True)
+            return models_out
+
+        if provider_id == "mistral":
+            url = "https://api.mistral.ai/v1/models"
+            req = urllib.request.Request(
+                url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=10.0) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            seen_slugs: set[str] = set()
+            for m in data.get("data") or []:
+                slug = str(m.get("id") or "").strip()
+                low = slug.lower()
+                if not slug or slug in seen_slugs:
+                    continue
+                caps = m.get("capabilities") or {}
+                if isinstance(caps, dict) and "completion_chat" in caps and not caps.get("completion_chat"):
+                    continue
+                if any(skip in low for skip in ("embed", "moderation", "ocr")):
+                    continue
+                seen_slugs.add(slug)
+                models_out.append(
+                    {
+                        "id": f"mistral:{slug} (cloud)",
+                        "slug": slug,
+                        "label": f"Mistral {slug}",
+                        "provider": "mistral",
+                    }
+                )
+            models_out.sort(key=lambda x: (0 if "large" in x["slug"] or "medium" in x["slug"] or "small" in x["slug"] else 1, x["slug"]))
+            return models_out
+
+        return []
+
+    def _get_cached_or_discover_models(
+        self,
+        provider_id: str,
+        api_key: str,
+        force_refresh: bool = False,
+    ) -> list[dict[str, str]]:
+        if not api_key:
+            return []
+        meta_key = f"cloud_models_{provider_id}"
+        if not force_refresh:
+            with self.store_lock:
+                row = self.store.db.execute(
+                    "SELECT value FROM satz_meta WHERE key = ?",
+                    (meta_key,),
+                ).fetchone()
+                if row and row["value"]:
+                    try:
+                        parsed = json.loads(row["value"])
+                        if isinstance(parsed, list) and len(parsed) > 0:
+                            return parsed
+                    except Exception:
+                        pass
+        try:
+            discovered = self._discover_provider_models(provider_id, api_key)
+            with self.store_lock:
+                self.store.db.execute(
+                    "INSERT OR REPLACE INTO satz_meta (key, value) VALUES (?, ?)",
+                    (meta_key, json.dumps(discovered, ensure_ascii=False)),
+                )
+                self.store.db.commit()
+            return discovered
+        except Exception as exc:
+            self.record_error(f"discover_{provider_id}", exc)
+            return []
+
+    def _cloud_model_health_entries(self) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        for spec in self.CLOUD_PROVIDERS_SPEC:
+            pid = spec["id"]
+            key, src = self._resolve_provider_api_key(pid)
+            if not key:
+                continue
+            models = self._get_cached_or_discover_models(pid, key, force_refresh=False)
+            for m in models:
+                entries.append(
+                    {
+                        "id": m["id"],
+                        "state": "ready",
+                        "device": "cloud",
+                        "detail": f"{pid} · key in {src}",
+                    }
+                )
+        return entries
+
+    def get_model_management_config(self, refresh_provider: str | None = None) -> dict[str, Any]:
         with self.store_lock:
             rows = self.store.db.execute(
                 "SELECT key, value FROM satz_meta WHERE key LIKE 'model_role_%'"
@@ -1206,6 +1417,31 @@ class SatzSidecarRuntime:
         role_web = meta.get("model_role_web_answer") or "planck3 (web)"
         role_reader = meta.get("model_role_reader") or "hertz (reader)"
 
+        providers_out: list[dict[str, Any]] = []
+        for spec in self.CLOUD_PROVIDERS_SPEC:
+            pid = spec["id"]
+            key, key_src = self._resolve_provider_api_key(pid)
+            force_ref = bool(refresh_provider and refresh_provider in (pid, "all"))
+            models = self._get_cached_or_discover_models(pid, key, force_refresh=force_ref) if key else []
+            providers_out.append(
+                {
+                    "id": pid,
+                    "label": spec["label"],
+                    "env_key": spec["env_key"],
+                    "host": spec["host"],
+                    "placeholder": spec["placeholder"],
+                    "configured": bool(key),
+                    "key_source": key_src,
+                    "masked_key": (f"{key[:4]}...{key[-4:]}" if len(key) >= 10 else ("***" if key else "")),
+                    "models": models,
+                    "privacy_disclosure": (
+                        f"Opt-in cloud provider: only active when a ({pid}:...) model is selected. "
+                        f"Models are pulled live from {spec['host']}. Sends prompt + checked source passages over HTTPS; "
+                        "vault secrets and raw mail databases never leave your machine."
+                    ),
+                }
+            )
+
         return {
             "ok": True,
             "roles": {
@@ -1215,53 +1451,44 @@ class SatzSidecarRuntime:
                 "mail_classifier": "local heuristic + distilbert + gemma",
                 "brain_encoder": "planck13 (local)",
             },
-            "cloud_providers": [
-                {
-                    "id": "gemini",
-                    "label": "Google Gemini API",
-                    "configured": bool(key),
-                    "key_source": key_src,
-                    "masked_key": (f"{key[:4]}...{key[-4:]}" if len(key) >= 10 else ("***" if key else "")),
-                    "models": [
-                        {
-                            "id": "gemini-2.5-flash (cloud)",
-                            "slug": "gemini-2.5-flash",
-                            "label": "Gemini 2.5 Flash (fast daily synthesis & multi-tab reading)",
-                        },
-                        {
-                            "id": "gemini-2.5-pro (cloud)",
-                            "slug": "gemini-2.5-pro",
-                            "label": "Gemini 2.5 Pro (deep reasoning & complex comparison)",
-                        },
-                    ],
-                    "privacy_disclosure": (
-                        "Opt-in cloud provider: only active when a (cloud) model is selected. "
-                        "Sends prompt + checked source passages to generativelanguage.googleapis.com over HTTPS. "
-                        "Vault secrets and raw mail databases never leave your machine."
-                    ),
-                }
-            ],
+            "cloud_providers": providers_out,
         }
 
     def update_model_management_config(self, data: dict[str, Any]) -> dict[str, Any]:
-        api_key = str(data.get("gemini_api_key") or "").strip()
-        clear_key = bool(data.get("clear_gemini_key", False))
-        test_only = bool(data.get("test_gemini", False))
+        provider_id = str(data.get("provider_id") or "").strip().lower()
+        if not provider_id and (data.get("gemini_api_key") or data.get("test_gemini") or data.get("clear_gemini_key")):
+            provider_id = "gemini"
 
-        if clear_key and self.passwords.unlocked:
-            try:
-                self.passwords.delete_service_credential("GEMINI")
-            except Exception:
-                pass
-            cur = self.passwords.get_unlocked_credentials_map()
-            cur.pop("GEMINI_API_KEY", None)
-            raw_lines = [f"{k}={v}" for k, v in cur.items()]
-            self.passwords.save_raw_env("\n".join(raw_lines))
+        api_key = str(data.get("api_key") or data.get("gemini_api_key") or "").strip()
+        clear_key = bool(data.get("clear_key") or data.get("clear_gemini_key") or False)
+        refresh_only = bool(data.get("refresh_models") or data.get("test_gemini") or False)
 
-        if api_key and not test_only:
+        spec = next((p for p in self.CLOUD_PROVIDERS_SPEC if p["id"] == provider_id), None)
+
+        if spec and clear_key:
             if not self.passwords.unlocked:
-                return {"ok": False, "error": "Unlock your profile with your 6-digit PIN first to store GEMINI_API_KEY in vault.enc."}
-            self.passwords.save_raw_env(f"GEMINI_API_KEY={api_key}")
+                return {"ok": False, "error": "Unlock your profile with your 6-digit PIN first."}
+            cur = self.passwords.get_unlocked_credentials_map()
+            cur.pop(spec["env_key"], None)
+            for alt_k in spec.get("alt_keys", "").split(","):
+                if alt_k.strip():
+                    cur.pop(alt_k.strip(), None)
+            self.passwords._unlocked_env_cache = cur
+            self.passwords._persist_active_vault(cur)
+            with self.store_lock:
+                self.store.db.execute(
+                    "DELETE FROM satz_meta WHERE key = ?",
+                    (f"cloud_models_{provider_id}",),
+                )
+                self.store.db.commit()
+
+        if spec and api_key and not refresh_only:
+            if not self.passwords.unlocked:
+                return {
+                    "ok": False,
+                    "error": f"Unlock your profile with your 6-digit PIN first to store {spec['env_key']} in vault.enc.",
+                }
+            self.passwords.save_raw_env(f"{spec['env_key']}={api_key}")
 
         with self.store_lock:
             for role_key, param_name in (
@@ -1277,73 +1504,168 @@ class SatzSidecarRuntime:
             self.store.db.commit()
 
         test_result: dict[str, Any] = {}
-        if test_only or data.get("verify_key"):
-            eff_key = api_key or self._resolve_gemini_api_key()[0]
+        if spec and (refresh_only or data.get("verify_key") or api_key):
+            eff_key = api_key or self._resolve_provider_api_key(provider_id)[0]
             if not eff_key:
-                return {"ok": False, "error": "No Gemini API key provided or stored in vault."}
+                return {"ok": False, "error": f"No {spec['label']} key provided or stored in vault."}
             try:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash?key={urllib.parse.quote(eff_key)}"
-                req = urllib.request.Request(url, method="GET")
-                with urllib.request.urlopen(req, timeout=8.0) as resp:
-                    info = json.loads(resp.read().decode("utf-8", errors="replace"))
-                    test_result = {
-                        "test_ok": True,
-                        "test_message": f"connected to {info.get('displayName') or 'Gemini 2.5 Flash'} [ok]",
-                    }
+                discovered = self._discover_provider_models(provider_id, eff_key)
+                with self.store_lock:
+                    self.store.db.execute(
+                        "INSERT OR REPLACE INTO satz_meta (key, value) VALUES (?, ?)",
+                        (f"cloud_models_{provider_id}", json.dumps(discovered, ensure_ascii=False)),
+                    )
+                    self.store.db.commit()
+                test_result = {
+                    "test_ok": True,
+                    "test_message": f"{spec['label']}: connected and pulled {len(discovered)} available model(s) from {spec['host']} [ok]",
+                }
             except Exception as exc:
-                return {"ok": False, "error": f"Gemini connection check failed: {exc}"}
+                return {"ok": False, "error": f"{spec['label']} model discovery failed: {exc}"}
 
         return {
             **self.get_model_management_config(),
             **test_result,
         }
 
-    def _generate_with_gemini_cloud(
+    @staticmethod
+    def _parse_cloud_model_id(model_id: str) -> tuple[str, str] | None:
+        raw = (model_id or "").strip()
+        clean = re.sub(r"\s*\(cloud\)\s*$", "", raw, flags=re.I).strip()
+        if ":" in clean:
+            prov, slug = clean.split(":", 1)
+            prov_l = prov.strip().lower()
+            if prov_l in ("gemini", "anthropic", "openai", "mistral"):
+                return prov_l, slug.strip()
+        low = clean.lower()
+        if low.startswith("gemini-"):
+            return "gemini", clean
+        if low.startswith("claude-"):
+            return "anthropic", clean
+        if low.startswith(("gpt-", "o1-", "o3-", "o4-", "chatgpt-")):
+            return "openai", clean
+        if low.startswith(("mistral-", "codestral", "pixtral", "ministral", "magistral")):
+            return "mistral", clean
+        return None
+
+    def _generate_with_cloud_provider(
         self,
         model_id: str,
         chat_msgs: list[dict[str, str]],
     ) -> str:
-        api_key, _ = self._resolve_gemini_api_key()
+        parsed = self._parse_cloud_model_id(model_id)
+        if not parsed:
+            raise RuntimeError(f"Unsupported cloud model identifier: {model_id}")
+        provider_id, slug = parsed
+        api_key, _ = self._resolve_provider_api_key(provider_id)
         if not api_key:
             raise RuntimeError(
-                "Gemini API key not configured. Open [settings] -> [model management & cloud setup] and save your GEMINI_API_KEY to vault.enc."
+                f"{provider_id.upper()} API key not configured. Open [settings] -> [model management & cloud setup] and save your key to vault.enc."
             )
-        slug = "gemini-2.5-pro" if "pro" in model_id.lower() else "gemini-2.5-flash"
-        sys_parts: list[dict[str, str]] = []
-        contents: list[dict[str, Any]] = []
-        for m in chat_msgs:
-            role = m.get("role") or "user"
-            txt = str(m.get("content") or "")
-            if role == "system":
-                sys_parts.append({"text": txt})
-            else:
-                g_role = "model" if role == "assistant" else "user"
-                contents.append({"role": g_role, "parts": [{"text": txt}]})
-        if not contents:
-            contents.append({"role": "user", "parts": [{"text": "Hello"}]})
 
-        payload: dict[str, Any] = {
-            "contents": contents,
-            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1536},
-        }
-        if sys_parts:
-            payload["systemInstruction"] = {"parts": sys_parts}
+        if provider_id == "gemini":
+            sys_parts: list[dict[str, str]] = []
+            contents: list[dict[str, Any]] = []
+            for m in chat_msgs:
+                role = m.get("role") or "user"
+                txt = str(m.get("content") or "")
+                if role == "system":
+                    sys_parts.append({"text": txt})
+                else:
+                    g_role = "model" if role == "assistant" else "user"
+                    contents.append({"role": g_role, "parts": [{"text": txt}]})
+            if not contents:
+                contents.append({"role": "user", "parts": [{"text": "Hello"}]})
+            payload: dict[str, Any] = {
+                "contents": contents,
+                "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1536},
+            }
+            if sys_parts:
+                payload["systemInstruction"] = {"parts": sys_parts}
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(slug)}:generateContent?key={urllib.parse.quote(api_key)}"
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=30.0) as resp:
+                raw = json.loads(resp.read().decode("utf-8", errors="replace"))
+            cands = raw.get("candidates") or []
+            if not cands:
+                raise RuntimeError(f"Gemini returned no candidates: {raw}")
+            parts = ((cands[0].get("content") or {}).get("parts")) or []
+            return "".join(str(p.get("text") or "") for p in parts).strip()
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{slug}:generateContent?key={urllib.parse.quote(api_key)}"
-        body = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            url,
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=25.0) as resp:
-            raw = json.loads(resp.read().decode("utf-8", errors="replace"))
-        cands = raw.get("candidates") or []
-        if not cands:
-            raise RuntimeError(f"Gemini returned no candidates: {raw}")
-        parts = ((cands[0].get("content") or {}).get("parts")) or []
-        return "".join(str(p.get("text") or "") for p in parts).strip()
+        if provider_id == "anthropic":
+            sys_texts: list[str] = []
+            anth_msgs: list[dict[str, str]] = []
+            for m in chat_msgs:
+                role = m.get("role") or "user"
+                txt = str(m.get("content") or "")
+                if role == "system":
+                    sys_texts.append(txt)
+                else:
+                    a_role = "assistant" if role == "assistant" else "user"
+                    anth_msgs.append({"role": a_role, "content": txt})
+            if not anth_msgs:
+                anth_msgs.append({"role": "user", "content": "Hello"})
+            payload = {
+                "model": slug,
+                "max_tokens": 1536,
+                "temperature": 0.2,
+                "messages": anth_msgs,
+            }
+            if sys_texts:
+                payload["system"] = "\n\n".join(sys_texts)
+            req = urllib.request.Request(
+                "https://api.anthropic.com/v1/messages",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=30.0) as resp:
+                raw = json.loads(resp.read().decode("utf-8", errors="replace"))
+            blocks = raw.get("content") or []
+            return "".join(str(b.get("text") or "") for b in blocks if b.get("type") == "text").strip()
+
+        if provider_id in ("openai", "mistral"):
+            endpoint = (
+                "https://api.openai.com/v1/chat/completions"
+                if provider_id == "openai"
+                else "https://api.mistral.ai/v1/chat/completions"
+            )
+            oa_msgs = [
+                {"role": m.get("role") or "user", "content": str(m.get("content") or "")}
+                for m in chat_msgs
+            ]
+            payload = {
+                "model": slug,
+                "messages": oa_msgs,
+            }
+            if not slug.lower().startswith(("o1", "o3", "o4")):
+                payload["temperature"] = 0.2
+            req = urllib.request.Request(
+                endpoint,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=30.0) as resp:
+                raw = json.loads(resp.read().decode("utf-8", errors="replace"))
+            choices = raw.get("choices") or []
+            if not choices:
+                raise RuntimeError(f"{provider_id} returned no choices: {raw}")
+            return str(((choices[0].get("message") or {}).get("content")) or "").strip()
+
+        raise RuntimeError(f"Unsupported cloud provider: {provider_id}")
 
     # ── Lazy Model Loaders ───────────────────────────────────────────────
     def ensure_gemma(self):
@@ -2950,12 +3272,14 @@ class SatzSidecarRuntime:
         emitted_len = 0
         in_brain_tag = False
 
-        if str(model_id or "").lower().startswith("gemini-"):
+        cloud_parsed = self._parse_cloud_model_id(model_id)
+        if cloud_parsed is not None:
+            prov_id, prov_slug = cloud_parsed
             yield {
-                "status": f"calling {model_id} over HTTPS ({len(used_source_ids)} source(s), {len(context_str):,} chars)...",
+                "status": f"calling {prov_id}:{prov_slug} over HTTPS ({len(used_source_ids)} source(s), {len(context_str):,} chars)...",
                 "phase": "generating",
             }
-            cloud_raw = self._generate_with_gemini_cloud(model_id, chat_msgs).replace("\u2014", "-")
+            cloud_raw = self._generate_with_cloud_provider(model_id, chat_msgs).replace("\u2014", "-")
             full_raw = cloud_raw
             tag_pos = full_raw.find("<brain_store")
             visible_cloud = full_raw[:tag_pos] if tag_pos != -1 else full_raw

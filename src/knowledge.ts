@@ -9,7 +9,7 @@ import {
   MOD_LABEL,
   state,
 } from "./state";
-import type { BrainEntityItem } from "./types";
+import type { BrainEntityItem, CloudProviderInfo } from "./types";
 
 export interface KnowledgeActions {
   onTogglePauseLearning: (paused: boolean) => void;
@@ -65,17 +65,89 @@ export function renderKnowledgeView(
   const doctorRoles = state.doctorRoles ?? [];
   const acc = state.settingsAccordionOpen;
   const modelCfg = state.modelConfig ?? state.sidecar.model_config ?? null;
-  const geminiProvider = modelCfg?.cloud_providers?.find((p) => p.id === "gemini");
-  const geminiConfigured = Boolean(geminiProvider?.configured);
+  const fallbackProviders: CloudProviderInfo[] = [
+    {
+      id: "gemini",
+      label: "Google Gemini API",
+      env_key: "GEMINI_API_KEY",
+      host: "generativelanguage.googleapis.com",
+      placeholder: "AIzaSy...",
+      configured: false,
+      key_source: "none",
+      masked_key: "",
+      models: [],
+      privacy_disclosure:
+        "Opt-in cloud provider: only active when a (cloud) model is selected. Sends prompt + checked source passages to generativelanguage.googleapis.com over HTTPS. Vault secrets and raw mail databases never leave your machine.",
+    },
+    {
+      id: "anthropic",
+      label: "Anthropic API (Claude)",
+      env_key: "ANTHROPIC_API_KEY",
+      host: "api.anthropic.com",
+      placeholder: "sk-ant-...",
+      configured: false,
+      key_source: "none",
+      masked_key: "",
+      models: [],
+      privacy_disclosure:
+        "Opt-in cloud provider: only active when a (cloud) model is selected. Sends prompt + checked source passages to api.anthropic.com over HTTPS. Vault secrets and raw mail databases never leave your machine.",
+    },
+    {
+      id: "openai",
+      label: "OpenAI API (GPT / o-series)",
+      env_key: "OPENAI_API_KEY",
+      host: "api.openai.com",
+      placeholder: "sk-proj-...",
+      configured: false,
+      key_source: "none",
+      masked_key: "",
+      models: [],
+      privacy_disclosure:
+        "Opt-in cloud provider: only active when a (cloud) model is selected. Sends prompt + checked source passages to api.openai.com over HTTPS. Vault secrets and raw mail databases never leave your machine.",
+    },
+    {
+      id: "mistral",
+      label: "Mistral AI API",
+      env_key: "MISTRAL_API_KEY",
+      host: "api.mistral.ai",
+      placeholder: "mistral-...",
+      configured: false,
+      key_source: "none",
+      masked_key: "",
+      models: [],
+      privacy_disclosure:
+        "Opt-in cloud provider: only active when a (cloud) model is selected. Sends prompt + checked source passages to api.mistral.ai over HTTPS. Vault secrets and raw mail databases never leave your machine.",
+    },
+  ];
+  const cloudProviders: CloudProviderInfo[] =
+    modelCfg?.cloud_providers && modelCfg.cloud_providers.length > 0
+      ? modelCfg.cloud_providers
+      : fallbackProviders;
+  const configuredCloudProviders = cloudProviders.filter((p) => p.configured);
+  const discoveredCloudModels = cloudProviders.flatMap((p) =>
+    p.configured ? (p.models ?? []) : []
+  );
   const roleChat = modelCfg?.roles?.chat ?? state.selectedModel ?? "gemma-4-e4b";
   const roleWeb = modelCfg?.roles?.web_answer ?? "planck3 (web)";
   const roleReader = modelCfg?.roles?.reader ?? "hertz (reader)";
+  const cloudSummaryBadge =
+    configuredCloudProviders.length > 0
+      ? `[cloud: ${configuredCloudProviders.map((p) => `${p.id} (${(p.models ?? []).length})`).join(" · ")}]`
+      : "[local only · 0 cloud providers configured]";
+
+  const renderCloudOptionsHtml = (selectedRoleVal: string) =>
+    discoveredCloudModels
+      .map(
+        (cm) =>
+          `<option value="${escapeHtml(cm.id)}" ${selectedRoleVal === cm.id ? "selected" : ""}>${escapeHtml(cm.id)}</option>`
+      )
+      .join("");
 
   const doctorSectionHtml = `
       <div class="knowledge-section">
         <div class="panel-header accordion-header" data-settings-accordion="models">
-          <span>[${acc.models ? "-" : "+"}] 1. model management &amp; cloud setup (local /doctor + google gemini api)</span>
-          <span class="muted">${geminiConfigured ? `[gemini: ready · ${escapeHtml(geminiProvider?.key_source ?? "vault")}]` : "[local only · gemini not configured]"}</span>
+          <span>[${acc.models ? "-" : "+"}] 1. model management &amp; cloud setup (local /doctor + gemini · anthropic · openai · mistral)</span>
+          <span class="muted">${escapeHtml(cloudSummaryBadge)}</span>
         </div>
         ${
           !acc.models
@@ -83,71 +155,91 @@ export function renderKnowledgeView(
             : `
           <div class="kb-card">
             <div class="kb-card-header">
-              <span><strong>role routing matrix</strong> (which model handles each browser task)</span>
+              <span><strong>role routing matrix</strong> (which model handles each browser task · cloud models pulled live from configured provider APIs)</span>
               <span class="muted">mail classifier &amp; brain encoder stay 100% local</span>
             </div>
             <div class="vault-form-row">
               <label class="muted">chat &amp; synthesis:</label>
               <select id="kb-role-chat-select" class="vault-input">
                 <option value="gemma-4-e4b" ${roleChat === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local · default)</option>
-                <option value="gemini-2.5-flash (cloud)" ${roleChat === "gemini-2.5-flash (cloud)" ? "selected" : ""}>gemini-2.5-flash (cloud · google api)</option>
-                <option value="gemini-2.5-pro (cloud)" ${roleChat === "gemini-2.5-pro (cloud)" ? "selected" : ""}>gemini-2.5-pro (cloud · google api)</option>
+                ${renderCloudOptionsHtml(roleChat)}
               </select>
               <label class="muted">web answer (+web):</label>
               <select id="kb-role-web-select" class="vault-input">
                 <option value="planck3 (web)" ${roleWeb === "planck3 (web)" ? "selected" : ""}>planck3 (local read->weigh->write)</option>
-                <option value="gemini-2.5-flash (cloud)" ${roleWeb === "gemini-2.5-flash (cloud)" ? "selected" : ""}>gemini-2.5-flash (cloud)</option>
+                ${renderCloudOptionsHtml(roleWeb)}
               </select>
               <label class="muted">page reader:</label>
               <select id="kb-role-reader-select" class="vault-input">
                 <option value="hertz (reader)" ${roleReader === "hertz (reader)" ? "selected" : ""}>hertz 1.2 (local extractive reader)</option>
                 <option value="planck (reader)" ${roleReader === "planck (reader)" ? "selected" : ""}>planck (local extractive reader)</option>
                 <option value="gemma-4-e4b" ${roleReader === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local generative)</option>
-                <option value="gemini-2.5-flash (cloud)" ${roleReader === "gemini-2.5-flash (cloud)" ? "selected" : ""}>gemini-2.5-flash (cloud)</option>
+                ${renderCloudOptionsHtml(roleReader)}
               </select>
               <button id="kb-save-roles-btn">[apply role routing]</button>
             </div>
           </div>
 
-          <div class="kb-card">
-            <div class="kb-card-header">
-              <span><strong>cloud provider: google gemini api</strong> (gemini-2.5-flash · gemini-2.5-pro)</span>
-              <span class="status-item">${
-                geminiConfigured
-                  ? `[configured in ${escapeHtml(geminiProvider?.key_source ?? "vault")} · ${escapeHtml(geminiProvider?.masked_key ?? "***")}]`
-                  : "[not configured]"
-              }</span>
-            </div>
-            <div class="muted">
-              ${escapeHtml(
-                geminiProvider?.privacy_disclosure ??
-                  "Opt-in cloud provider: only active when a (cloud) model is selected. Sends prompt + checked source passages to generativelanguage.googleapis.com over HTTPS. Vault secrets and raw mail databases never leave your machine."
-              )}
-            </div>
-            <div class="vault-form-row">
-              <input
-                id="kb-gemini-api-key"
-                class="vault-input"
-                type="password"
-                spellcheck="false"
-                autocorrect="off"
-                autocapitalize="off"
-                placeholder="${isUnlocked ? "paste GEMINI_API_KEY (encrypted into active profile vault.enc)_" : "unlock a profile below to store GEMINI_API_KEY in vault.enc_"}"
-              />
-              <button id="kb-save-gemini-key-btn">[save key to vault.enc]</button>
-              <button id="kb-test-gemini-key-btn">[test connection]</button>
-              ${
-                geminiConfigured
-                  ? `<button id="kb-clear-gemini-key-btn">[clear key]</button>`
-                  : ""
-              }
-            </div>
-            ${
-              state.modelConfigStatusMsg
-                ? `<div class="profile-status-banner">${escapeHtml(state.modelConfigStatusMsg)}</div>`
-                : ""
-            }
+          ${
+            state.modelConfigStatusMsg
+              ? `<div class="profile-status-banner">${escapeHtml(state.modelConfigStatusMsg)}</div>`
+              : ""
+          }
+
+          <div class="rail-group-label">
+            <span>cloud model providers (models discovered dynamically from each provider's /models endpoint)</span>
           </div>
+          ${cloudProviders
+            .map((p) => {
+              const envKey = p.env_key ?? `${p.id.toUpperCase()}_API_KEY`;
+              const modelsCount = (p.models ?? []).length;
+              const modelsPreview =
+                modelsCount > 0
+                  ? (p.models ?? [])
+                      .slice(0, 8)
+                      .map((m) => m.slug || m.id)
+                      .join(" · ") + (modelsCount > 8 ? ` · +${modelsCount - 8} more` : "")
+                  : p.configured
+                    ? "0 models cached (click [refresh models from api] to query /models)"
+                    : "configure API key below to query available models from provider API";
+              return `
+                <div class="kb-card">
+                  <div class="kb-card-header">
+                    <span><strong>${escapeHtml(p.label)}</strong> <span class="muted">(${escapeHtml(envKey)} · ${escapeHtml(p.host ?? "")})</span></span>
+                    <span class="status-item">${
+                      p.configured
+                        ? `[configured in ${escapeHtml(p.key_source ?? "vault")} · ${escapeHtml(p.masked_key ?? "***")} · ${modelsCount} models]`
+                        : "[not configured]"
+                    }</span>
+                  </div>
+                  <div class="muted">${escapeHtml(p.privacy_disclosure)}</div>
+                  <div class="muted">available models from API: <strong>${escapeHtml(modelsPreview)}</strong></div>
+                  <div class="vault-form-row">
+                    <input
+                      data-cloud-key-input="${escapeHtml(p.id)}"
+                      class="vault-input"
+                      type="password"
+                      spellcheck="false"
+                      autocorrect="off"
+                      autocapitalize="off"
+                      placeholder="${
+                        isUnlocked
+                          ? `paste ${escapeHtml(envKey)} (${escapeHtml(p.placeholder ?? "api key")}) -> encrypted in vault.enc_`
+                          : `unlock a profile below to store ${escapeHtml(envKey)} in vault.enc_`
+                      }"
+                    />
+                    <button data-cloud-save-key="${escapeHtml(p.id)}">[save key &amp; pull models]</button>
+                    <button data-cloud-refresh-models="${escapeHtml(p.id)}">[refresh models from api]</button>
+                    ${
+                      p.configured
+                        ? `<button data-cloud-clear-key="${escapeHtml(p.id)}">[clear key]</button>`
+                        : ""
+                    }
+                  </div>
+                </div>
+              `;
+            })
+            .join("")}
 
           <div class="rail-group-label">
             <span>local on-device models (/doctor · ${doctorRoles.length || 5} roles)</span>
@@ -487,28 +579,52 @@ export function renderKnowledgeView(
     });
   });
 
-  container.querySelector("#kb-save-gemini-key-btn")?.addEventListener("click", () => {
-    if (!actions.onSaveModelConfig) return;
-    const keyVal = (container.querySelector("#kb-gemini-api-key") as HTMLInputElement | null)?.value.trim() ?? "";
-    void actions.onSaveModelConfig({
-      gemini_api_key: keyVal,
-      verify_key: true,
+  container.querySelectorAll<HTMLButtonElement>("[data-cloud-save-key]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (!actions.onSaveModelConfig) return;
+      const pid = btn.getAttribute("data-cloud-save-key") ?? "";
+      if (!pid) return;
+      const inputEl = container.querySelector(
+        `[data-cloud-key-input="${pid}"]`
+      ) as HTMLInputElement | null;
+      const keyVal = inputEl?.value.trim() ?? "";
+      void actions.onSaveModelConfig({
+        provider_id: pid,
+        api_key: keyVal,
+        refresh_models: true,
+      });
     });
   });
 
-  container.querySelector("#kb-test-gemini-key-btn")?.addEventListener("click", () => {
-    if (!actions.onSaveModelConfig) return;
-    const keyVal = (container.querySelector("#kb-gemini-api-key") as HTMLInputElement | null)?.value.trim() ?? "";
-    void actions.onSaveModelConfig({
-      gemini_api_key: keyVal,
-      test_gemini: true,
+  container.querySelectorAll<HTMLButtonElement>("[data-cloud-refresh-models]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (!actions.onSaveModelConfig) return;
+      const pid = btn.getAttribute("data-cloud-refresh-models") ?? "";
+      if (!pid) return;
+      const inputEl = container.querySelector(
+        `[data-cloud-key-input="${pid}"]`
+      ) as HTMLInputElement | null;
+      const keyVal = inputEl?.value.trim() ?? "";
+      const payload: Record<string, unknown> = {
+        provider_id: pid,
+        refresh_models: true,
+      };
+      if (keyVal) {
+        payload.api_key = keyVal;
+      }
+      void actions.onSaveModelConfig(payload);
     });
   });
 
-  container.querySelector("#kb-clear-gemini-key-btn")?.addEventListener("click", () => {
-    if (!actions.onSaveModelConfig) return;
-    void actions.onSaveModelConfig({
-      clear_gemini_key: true,
+  container.querySelectorAll<HTMLButtonElement>("[data-cloud-clear-key]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (!actions.onSaveModelConfig) return;
+      const pid = btn.getAttribute("data-cloud-clear-key") ?? "";
+      if (!pid) return;
+      void actions.onSaveModelConfig({
+        provider_id: pid,
+        clear_key: true,
+      });
     });
   });
 

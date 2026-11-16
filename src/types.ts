@@ -181,8 +181,7 @@ export type LocalModelId =
   | "planck3 (web)"
   | "hertz (reader)"
   | "planck (reader)"
-  | "gemini-2.5-flash (cloud)"
-  | "gemini-2.5-pro (cloud)";
+  | (string & {});
 
 export type ModelHealthState = "not_loaded" | "loading" | "ready" | "missing";
 
@@ -206,10 +205,13 @@ export interface DoctorRoleEntry {
 export interface CloudProviderInfo {
   id: string;
   label: string;
+  env_key?: string;
+  host?: string;
+  placeholder?: string;
   configured: boolean;
   key_source: string;
   masked_key: string;
-  models: Array<{ id: string; slug: string; label: string }>;
+  models: Array<{ id: string; slug: string; label: string; provider?: string }>;
   privacy_disclosure: string;
 }
 

@@ -1,19 +1,11 @@
 import {
   escapeHtml,
+  getAvailableModelsForPicker,
   MOD_LABEL,
   rankCommandBarRoutes,
   state,
 } from "./state";
 import type { CommandBarRoute, LocalModelId } from "./types";
-
-const LOCAL_MODELS: LocalModelId[] = [
-  "gemma-4-e4b",
-  "planck3 (web)",
-  "hertz (reader)",
-  "planck (reader)",
-  "gemini-2.5-flash (cloud)",
-  "gemini-2.5-pro (cloud)",
-];
 
 export interface StartScreenActions {
   onSubmitStartInput: (raw: string) => void;
@@ -97,10 +89,10 @@ export function renderStartScreen(
             <div class="composer-controls">
               <label class="muted">model:</label>
               <select id="start-model-select">
-                ${LOCAL_MODELS.map(
+                ${getAvailableModelsForPicker().map(
                   (m) => `
-                  <option value="${escapeHtml(m)}" ${state.selectedModel === m ? "selected" : ""}>
-                    ${escapeHtml(m)}
+                  <option value="${escapeHtml(m.id)}" ${state.selectedModel === m.id ? "selected" : ""}>
+                    ${escapeHtml(m.label)}
                   </option>
                 `
                 ).join("")}
@@ -243,10 +235,10 @@ export function renderCommandBarOverlay(actions: StartScreenActions): void {
         <div class="composer-controls">
           <label class="muted">model:</label>
           <select id="overlay-model-select">
-            ${LOCAL_MODELS.map(
+            ${getAvailableModelsForPicker().map(
               (m) => `
-              <option value="${escapeHtml(m)}" ${state.selectedModel === m ? "selected" : ""}>
-                ${escapeHtml(m)}
+              <option value="${escapeHtml(m.id)}" ${state.selectedModel === m.id ? "selected" : ""}>
+                ${escapeHtml(m.label)}
               </option>
             `
             ).join("")}

@@ -3,6 +3,8 @@ import {
   extractDomain,
   formatPlainErrorMessage,
   getActiveTabSources,
+  getAvailableModelsForPicker,
+  getModelPrivacySummary,
   state,
 } from "./state";
 import type {
@@ -14,15 +16,6 @@ import type {
   FindingItem,
   LocalModelId,
 } from "./types";
-
-const LOCAL_MODELS: LocalModelId[] = [
-  "gemma-4-e4b",
-  "planck3 (web)",
-  "hertz (reader)",
-  "planck (reader)",
-  "gemini-2.5-flash (cloud)",
-  "gemini-2.5-pro (cloud)",
-];
 
 export interface ChatActions {
   onSendMessage: (text: string) => void;
@@ -288,17 +281,19 @@ export function renderChatPanel(
         </div>
 
         <div class="composer-meta-row">
-          <span>${state.sidecar.online ? "models [ok]" : "models [offline]"} · ${state.selectedModel.includes("cloud") ? "[cloud · sends context to gemini api]" : "[local only]"}</span>
+          <span>${state.sidecar.online ? "models [ok]" : "models [offline]"} · ${escapeHtml(getModelPrivacySummary(state.selectedModel))}</span>
           <div class="composer-controls">
             <label class="muted">model:</label>
             <select id="chat-model-select">
-              ${LOCAL_MODELS.map(
-                (m) => `
-                <option value="${escapeHtml(m)}" ${state.selectedModel === m ? "selected" : ""}>
-                  ${escapeHtml(m)}
+              ${getAvailableModelsForPicker()
+                .map(
+                  (m) => `
+                <option value="${escapeHtml(m.id)}" ${state.selectedModel === m.id ? "selected" : ""}>
+                  ${escapeHtml(m.label)}
                 </option>
               `
-              ).join("")}
+                )
+                .join("")}
             </select>
             <button id="chat-web-toggle" class="${state.webSearchEnabled ? "active" : ""}">
               web: ${state.webSearchEnabled ? "on" : "off"}
