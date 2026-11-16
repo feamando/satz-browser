@@ -216,3 +216,32 @@ Owner: Nikita Gorshkov · Date: 2026-11-09 · Spec: `docs/PLAN_v0.5.md` · Platf
 - `cargo test --manifest-path src-tauri/Cargo.toml`: **PASS** (`12/12` unit tests passing)
 - `..\sgs\.venv\Scripts\python.exe -m pytest sidecar -q`: **PASS** (`29/29` tests passing, including `test_m22.py`: Task Card `[stop]` + single-use `confirm_token` enforcement, Comparer Agent on 3 product pages with `uncited_cells == 0`, and Watcher Agent detecting local price change `EUR 129.00 -> EUR 99.00` and firing one `For you` item + conversation badge)
 - Smoke script artifacts saved to `docs/smoke/v0.5/m22/windows/`.
+
+---
+
+## 9. Milestone M23: v0.5 Summary, MLX Proposal & Post-v0.5 Gate Tracker
+
+### 9.1 Milestone Summary Table (`M16` – `M23`)
+
+| Milestone | Commit | Scope | Key Verification Result (Windows 11 Reference Box, RTX 4090) |
+| :--- | :--- | :--- | :--- |
+| **M16** | `1fe55c8` | Platform Parity & Model Doctor (`cuda > mps > cpu`, 2s SSE heartbeat, 30s stall abort, macOS `objc2` `WKWebView` capture, toolbar bounds guard, modern UA, per-OS defaults, `/doctor`) | `1,302 ms` first-token latency (`cuda`); `dw.com` (`3,735 chars`) + `zalando.de` (`1,132 chars`) captured with visible toolbar; `6/6` `/doctor` roles `ready` |
+| **M17** | `6537deb` | Honest Sources & Shell Polish (`capture_mode`, `0-char` exclusion + `empty [recapture]`, `public fetch` badge, plain error mapper, overlay webview hide, inline unlock + Touch ID, `db_version = 2`) | `0` fabricated claims on `0-char` sources (`citations_flagged: 1` -> `[unsourced]`); `0` seed conversations on fresh launch |
+| **M18** | `aadad00` | Brain & Profile Integrity (profile-scoped `planck_store.sqlite` + `.bak` migration, `is_valid_entity_name` guards, clean bookmark entities, `/digest` dedupe, cascading `[forget]`/`[delete]`) | 50-passage legacy store migrated (`15` mail -> `Alice`, `35` web -> `Bob`); `0` `Here are`/`[bookmark]` entities; `0` orphan edges/queries after delete |
+| **M19** | `1a3c470` | Mail Cold Start & Actionable Extraction (cold-start heuristic, Gemma JSON `{label, confidence}`, relabel re-extraction, 5-card onboarding, order cards, `[new]` recipient badge, `[codes (N)]` pill) | 12-email fixture cold-start accuracy `12/12` (`3` inbox, `3` pings, `3` orders, `3` promos, `0` real emails in promos); `3/3` orders with carrier/tracking/delivery; `3/3` voucher codes (`SPRING20`, `ACME25`, `READ15`) |
+| **M20** | `487f0cb` | A Brain You Can Use (`Mod+B` Brain view vs `[settings]`, `/brain/search`, domain trust sliders with 30% hard cap, `"this week"` timeline, `[B1]` memory citations) | `dw.com` (`system = 8.5`, `personal = 2.0`) -> `effective = 6.55` (`0.7*8.5 + 0.3*2.0`, `conflict = True`); `"when does my Zalando order arrive?"` -> `2026-11-12 [B1]` (`citations_flagged == 0`) |
+| **M21** | `8c15ac6` | One Command Bar (`Mod+K` & Start screen unified, `rankCommandBarRoutes` / `/command/route`, ranked routes before `Enter`, explicit privacy disclosures) | All 6 check lines (`dw.com`, `dw.com what are the top stories today?`, `what is the capital of Portugal?`, `mail: Jordan Reyes`, `brain: zalando`, `lock`) routed with accurate privacy badges |
+| **M22** | `b399c9e` | First Agents: Task Card (`{goal, steps[], status, started_at, stop_token}` + send-gate single-use `confirm_token`), Comparer (`POST /agent/compare`), Watcher (`POST /watch/add`, `/watch/check`) | 3 product pages -> comparison table with `Price`, `Key specs`, `Availability`, `Source` and `0 uncited cells`; local price change `EUR 129.00 -> EUR 99.00` fires 1 `For you` item + `[watch !]` badge |
+| **M23** | `HEAD` | `README.md`, `docs/NOTES_v0.5.md`, `docs/PLATFORMS.md`, v0.5 Gate Summary | `npm run build` PASS, `cargo test` (`12/12`) PASS, `pytest sidecar -q` (`29/29`) PASS |
+
+### 9.2 macOS Gemma Backend Note & MLX Proposal (`docs/PLAN_v0.5.md` Decision #1)
+- In v0.5, `ensure_gemma()` (`sidecar/satz_models.py`) loads `gemma-4-e4b-it` onto Apple Silicon `mps` in `torch.bfloat16` without adding any new Python dependencies, paired with a `2 s` SSE heartbeat (`warming up gemma · Ns`) and a `30 s` token-stall circuit breaker.
+- **Proposal for v0.6 (if M3 Pro MPS prefill exceeds 5.0 s on 6k+ char pages):** Add an optional macOS-only `mlx-lm` 4-bit quantized backend (`mlx-community/gemma-4-e4b-it-4bit`) behind `--backend mlx|torch` in `sidecar/satz_models.py` once `REVIEW_v0.4_macos.md`'s M3 Pro hardware runs the v0.5 smoke script.
+
+### 9.3 Post-v0.5 Gate Tracker (`docs/PLAN_v0.5.md` §13)
+| Gate Criterion | Target | v0.5 Baseline / Tracking Status |
+| :--- | :--- | :--- |
+| **5-Day Sole-Browser Dogfood (Windows & macOS)** | 5 working days per OS, `0` Chrome fallbacks | Ready to log daily entries below (`Days completed: 0/5`, `Chrome fallbacks: 0`) |
+| **3 Real Compare Tasks + 1 Real Watch** | Faster than by hand in Chrome, same or better answer | Comparer (`POST /agent/compare`, `0 uncited cells`) and Watcher (`POST /watch/add`, `For you` + `[watch !]` badge) verified in `test_m22.py` |
+| **0 Empty Sources Cited** | `0` empty (`0 char`) sources cited across 5 days | Enforced deterministically: `0-char` sources excluded from prompt context and flagged as `[unsourced]` in `check_citations` (`test_m17.py`) |
+| **200-Email Hand-Labelled Eval** | Real email -> promo `<= 1%`, promo recall `>= 90%`, code extraction `>= 90%` | 200-email synthetic/stratified eval (`NOTES_v0.4.md` §4.2): `0.0%` false promo, `96.0%` promo recall, `95.0%` extraction; cold-start 12-email fixture (`test_m19.py`): `100%` (`12/12`) |
