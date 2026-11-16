@@ -1271,7 +1271,27 @@ class SatzSidecarRuntime:
                 raw_name = str(m.get("name") or "")
                 slug = raw_name.removeprefix("models/").strip()
                 low = slug.lower()
-                if any(skip in low for skip in ("embedding", "imagen", "veo", "aqa", "tts", "whisper", "learnlm")):
+                if any(
+                    skip in low
+                    for skip in (
+                        "embedding",
+                        "imagen",
+                        "veo",
+                        "aqa",
+                        "tts",
+                        "whisper",
+                        "learnlm",
+                        "image",
+                        "transcribe",
+                        "lyria",
+                        "nano-banana",
+                        "robotics",
+                        "computer-use",
+                        "deep-research",
+                        "gemini-2.5-",
+                        "gemini-2.0-",
+                    )
+                ):
                     continue
                 disp = str(m.get("displayName") or slug).strip()
                 models_out.append(
@@ -1282,7 +1302,15 @@ class SatzSidecarRuntime:
                         "provider": "gemini",
                     }
                 )
-            models_out.sort(key=lambda x: (0 if "2.5" in x["slug"] or "2.0" in x["slug"] else 1, x["slug"]))
+            priority_slugs = {
+                "gemini-3.5-flash-lite": 0,
+                "gemini-flash-lite-latest": 1,
+                "gemini-3-flash-preview": 2,
+                "gemini-3.5-flash": 3,
+                "gemini-3.8-flash": 4,
+                "gemini-flash-latest": 5,
+            }
+            models_out.sort(key=lambda x: (priority_slugs.get(x["slug"], 10), x["slug"]))
             return models_out
 
         if provider_id == "anthropic":
@@ -1625,20 +1653,43 @@ class SatzSidecarRuntime:
             }
             if sys_parts:
                 payload["systemInstruction"] = {"parts": sys_parts}
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(slug)}:generateContent?key={urllib.parse.quote(api_key)}"
-            req = urllib.request.Request(
-                url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=30.0) as resp:
-                raw = json.loads(resp.read().decode("utf-8", errors="replace"))
-            cands = raw.get("candidates") or []
-            if not cands:
-                raise RuntimeError(f"Gemini returned no candidates: {raw}")
-            parts = ((cands[0].get("content") or {}).get("parts")) or []
-            return "".join(str(p.get("text") or "") for p in parts).strip()
+
+            candidate_slugs = [slug]
+            for fb in ("gemini-3.5-flash-lite", "gemini-flash-lite-latest", "gemini-3-flash-preview"):
+                if fb not in candidate_slugs:
+                    candidate_slugs.append(fb)
+
+            last_err: Exception | None = None
+            for try_slug in candidate_slugs:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(try_slug)}:generateContent?key={urllib.parse.quote(api_key)}"
+                req = urllib.request.Request(
+                    url,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=14.0) as resp:
+                        raw = json.loads(resp.read().decode("utf-8", errors="replace"))
+                    cands = raw.get("candidates") or []
+                    if not cands:
+                        raise RuntimeError(f"Gemini ({try_slug}) returned no candidates: {raw}")
+                    parts = ((cands[0].get("content") or {}).get("parts")) or []
+                    return "".join(str(p.get("text") or "") for p in parts).strip()
+                except urllib.error.HTTPError as he:
+                    last_err = he
+                    if he.code in (404, 429, 500, 503):
+                        continue
+                    err_detail = ""
+                    try:
+                        err_detail = he.read().decode("utf-8", errors="replace")[:240]
+                    except Exception:
+                        pass
+                    raise RuntimeError(f"Gemini API error ({he.code} on {try_slug}): {err_detail or he}") from he
+                except Exception as exc:
+                    last_err = exc
+                    continue
+            raise RuntimeError(f"Gemini request failed across candidate models ({candidate_slugs}): {last_err}")
 
         if provider_id == "anthropic":
             sys_texts: list[str] = []
@@ -3324,14 +3375,18 @@ class SatzSidecarRuntime:
             }
             cloud_raw = self._generate_with_cloud_provider(model_id, chat_msgs).replace("\u2014", "-")
             full_raw = cloud_raw
-            tag_pos = full_raw.find("<brain_store")
-            visible_cloud = full_raw[:tag_pos] if tag_pos != -1 else full_raw
+            fence_or_tag = re.search(
+                r"(?:```(?:xml|json|html)?\s*)?<brain_store\b",
+                full_raw,
+                flags=re.IGNORECASE,
+            )
+            tag_pos = fence_or_tag.start() if fence_or_tag else -1
+            visible_cloud = full_raw[:tag_pos].rstrip() if tag_pos != -1 else full_raw
             if visible_cloud:
                 yield {"status": "streaming response tokens...", "phase": "streaming"}
                 yield {"delta": visible_cloud}
                 emitted_len = len(visible_cloud)
-            if tag_pos != -1:
-                in_brain_tag = True
+            in_brain_tag = True
         else:
             if self.gemma_model is None:
                 yield {
@@ -5701,6 +5756,11 @@ def make_sidecar_server(
                         name=str(data.get("name") or ""),
                         pin=str(data.get("pin") or ""),
                     )
+                    runtime._refresh_active_profile_brain()
+                    if getattr(runtime, "mail", None) is not None:
+                        runtime.mail.rebind_profile()
+                        runtime.mail.start_sync_threads_for_unlocked_profile()
+                    runtime.bookmark_wake_event.set()
                     return self._json({"ok": True, **res})
                 except Exception as e:
                     return self._json({"ok": False, "error": str(e)}, 400)
@@ -5711,6 +5771,10 @@ def make_sidecar_server(
                         profile_id=str(data.get("profile_id") or ""),
                         pin=str(data.get("pin") or ""),
                     )
+                    runtime._refresh_active_profile_brain()
+                    if getattr(runtime, "mail", None) is not None:
+                        runtime.mail.rebind_profile()
+                        runtime.mail.start_sync_threads_for_unlocked_profile()
                     runtime.bookmark_wake_event.set()
                     return self._json({"ok": True, **res})
                 except Exception as e:
@@ -5721,6 +5785,10 @@ def make_sidecar_server(
                     res = runtime.passwords.unlock_with_keychain(
                         profile_id=str(data.get("profile_id") or ""),
                     )
+                    runtime._refresh_active_profile_brain()
+                    if getattr(runtime, "mail", None) is not None:
+                        runtime.mail.rebind_profile()
+                        runtime.mail.start_sync_threads_for_unlocked_profile()
                     runtime.bookmark_wake_event.set()
                     return self._json({"ok": True, **res})
                 except Exception as e:

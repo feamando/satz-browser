@@ -1661,7 +1661,7 @@ async function selectConversation(conversationId: string): Promise<void> {
     if (detail.conversation.origin === "mail") {
       state.mailActiveLane = "inbox";
       await refreshMailState();
-      state.activeTabId = "lane:inbox";
+      state.activeTabId = "chat";
       state.agentRailOpen = true;
     } else if (detail.conversation.origin === "direct" && openTabs.length > 0 && detail.messages.length === 0) {
       state.activeTabId = openTabs[0].id;
@@ -1732,6 +1732,37 @@ function getStartScreenActions() {
     onCloseCommandBar: () => {
       state.commandBarOpen = false;
       renderCommandBarOverlay(getStartScreenActions());
+    },
+    onUnlockProfile: async (profileId: string, pin: string) => {
+      state.revealedPasswords = {};
+      const res = await sidecarUnlockProfile(profileId, pin);
+      state.profileStatusMessage = res.ok
+        ? ""
+        : `error: ${res.error ?? "invalid 6-digit PIN"}`;
+      const [kb, mCfg] = await Promise.all([
+        sidecarFetchKnowledge(),
+        sidecarGetModelConfig(),
+      ]);
+      if (kb) state.knowledge = kb;
+      if (mCfg) state.modelConfig = mCfg;
+      await refreshMailState();
+      await refreshLists();
+      renderAllRegions();
+    },
+    onCreateProfile: async (name: string, pin: string) => {
+      const res = await sidecarCreateProfile(name, pin);
+      state.profileStatusMessage = res.ok
+        ? ""
+        : `error: ${res.error ?? "failed to create profile (ensure PIN is 6 digits)"}`;
+      const [kb, mCfg] = await Promise.all([
+        sidecarFetchKnowledge(),
+        sidecarGetModelConfig(),
+      ]);
+      if (kb) state.knowledge = kb;
+      if (mCfg) state.modelConfig = mCfg;
+      await refreshMailState();
+      await refreshLists();
+      renderAllRegions();
     },
   };
 }

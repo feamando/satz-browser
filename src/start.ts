@@ -15,6 +15,8 @@ export interface StartScreenActions {
   onChangeModel: (model: LocalModelId) => void;
   onToggleWeb: () => void;
   onCloseCommandBar?: () => void;
+  onUnlockProfile?: (profileId: string, pin: string) => void;
+  onCreateProfile?: (name: string, pin: string) => void;
 }
 
 function renderRoutesListHtml(
@@ -63,9 +65,85 @@ export function renderStartScreen(
     Math.min(state.commandBarSelectedIdx, Math.max(0, initialRoutes.length - 1))
   );
 
+  const profileInfo = state.knowledge.profile;
+  const profilesList = profileInfo?.profiles ?? [];
+  const isUnlocked = Boolean(
+    profileInfo?.unlocked && profileInfo?.active_profile
+  );
+
+  const unlockPromptHtml = !isUnlocked
+    ? `
+      <div class="kb-card" id="start-profile-unlock-card" style="margin-bottom:14px;">
+        <div class="kb-card-header">
+          <span><strong>profile locked</strong> · unlock your profile to load your Brain, Mail accounts &amp; password vault</span>
+          <span class="muted">[6-digit PIN]</span>
+        </div>
+        ${
+          state.profileStatusMessage
+            ? `<div class="profile-status-banner">${escapeHtml(state.profileStatusMessage)}</div>`
+            : ""
+        }
+        ${
+          profilesList.length > 0
+            ? `
+              <div class="vault-form-row">
+                <label class="muted">profile:</label>
+                <select id="start-unlock-profile-select" class="vault-input">
+                  ${profilesList
+                    .map(
+                      (p) =>
+                        `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)} (${escapeHtml(p.id)})</option>`
+                    )
+                    .join("")}
+                </select>
+                <input
+                  id="start-unlock-pin-input"
+                  class="vault-input vault-pin-input"
+                  type="password"
+                  inputmode="numeric"
+                  maxlength="6"
+                  spellcheck="false"
+                  autocorrect="off"
+                  autocapitalize="off"
+                  placeholder="6-digit PIN_"
+                />
+                <button id="start-unlock-profile-btn" type="button">[unlock profile &amp; mail]</button>
+              </div>
+            `
+            : ""
+        }
+        <div class="vault-form-row" style="margin-top:6px;">
+          <span class="muted">${profilesList.length > 0 ? "or create a new profile:" : "create a new profile with a 6-digit PIN:"}</span>
+          <input
+            id="start-create-profile-name"
+            class="vault-input"
+            type="text"
+            spellcheck="false"
+            autocorrect="off"
+            autocapitalize="off"
+            placeholder="new profile name (e.g. Nikita)_"
+          />
+          <input
+            id="start-create-profile-pin"
+            class="vault-input vault-pin-input"
+            type="password"
+            inputmode="numeric"
+            maxlength="6"
+            spellcheck="false"
+            autocorrect="off"
+            autocapitalize="off"
+            placeholder="6-digit PIN_"
+          />
+          <button id="start-create-profile-btn" type="button">[+ create &amp; unlock]</button>
+        </div>
+      </div>
+    `
+    : "";
+
   container.innerHTML = `
     <div class="start-screen">
       <div class="start-container">
+        ${unlockPromptHtml}
         <div class="start-prompt-title">where do you want to start? <span class="muted">[${MOD_LABEL}+k]</span></div>
 
         <div class="start-input-box" id="start-command-bar-box">
@@ -155,8 +233,62 @@ export function renderStartScreen(
     "#start-routes-slot",
     "start",
     actions,
-    false
+    !isUnlocked && profilesList.length > 0 ? false : false
   );
+
+  const startPinInput = container.querySelector(
+    "#start-unlock-pin-input"
+  ) as HTMLInputElement | null;
+  if (!isUnlocked && startPinInput) {
+    startPinInput.focus();
+  }
+
+  const triggerStartUnlock = () => {
+    const sel = container.querySelector(
+      "#start-unlock-profile-select"
+    ) as HTMLSelectElement | null;
+    const pid = sel?.value || profilesList[0]?.id || "";
+    const pin = startPinInput?.value.trim() ?? "";
+    if (pid && pin && actions.onUnlockProfile) {
+      actions.onUnlockProfile(pid, pin);
+    }
+  };
+
+  container
+    .querySelector("#start-unlock-profile-btn")
+    ?.addEventListener("click", triggerStartUnlock);
+  startPinInput?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      triggerStartUnlock();
+    }
+  });
+
+  const triggerStartCreate = () => {
+    const nameEl = container.querySelector(
+      "#start-create-profile-name"
+    ) as HTMLInputElement | null;
+    const pinEl = container.querySelector(
+      "#start-create-profile-pin"
+    ) as HTMLInputElement | null;
+    const name = nameEl?.value.trim() ?? "";
+    const pin = pinEl?.value.trim() ?? "";
+    if (name && pin && actions.onCreateProfile) {
+      actions.onCreateProfile(name, pin);
+    }
+  };
+
+  container
+    .querySelector("#start-create-profile-btn")
+    ?.addEventListener("click", triggerStartCreate);
+  container
+    .querySelector("#start-create-profile-pin")
+    ?.addEventListener("keydown", (e) => {
+      if ((e as KeyboardEvent).key === "Enter") {
+        e.preventDefault();
+        triggerStartCreate();
+      }
+    });
 
   const modelSelect = container.querySelector(
     "#start-model-select"

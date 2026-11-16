@@ -997,7 +997,10 @@ class SatzBrain:
         stored: list[dict[str, Any]] = []
         proposals: list[dict[str, Any]] = []
         allow_direct = bool(user_msg and STORE_INTENT_RE.search(user_msg))
-        pattern = re.compile(r"<brain_store>\s*(\{.*?\})\s*</brain_store>", re.DOTALL | re.IGNORECASE)
+        pattern = re.compile(
+            r"(?:```(?:xml|json|html)?\s*)?<brain_store>\s*(?:```(?:json)?\s*)?(\{.*?\})\s*(?:```\s*)?</brain_store>(?:\s*```)?",
+            re.DOTALL | re.IGNORECASE,
+        )
 
         def _replacer(match: re.Match) -> str:
             payload_str = match.group(1).strip()
