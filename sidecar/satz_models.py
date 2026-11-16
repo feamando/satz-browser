@@ -790,14 +790,35 @@ class SatzSidecarRuntime:
                 self._migrate_legacy_shared_store_if_needed(pid)
             target_store_path = self.passwords.get_profile_store_path(pid)
             if getattr(self, "_current_store_key", "__INIT__") != pid:
-                try:
-                    self.store.close()
-                except Exception:
-                    pass
+                carried_meta: list[tuple[str, str]] = []
+                if hasattr(self, "store") and self.store is not None:
+                    try:
+                        rows = self.store.db.execute(
+                            "SELECT key, value FROM satz_meta WHERE key LIKE 'cloud_%' OR key LIKE 'model_role_%'"
+                        ).fetchall()
+                        carried_meta = [(str(r["key"]), str(r["value"])) for r in rows if r["value"]]
+                    except Exception:
+                        pass
+                    try:
+                        self.store.close()
+                    except Exception:
+                        pass
                 self.store = Store(target_store_path)
                 self.store_path = target_store_path
                 self._current_store_key = pid
                 self._init_satz_tables()
+                if carried_meta:
+                    for mk, mv in carried_meta:
+                        existing = self.store.db.execute(
+                            "SELECT value FROM satz_meta WHERE key = ?",
+                            (mk,),
+                        ).fetchone()
+                        if not existing or not existing["value"]:
+                            self.store.db.execute(
+                                "INSERT OR REPLACE INTO satz_meta (key, value) VALUES (?, ?)",
+                                (mk, mv),
+                            )
+                    self.store.db.commit()
                 self._repair_bookmark_entities_in_store(self.store.db)
                 self.pause_learning = self._load_pause_learning()
 
@@ -1208,7 +1229,21 @@ class SatzSidecarRuntime:
             for k in keys_to_check:
                 v = (env_map.get(k) or "").strip()
                 if v:
-                    return v, "vault"
+                    return v, "vault.enc"
+        with self.store_lock:
+            row = self.store.db.execute(
+                "SELECT value FROM satz_meta WHERE key = ?",
+                (f"cloud_api_key_{provider_id}",),
+            ).fetchone()
+            if row and (row["value"] or "").strip():
+                v_meta = str(row["value"]).strip()
+                if getattr(self, "passwords", None) is not None and self.passwords.unlocked:
+                    try:
+                        self.passwords.save_raw_env(f"{spec['env_key']}={v_meta}")
+                        return v_meta, "vault.enc"
+                    except Exception:
+                        pass
+                return v_meta, "profile store"
         for k in keys_to_check:
             env_v = (os.environ.get(k) or "").strip()
             if env_v:
@@ -1358,8 +1393,6 @@ class SatzSidecarRuntime:
         api_key: str,
         force_refresh: bool = False,
     ) -> list[dict[str, str]]:
-        if not api_key:
-            return []
         meta_key = f"cloud_models_{provider_id}"
         if not force_refresh:
             with self.store_lock:
@@ -1374,6 +1407,8 @@ class SatzSidecarRuntime:
                             return parsed
                     except Exception:
                         pass
+        if not api_key:
+            return []
         try:
             discovered = self._discover_provider_models(provider_id, api_key)
             with self.store_lock:
@@ -1392,16 +1427,16 @@ class SatzSidecarRuntime:
         for spec in self.CLOUD_PROVIDERS_SPEC:
             pid = spec["id"]
             key, src = self._resolve_provider_api_key(pid)
-            if not key:
-                continue
             models = self._get_cached_or_discover_models(pid, key, force_refresh=False)
+            if not key and not models:
+                continue
             for m in models:
                 entries.append(
                     {
                         "id": m["id"],
                         "state": "ready",
                         "device": "cloud",
-                        "detail": f"{pid} · key in {src}",
+                        "detail": f"{pid} · key in {src if key else 'cached'}",
                     }
                 )
         return entries
@@ -1422,7 +1457,8 @@ class SatzSidecarRuntime:
             pid = spec["id"]
             key, key_src = self._resolve_provider_api_key(pid)
             force_ref = bool(refresh_provider and refresh_provider in (pid, "all"))
-            models = self._get_cached_or_discover_models(pid, key, force_refresh=force_ref) if key else []
+            models = self._get_cached_or_discover_models(pid, key, force_refresh=force_ref)
+            is_configured = bool(key or len(models) > 0)
             providers_out.append(
                 {
                     "id": pid,
@@ -1430,9 +1466,10 @@ class SatzSidecarRuntime:
                     "env_key": spec["env_key"],
                     "host": spec["host"],
                     "placeholder": spec["placeholder"],
-                    "configured": bool(key),
-                    "key_source": key_src,
+                    "configured": is_configured,
+                    "key_source": key_src if key else ("cached" if models else "none"),
                     "masked_key": (f"{key[:4]}...{key[-4:]}" if len(key) >= 10 else ("***" if key else "")),
+                    "stored_key": key,
                     "models": models,
                     "privacy_disclosure": (
                         f"Opt-in cloud provider: only active when a ({pid}:...) model is selected. "
@@ -1466,29 +1503,35 @@ class SatzSidecarRuntime:
         spec = next((p for p in self.CLOUD_PROVIDERS_SPEC if p["id"] == provider_id), None)
 
         if spec and clear_key:
-            if not self.passwords.unlocked:
-                return {"ok": False, "error": "Unlock your profile with your 6-digit PIN first."}
-            cur = self.passwords.get_unlocked_credentials_map()
-            cur.pop(spec["env_key"], None)
-            for alt_k in spec.get("alt_keys", "").split(","):
-                if alt_k.strip():
-                    cur.pop(alt_k.strip(), None)
-            self.passwords._unlocked_env_cache = cur
-            self.passwords._persist_active_vault(cur)
+            if getattr(self, "passwords", None) is not None and self.passwords.unlocked:
+                cur = self.passwords.get_unlocked_credentials_map()
+                cur.pop(spec["env_key"], None)
+                for alt_k in spec.get("alt_keys", "").split(","):
+                    if alt_k.strip():
+                        cur.pop(alt_k.strip(), None)
+                self.passwords._unlocked_env_cache = cur
+                self.passwords._persist_active_vault(cur)
             with self.store_lock:
                 self.store.db.execute(
-                    "DELETE FROM satz_meta WHERE key = ?",
-                    (f"cloud_models_{provider_id}",),
+                    "DELETE FROM satz_meta WHERE key IN (?, ?)",
+                    (f"cloud_models_{provider_id}", f"cloud_api_key_{provider_id}"),
                 )
                 self.store.db.commit()
+            return {
+                **self.get_model_management_config(),
+                "test_ok": True,
+                "test_message": f"{spec['label']}: deleted saved API key and cleared cached models.",
+            }
 
-        if spec and api_key and not refresh_only:
-            if not self.passwords.unlocked:
-                return {
-                    "ok": False,
-                    "error": f"Unlock your profile with your 6-digit PIN first to store {spec['env_key']} in vault.enc.",
-                }
-            self.passwords.save_raw_env(f"{spec['env_key']}={api_key}")
+        if spec and api_key and not clear_key:
+            if getattr(self, "passwords", None) is not None and self.passwords.unlocked:
+                self.passwords.save_raw_env(f"{spec['env_key']}={api_key}")
+            with self.store_lock:
+                self.store.db.execute(
+                    "INSERT OR REPLACE INTO satz_meta (key, value) VALUES (?, ?)",
+                    (f"cloud_api_key_{provider_id}", api_key),
+                )
+                self.store.db.commit()
 
         with self.store_lock:
             for role_key, param_name in (

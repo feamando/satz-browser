@@ -966,7 +966,7 @@ export function getAvailableModelsForPicker(): Array<{
   const seen = new Set<string>(base.map((b) => b.id));
   const cfg = state.modelConfig ?? state.sidecar.model_config ?? null;
   for (const prov of cfg?.cloud_providers ?? []) {
-    if (!prov.configured) continue;
+    if (!prov.configured && (!prov.models || prov.models.length === 0)) continue;
     for (const m of prov.models ?? []) {
       if (m.id && !seen.has(m.id)) {
         seen.add(m.id);

@@ -123,10 +123,10 @@ export function renderKnowledgeView(
     modelCfg?.cloud_providers && modelCfg.cloud_providers.length > 0
       ? modelCfg.cloud_providers
       : fallbackProviders;
-  const configuredCloudProviders = cloudProviders.filter((p) => p.configured);
-  const discoveredCloudModels = cloudProviders.flatMap((p) =>
-    p.configured ? (p.models ?? []) : []
+  const configuredCloudProviders = cloudProviders.filter(
+    (p) => p.configured || (p.models && p.models.length > 0)
   );
+  const discoveredCloudModels = cloudProviders.flatMap((p) => p.models ?? []);
   const roleChat = modelCfg?.roles?.chat ?? state.selectedModel ?? "gemma-4-e4b";
   const roleWeb = modelCfg?.roles?.web_answer ?? "planck3 (web)";
   const roleReader = modelCfg?.roles?.reader ?? "hertz (reader)";
@@ -192,28 +192,20 @@ export function renderKnowledgeView(
           ${cloudProviders
             .map((p) => {
               const envKey = p.env_key ?? `${p.id.toUpperCase()}_API_KEY`;
-              const modelsCount = (p.models ?? []).length;
-              const modelsPreview =
-                modelsCount > 0
-                  ? (p.models ?? [])
-                      .slice(0, 8)
-                      .map((m) => m.slug || m.id)
-                      .join(" · ") + (modelsCount > 8 ? ` · +${modelsCount - 8} more` : "")
-                  : p.configured
-                    ? "0 models cached (click [refresh models from api] to query /models)"
-                    : "configure API key below to query available models from provider API";
+              const modelsList = p.models ?? [];
+              const modelsCount = modelsList.length;
+              const storedKey = p.stored_key ?? "";
               return `
                 <div class="kb-card">
                   <div class="kb-card-header">
                     <span><strong>${escapeHtml(p.label)}</strong> <span class="muted">(${escapeHtml(envKey)} · ${escapeHtml(p.host ?? "")})</span></span>
                     <span class="status-item">${
                       p.configured
-                        ? `[configured in ${escapeHtml(p.key_source ?? "vault")} · ${escapeHtml(p.masked_key ?? "***")} · ${modelsCount} models]`
+                        ? `[configured in ${escapeHtml(p.key_source ?? "vault.enc")} · ${escapeHtml(p.masked_key || "***")} · ${modelsCount} models]`
                         : "[not configured]"
                     }</span>
                   </div>
                   <div class="muted">${escapeHtml(p.privacy_disclosure)}</div>
-                  <div class="muted">available models from API: <strong>${escapeHtml(modelsPreview)}</strong></div>
                   <div class="vault-form-row">
                     <input
                       data-cloud-key-input="${escapeHtml(p.id)}"
@@ -222,20 +214,40 @@ export function renderKnowledgeView(
                       spellcheck="false"
                       autocorrect="off"
                       autocapitalize="off"
-                      placeholder="${
-                        isUnlocked
-                          ? `paste ${escapeHtml(envKey)} (${escapeHtml(p.placeholder ?? "api key")}) -> encrypted in vault.enc_`
-                          : `unlock a profile below to store ${escapeHtml(envKey)} in vault.enc_`
-                      }"
+                      value="${escapeHtml(storedKey)}"
+                      placeholder="paste ${escapeHtml(envKey)} (${escapeHtml(p.placeholder ?? "api key")})_"
                     />
-                    <button data-cloud-save-key="${escapeHtml(p.id)}">[save key &amp; pull models]</button>
-                    <button data-cloud-refresh-models="${escapeHtml(p.id)}">[refresh models from api]</button>
+                    <button data-cloud-toggle-vis="${escapeHtml(p.id)}" type="button">[show key]</button>
+                    <button data-cloud-save-key="${escapeHtml(p.id)}" type="button">[${p.configured ? "update key &amp; pull models" : "save key &amp; pull models"}]</button>
+                    <button data-cloud-refresh-models="${escapeHtml(p.id)}" type="button">[refresh models from api]</button>
                     ${
-                      p.configured
-                        ? `<button data-cloud-clear-key="${escapeHtml(p.id)}">[clear key]</button>`
+                      p.configured || storedKey
+                        ? `<button data-cloud-clear-key="${escapeHtml(p.id)}" type="button">[delete key]</button>`
                         : ""
                     }
                   </div>
+                  ${
+                    modelsCount > 0
+                      ? `
+                        <div class="vault-form-row">
+                          <label class="muted">discovered models (${modelsCount}):</label>
+                          <select data-cloud-model-picker="${escapeHtml(p.id)}" class="vault-input">
+                            ${modelsList
+                              .map(
+                                (m) =>
+                                  `<option value="${escapeHtml(m.id)}" ${roleChat === m.id ? "selected" : ""}>${escapeHtml(m.label || m.slug)} — ${escapeHtml(m.id)}</option>`
+                              )
+                              .join("")}
+                          </select>
+                          <button data-cloud-use-model="${escapeHtml(p.id)}" type="button">[use as chat model]</button>
+                        </div>
+                      `
+                      : `<div class="muted">${
+                          p.configured
+                            ? "0 models cached — click [refresh models from api] to query /models."
+                            : "paste your API key above and click [save key & pull models] to load all available models from the provider API."
+                        }</div>`
+                  }
                 </div>
               `;
             })
@@ -576,6 +588,40 @@ export function renderKnowledgeView(
       role_chat: chatSel,
       role_web_answer: webSel,
       role_reader: readerSel,
+    });
+  });
+
+  container.querySelectorAll<HTMLButtonElement>("[data-cloud-toggle-vis]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const pid = btn.getAttribute("data-cloud-toggle-vis") ?? "";
+      if (!pid) return;
+      const inputEl = container.querySelector(
+        `[data-cloud-key-input="${pid}"]`
+      ) as HTMLInputElement | null;
+      if (!inputEl) return;
+      if (inputEl.type === "password") {
+        inputEl.type = "text";
+        btn.textContent = "[hide key]";
+      } else {
+        inputEl.type = "password";
+        btn.textContent = "[show key]";
+      }
+    });
+  });
+
+  container.querySelectorAll<HTMLButtonElement>("[data-cloud-use-model]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (!actions.onSaveModelConfig) return;
+      const pid = btn.getAttribute("data-cloud-use-model") ?? "";
+      if (!pid) return;
+      const selEl = container.querySelector(
+        `[data-cloud-model-picker="${pid}"]`
+      ) as HTMLSelectElement | null;
+      const modelId = selEl?.value ?? "";
+      if (!modelId) return;
+      void actions.onSaveModelConfig({
+        role_chat: modelId,
+      });
     });
   });
 

@@ -211,6 +211,7 @@ export interface CloudProviderInfo {
   configured: boolean;
   key_source: string;
   masked_key: string;
+  stored_key?: string;
   models: Array<{ id: string; slug: string; label: string; provider?: string }>;
   privacy_disclosure: string;
 }
