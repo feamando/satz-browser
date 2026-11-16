@@ -324,8 +324,9 @@ fn add_message(
     citations_ok: Option<i64>,
     citations_flagged: Option<i64>,
     citation_check_json: Option<String>,
+    extras_json: Option<String>,
 ) -> Result<ChatMessage, String> {
-    db.add_message_with_citations(
+    db.add_message_full(
         &conversation_id,
         &role,
         &content,
@@ -334,6 +335,7 @@ fn add_message(
         citations_ok,
         citations_flagged,
         citation_check_json.as_deref(),
+        extras_json.as_deref(),
     )
     .map_err(|e| e.to_string())
 }

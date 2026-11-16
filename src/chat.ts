@@ -53,6 +53,19 @@ export function renderChatPanel(
     return;
   }
 
+  const prevListEl = container.querySelector(
+    "#chat-messages-list"
+  ) as HTMLElement | null;
+  const isSameConv = state.chatLastRenderedConvId === detail.conversation.id;
+  const prevScrollTop = prevListEl?.scrollTop ?? 0;
+  const prevWasNearBottom =
+    !prevListEl ||
+    prevListEl.scrollHeight - prevListEl.scrollTop - prevListEl.clientHeight <=
+      140;
+  const shouldStickToBottom =
+    !isSameConv || !prevListEl || state.isStreaming || state.chatPinToBottom || prevWasNearBottom;
+  state.chatLastRenderedConvId = detail.conversation.id;
+
   const existingInput = container.querySelector(
     "#chat-composer-input"
   ) as HTMLInputElement | null;
@@ -229,7 +242,7 @@ export function renderChatPanel(
                     m.content,
                     m.model,
                     m.source_ids_json,
-                    m.cited_sources,
+                    m.cited_sources ?? state.messageCitedSources[m.id],
                     m.proposals ?? state.messageProposals[m.id],
                     m.citation_check,
                     m.citations_ok,
@@ -281,7 +294,7 @@ export function renderChatPanel(
         </div>
 
         <div class="composer-meta-row">
-          <span>${state.sidecar.online ? "models [ok]" : "models [offline]"} · ${escapeHtml(getModelPrivacySummary(state.selectedModel))}</span>
+          <span class="composer-status-label" title="${escapeHtml(getModelPrivacySummary(state.selectedModel))}">${state.sidecar.online ? "models [ok]" : "models [offline]"} · ${escapeHtml(getModelPrivacySummary(state.selectedModel))}</span>
           <div class="composer-controls">
             <label class="muted">model:</label>
             <select id="chat-model-select">
@@ -308,6 +321,25 @@ export function renderChatPanel(
   `;
 
   bindChatEvents(container, actions);
+
+  const listEl = container.querySelector(
+    "#chat-messages-list"
+  ) as HTMLElement | null;
+  if (listEl) {
+    if (shouldStickToBottom) {
+      listEl.scrollTop = listEl.scrollHeight;
+      window.requestAnimationFrame(() => {
+        listEl.scrollTop = listEl.scrollHeight;
+      });
+    } else if (isSameConv) {
+      listEl.scrollTop = prevScrollTop;
+    }
+    listEl.addEventListener("scroll", () => {
+      const distFromBottom =
+        listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight;
+      state.chatPinToBottom = distFromBottom <= 140;
+    });
+  }
 
   if (preservedValue || wasFocused) {
     const nextInput = container.querySelector(
@@ -549,13 +581,55 @@ function renderMessageBlock(
       )
   );
 
+  const effectiveCitedSources: Array<{ url: string; title: string }> = [
+    ...(citedSources ?? []),
+  ];
+  const seenPreviewUrls = new Set(
+    effectiveCitedSources.map((cs) => cs.url.trim()).filter(Boolean)
+  );
+  if (role === "assistant" && !isErrorMsg) {
+    // 1. Hydrate from inline Markdown links `[Title](https://...)` (excluding YouTube already rendered as players)
+    for (const mLink of content.matchAll(
+      /\[([^\][]+)\]\((https?:\/\/[^\s)]+)\)/g
+    )) {
+      const lTitle = mLink[1].trim();
+      const lUrl = mLink[2].trim();
+      if (
+        lUrl &&
+        !seenPreviewUrls.has(lUrl) &&
+        !/(?:youtube\.com\/watch\?v=|youtu\.be\/)/.test(lUrl)
+      ) {
+        seenPreviewUrls.add(lUrl);
+        effectiveCitedSources.push({ url: lUrl, title: lTitle || lUrl });
+      }
+    }
+    // 2. Hydrate from HTTP(S) `sourceIds` or matching `state.activeDetail.sources`
+    for (const sid of sourceIds) {
+      if (effectiveCitedSources.length >= 6) break;
+      const dbSrc = state.activeDetail?.sources.find((s) => s.id === sid);
+      const candUrl = (
+        dbSrc?.url || (sid.startsWith("http") ? sid : "")
+      ).trim();
+      const candTitle = (dbSrc?.title || candUrl).trim();
+      if (
+        candUrl.startsWith("http") &&
+        !seenPreviewUrls.has(candUrl) &&
+        !/(?:youtube\.com\/watch\?v=|youtu\.be\/)/.test(candUrl)
+      ) {
+        seenPreviewUrls.add(candUrl);
+        effectiveCitedSources.push({ url: candUrl, title: candTitle || candUrl });
+      }
+    }
+  }
+
   const pagePreviewCardsHtml =
-    citedSources && citedSources.length > 0
+    effectiveCitedSources.length > 0
       ? `
       <div class="msg-findings-section">
-        <div class="muted msg-findings-header">page previews (${citedSources.length}):</div>
+        <div class="muted msg-findings-header">page previews (${effectiveCitedSources.length}):</div>
         <div class="chat-preview-cards-grid">
-          ${citedSources
+          ${effectiveCitedSources
+            .slice(0, 6)
             .map((cs, idx) => {
               const dom = extractDomain(cs.url);
               return `

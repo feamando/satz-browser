@@ -65,6 +65,8 @@ pub struct ChatMessage {
     pub citations_flagged: Option<i64>,
     #[serde(default)]
     pub citation_check_json: Option<String>,
+    #[serde(default)]
+    pub extras_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,6 +289,7 @@ impl DbState {
                 citations_ok INTEGER NULL,
                 citations_flagged INTEGER NULL,
                 citation_check_json TEXT NULL,
+                extras_json TEXT NULL,
                 FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
             );
 
@@ -345,6 +348,7 @@ impl DbState {
             ("citations_ok", "INTEGER NULL"),
             ("citations_flagged", "INTEGER NULL"),
             ("citation_check_json", "TEXT NULL"),
+            ("extras_json", "TEXT NULL"),
         ] {
             let has_col: bool = conn
                 .query_row(
@@ -669,7 +673,7 @@ impl DbState {
 
         let mut msg_stmt = conn.prepare(
             "SELECT id, conversation_id, role, content, model, source_ids_json, created_at,
-                    citations_ok, citations_flagged, citation_check_json
+                    citations_ok, citations_flagged, citation_check_json, extras_json
              FROM messages
              WHERE conversation_id = ?1
              ORDER BY created_at ASC, id ASC",
@@ -687,6 +691,7 @@ impl DbState {
                     citations_ok: row.get(7)?,
                     citations_flagged: row.get(8)?,
                     citation_check_json: row.get(9)?,
+                    extras_json: row.get(10)?,
                 })
             })?
             .collect::<SqlResult<Vec<_>>>()?;
@@ -1296,12 +1301,37 @@ impl DbState {
         citations_flagged: Option<i64>,
         citation_check_json: Option<&str>,
     ) -> SqlResult<ChatMessage> {
+        self.add_message_full(
+            conversation_id,
+            role,
+            content,
+            model,
+            source_ids_json,
+            citations_ok,
+            citations_flagged,
+            citation_check_json,
+            None,
+        )
+    }
+
+    pub fn add_message_full(
+        &self,
+        conversation_id: &str,
+        role: &str,
+        content: &str,
+        model: Option<&str>,
+        source_ids_json: Option<&str>,
+        citations_ok: Option<i64>,
+        citations_flagged: Option<i64>,
+        citation_check_json: Option<&str>,
+        extras_json: Option<&str>,
+    ) -> SqlResult<ChatMessage> {
         let conn = self.conn.lock().unwrap();
         let id = gen_id("msg");
         let ts = now_epoch_secs_str();
         conn.execute(
-            "INSERT INTO messages (id, conversation_id, role, content, model, source_ids_json, created_at, citations_ok, citations_flagged, citation_check_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO messages (id, conversation_id, role, content, model, source_ids_json, created_at, citations_ok, citations_flagged, citation_check_json, extras_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 id,
                 conversation_id,
@@ -1312,7 +1342,8 @@ impl DbState {
                 ts,
                 citations_ok,
                 citations_flagged,
-                citation_check_json
+                citation_check_json,
+                extras_json
             ],
         )?;
         conn.execute(
@@ -1330,6 +1361,7 @@ impl DbState {
             citations_ok,
             citations_flagged,
             citation_check_json: citation_check_json.map(|s| s.to_string()),
+            extras_json: extras_json.map(|s| s.to_string()),
         })
     }
 

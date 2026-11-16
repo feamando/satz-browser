@@ -187,6 +187,14 @@ function normalizeConversationDetail(
         parsedCheck = undefined;
       }
     }
+    let parsedExtras: Record<string, unknown> | null = null;
+    if (typeof m.extras_json === "string" && m.extras_json) {
+      try {
+        parsedExtras = JSON.parse(m.extras_json) as Record<string, unknown>;
+      } catch {
+        parsedExtras = null;
+      }
+    }
     return {
       id: String(m.id ?? ""),
       conversation_id: conv.id,
@@ -203,7 +211,14 @@ function normalizeConversationDetail(
         typeof m.citation_check_json === "string"
           ? m.citation_check_json
           : null,
+      extras_json:
+        typeof m.extras_json === "string" ? m.extras_json : null,
       citation_check: parsedCheck,
+      cited_sources: parsedExtras?.cited_sources as ChatMessage["cited_sources"],
+      findings: parsedExtras?.findings as ChatMessage["findings"],
+      brain_sources: parsedExtras?.brain_sources as ChatMessage["brain_sources"],
+      proposals: parsedExtras?.proposals as ChatMessage["proposals"],
+      email_cards: parsedExtras?.email_cards as ChatMessage["email_cards"],
     };
   });
 
@@ -433,7 +448,8 @@ export async function apiAddMessage(
   sourceIdsJson: string | null = null,
   citationsOk: number | null = null,
   citationsFlagged: number | null = null,
-  citationCheckJson: string | null = null
+  citationCheckJson: string | null = null,
+  extrasJson: string | null = null
 ): Promise<ChatMessage> {
   return await invoke<ChatMessage>("add_message", {
     conversationId,
@@ -444,6 +460,7 @@ export async function apiAddMessage(
     citationsOk,
     citationsFlagged,
     citationCheckJson,
+    extrasJson,
   });
 }
 
@@ -1961,6 +1978,42 @@ export async function sidecarGetMailAttachmentData(
     return await res.json();
   } catch (e) {
     return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarFetchConversationPreviews(
+  conversationId: string
+): Promise<
+  Record<
+    string,
+    {
+      url: string;
+      domain: string;
+      title: string;
+      findings: FindingItem[];
+    }
+  >
+> {
+  try {
+    const res = await sidecarFetch(
+      `/sources/previews?conversation_id=${encodeURIComponent(conversationId)}`
+    );
+    if (!res.ok) return {};
+    const data = (await res.json()) as {
+      ok?: boolean;
+      by_source?: Record<
+        string,
+        {
+          url: string;
+          domain: string;
+          title: string;
+          findings: FindingItem[];
+        }
+      >;
+    };
+    return data.by_source ?? {};
+  } catch {
+    return {};
   }
 }
 

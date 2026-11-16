@@ -113,6 +113,7 @@ export interface ChatMessage {
   citations_ok?: number | null;
   citations_flagged?: number | null;
   citation_check_json?: string | null;
+  extras_json?: string | null;
   citation_check?: CitationCheckEntry[];
   cited_sources?: Array<{ url: string; title: string; domain?: string }>;
   brain_sources?: BrainCitationItem[];

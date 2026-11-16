@@ -3246,10 +3246,12 @@ class SatzSidecarRuntime:
                         }
                     )
 
-        # Detect when the user is asking to find/search items on a site (e.g. "find me some hats on zalando")
+        # Detect when the user is asking to find/search items on a site or for fresh web news
         is_site_discovery_query = bool(
             re.search(
-                r"\b(find\s+(?:me\s+)?|search\s+(?:for\s+)?|look\s+for\s+|show\s+me\s+some\s+)",
+                r"\b(find\s+(?:me\s+)?|search\s+(?:for\s+)?|look\s+for\s+|show\s+me\s+some\s+|"
+                r"(?:recent|latest|today'?s?|breaking|current|newest)\s+news\b|"
+                r"(?:what'?s|give\s+me|tell\s+me)\s+(?:the\s+)?(?:latest|recent|current)\s+)",
                 user_msg,
                 re.IGNORECASE,
             )
@@ -3547,8 +3549,8 @@ class SatzSidecarRuntime:
                 b0 = brain_sources[0]
                 b0_tokens = [
                     t
-                    for t in re.findall(r"[a-z0-9]{4,}", f"{b0.get('name') or ''} {json.dumps(b0.get('attributes') or {})}".lower())
-                    if t not in {"order", "promo", "from", "with", "shipped", "total"}
+                    for t in re.findall(r"[a-z0-9]{5,}", f"{b0.get('name') or ''} {json.dumps(b0.get('attributes') or {})}".lower())
+                    if t not in {"order", "promo", "from", "with", "shipped", "total", "news", "newsletter", "account", "person", "place"}
                 ]
                 low_ans = cleaned_final.lower()
                 if any(tok in low_ans for tok in b0_tokens):
@@ -3619,6 +3621,19 @@ class SatzSidecarRuntime:
                 if len(email_cards) >= 6:
                     break
 
+        all_preview_sources: list[dict[str, str]] = list(cited_web_sources)
+        seen_prev_urls = {str(x.get("url") or "").strip() for x in all_preview_sources if x.get("url")}
+        for hs in hydrated_sources:
+            h_url = str(hs.get("url") or "").strip()
+            if h_url.startswith(("http://", "https://")) and h_url not in seen_prev_urls:
+                seen_prev_urls.add(h_url)
+                all_preview_sources.append(
+                    {
+                        "url": h_url,
+                        "title": str(hs.get("title") or h_url),
+                    }
+                )
+
         ms = int((time.perf_counter() - t0) * 1000)
         done_payload: dict[str, Any] = {
             "done": True,
@@ -3635,13 +3650,48 @@ class SatzSidecarRuntime:
             done_payload["findings"] = collected_findings
         if email_cards:
             done_payload["email_cards"] = email_cards
-        if cited_web_sources:
-            done_payload["cited_sources"] = cited_web_sources
+        if all_preview_sources:
+            done_payload["cited_sources"] = all_preview_sources
         if stored_entities:
             done_payload["stored_entities"] = stored_entities
         if proposals:
             done_payload["proposals"] = proposals
         yield done_payload
+
+    def get_conversation_source_previews(self, conversation_id: str) -> dict[str, Any]:
+        """Returns cached findings_json and source metadata (url, title) per source_id for hydrating past chats."""
+        cid = (conversation_id or "").strip()
+        if not cid:
+            return {"ok": True, "by_source": {}}
+        by_source: dict[str, Any] = {}
+        with self.store_lock:
+            rows = self.store.db.execute(
+                """
+                SELECT source_id, url, domain, title, findings_json
+                FROM satz_sources
+                WHERE conversation_id = ?
+                """,
+                (cid,),
+            ).fetchall()
+        for r in rows:
+            sid = str(r["source_id"] or "").strip()
+            if not sid:
+                continue
+            findings_list: list[dict[str, Any]] = []
+            if r["findings_json"]:
+                try:
+                    parsed = json.loads(r["findings_json"])
+                    if isinstance(parsed, list):
+                        findings_list = parsed
+                except Exception:
+                    findings_list = []
+            by_source[sid] = {
+                "url": str(r["url"] or ""),
+                "domain": str(r["domain"] or ""),
+                "title": str(r["title"] or ""),
+                "findings": findings_list,
+            }
+        return {"ok": True, "by_source": by_source}
 
     # ── /digest, /knowledge, /forget ─────────────────────────────────────
     @staticmethod
@@ -5494,6 +5544,9 @@ def make_sidecar_server(
                 return self._json(runtime.get_model_management_config())
             if route_path == "/digest":
                 return self._json(runtime.get_digest())
+            if route_path == "/sources/previews":
+                cid = query_params.get("conversation_id", "")
+                return self._json(runtime.get_conversation_source_previews(cid))
             if route_path == "/knowledge":
                 return self._json(runtime.get_knowledge_summary())
             if route_path == "/brain/search":

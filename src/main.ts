@@ -31,6 +31,7 @@ import {
   sidecarDeletePassage,
   sidecarDeletePassword,
   sidecarDeleteProfile,
+  sidecarFetchConversationPreviews,
   sidecarFetchDigest,
   sidecarFetchDoctor,
   sidecarFetchHealth,
@@ -604,6 +605,9 @@ function renderTabStripRegion(): void {
       state.openMenuConvId = null;
       state.compareMode = false;
       state.activeTabId = tabId;
+      if (tabId === "chat") {
+        state.chatPinToBottom = true;
+      }
       if (tabId.startsWith("lane:")) {
         const laneName = tabId.slice(5) as "inbox" | "pings" | "orders" | "promos";
         state.mailActiveLane = laneName;
@@ -1653,12 +1657,83 @@ async function handleRunComparer(goal = "compare these"): Promise<void> {
   }
 }
 
+async function hydrateConversationPreviews(
+  detail: NonNullable<typeof state.activeDetail>
+): Promise<void> {
+  if (!state.sidecar.online || !detail.messages.length) return;
+  const needsHydration = detail.messages.some((m) => {
+    if (m.role !== "assistant" || !m.source_ids_json) return false;
+    const hasFindings = Boolean(
+      (m.findings && m.findings.length > 0) ||
+        (state.messageFindings[m.id] && state.messageFindings[m.id].length > 0)
+    );
+    return !hasFindings;
+  });
+  if (!needsHydration) return;
+
+  const bySource = await sidecarFetchConversationPreviews(
+    detail.conversation.id
+  );
+  if (!bySource || Object.keys(bySource).length === 0) return;
+
+  for (const m of detail.messages) {
+    if (m.role !== "assistant" || !m.source_ids_json) continue;
+    let sids: string[] = [];
+    try {
+      sids = JSON.parse(m.source_ids_json) as string[];
+    } catch {
+      sids = [];
+    }
+    if (!Array.isArray(sids) || sids.length === 0) continue;
+
+    if (!m.findings && !state.messageFindings[m.id]) {
+      const fList = [];
+      const seenImgs = new Set<string>();
+      for (const sid of sids) {
+        const meta = bySource[sid];
+        if (!meta?.findings) continue;
+        for (const fd of meta.findings) {
+          if (fd.image_url && !seenImgs.has(fd.image_url)) {
+            seenImgs.add(fd.image_url);
+            fList.push(fd);
+            if (fList.length >= 8) break;
+          }
+        }
+        if (fList.length >= 8) break;
+      }
+      if (fList.length > 0) {
+        state.messageFindings[m.id] = fList;
+        m.findings = fList;
+      }
+    }
+
+    if (!m.cited_sources && !state.messageCitedSources[m.id]) {
+      const cList: Array<{ url: string; title: string }> = [];
+      const seenUrls = new Set<string>();
+      for (const sid of sids) {
+        const meta = bySource[sid];
+        const url = meta?.url || (sid.startsWith("http") ? sid : "");
+        const title = meta?.title || url;
+        if (url.startsWith("http") && !seenUrls.has(url)) {
+          seenUrls.add(url);
+          cList.push({ url, title });
+        }
+      }
+      if (cList.length > 0) {
+        state.messageCitedSources[m.id] = cList;
+        m.cited_sources = cList;
+      }
+    }
+  }
+}
+
 async function selectConversation(conversationId: string): Promise<void> {
   state.showKnowledgeView = false;
   state.showBrainView = false;
   state.highlightedBrainSlug = null;
   state.compareMode = false;
   state.compareTabIds = [];
+  state.chatPinToBottom = true;
   if (
     state.watchBadgeConvIds.includes(conversationId) ||
     state.sidecar.watch_badges?.includes(conversationId)
@@ -1677,6 +1752,9 @@ async function selectConversation(conversationId: string): Promise<void> {
     apiGetConversation(conversationId),
     sidecarListTasks(conversationId),
   ]);
+  if (detail) {
+    await hydrateConversationPreviews(detail);
+  }
   state.activeDetail = detail;
   state.conversationTasks[conversationId] = tasks;
   if (detail) {
@@ -2210,6 +2288,7 @@ async function handleSendChatMessage(text: string): Promise<void> {
   if (!state.activeDetail || state.isStreaming) return;
   const convId = state.activeDetail.conversation.id;
   state.lastUserPrompt = text;
+  state.chatPinToBottom = true;
 
   await apiAddMessage(convId, "user", text, null, null);
   state.activeDetail = await apiGetConversation(convId);
@@ -2299,28 +2378,29 @@ async function handleSendChatMessage(text: string): Promise<void> {
       );
       const result = await sidecarRunAnswer(text, convId);
       stopStreamingProgress();
+      const extrasObj = {
+        cited_sources: result.sources ?? [],
+        findings: result.findings ?? [],
+      };
       const savedMsg = await apiAddMessage(
         convId,
         "assistant",
         `${result.answer}\n\nconfidence: ${result.band}`,
         state.selectedModel,
-        JSON.stringify(result.sources.map((s) => s.url))
+        JSON.stringify(result.sources.map((s) => s.url)),
+        null,
+        null,
+        null,
+        JSON.stringify(extrasObj)
       );
+      if (result.sources && result.sources.length > 0) {
+        state.messageCitedSources[savedMsg.id] = result.sources;
+      }
       if (result.findings && result.findings.length > 0) {
         state.messageFindings[savedMsg.id] = result.findings;
       }
+      state.chatPinToBottom = true;
       state.activeDetail = await apiGetConversation(convId);
-      if (state.activeDetail) {
-        const msgObj = state.activeDetail.messages.find(
-          (m) => m.id === savedMsg.id
-        );
-        if (msgObj) {
-          msgObj.cited_sources = result.sources;
-          if (state.messageFindings[savedMsg.id]) {
-            msgObj.findings = state.messageFindings[savedMsg.id];
-          }
-        }
-      }
       renderViewportRegion();
       return;
     }
@@ -2418,6 +2498,27 @@ async function handleSendChatMessage(text: string): Promise<void> {
         (streamRes.error ? `[err] ${streamRes.error}` : "(no response)");
     stopStreamingProgress();
 
+    const extrasPayload: Record<string, unknown> = {};
+    if (streamRes.cited_sources && streamRes.cited_sources.length > 0) {
+      extrasPayload.cited_sources = streamRes.cited_sources;
+    }
+    if (streamRes.findings && streamRes.findings.length > 0) {
+      extrasPayload.findings = streamRes.findings;
+    }
+    if (streamRes.brain_sources && streamRes.brain_sources.length > 0) {
+      extrasPayload.brain_sources = streamRes.brain_sources;
+    }
+    if (streamRes.email_cards && streamRes.email_cards.length > 0) {
+      extrasPayload.email_cards = streamRes.email_cards;
+    }
+    if (streamRes.proposals && streamRes.proposals.length > 0) {
+      extrasPayload.proposals = streamRes.proposals;
+    }
+    const extrasJson =
+      Object.keys(extrasPayload).length > 0
+        ? JSON.stringify(extrasPayload)
+        : null;
+
     const savedMsg = await apiAddMessage(
       convId,
       "assistant",
@@ -2428,7 +2529,8 @@ async function handleSendChatMessage(text: string): Promise<void> {
       typeof streamRes.citations_flagged === "number"
         ? streamRes.citations_flagged
         : null,
-      streamRes.citation_check ? JSON.stringify(streamRes.citation_check) : null
+      streamRes.citation_check ? JSON.stringify(streamRes.citation_check) : null,
+      extrasJson
     );
     if (streamRes.proposals && streamRes.proposals.length > 0) {
       state.messageProposals[savedMsg.id] = streamRes.proposals;
@@ -2442,8 +2544,13 @@ async function handleSendChatMessage(text: string): Promise<void> {
     if (streamRes.email_cards && streamRes.email_cards.length > 0) {
       state.messageEmailCards[savedMsg.id] = streamRes.email_cards;
     }
+    if (streamRes.cited_sources && streamRes.cited_sources.length > 0) {
+      state.messageCitedSources[savedMsg.id] = streamRes.cited_sources;
+    }
+    state.chatPinToBottom = true;
     state.activeDetail = await apiGetConversation(convId);
     if (state.activeDetail) {
+      await hydrateConversationPreviews(state.activeDetail);
       const msgObj = state.activeDetail.messages.find(
         (m) => m.id === savedMsg.id
       );
@@ -2460,8 +2567,8 @@ async function handleSendChatMessage(text: string): Promise<void> {
         if (state.messageEmailCards[savedMsg.id]) {
           msgObj.email_cards = state.messageEmailCards[savedMsg.id];
         }
-        if (streamRes.cited_sources && streamRes.cited_sources.length > 0) {
-          msgObj.cited_sources = streamRes.cited_sources;
+        if (state.messageCitedSources[savedMsg.id]) {
+          msgObj.cited_sources = state.messageCitedSources[savedMsg.id];
         }
       }
     }

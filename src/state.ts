@@ -71,6 +71,12 @@ export interface AppState {
   messageProposals: Record<string, BrainProposalItem[]>;
   messageFindings: Record<string, FindingItem[]>;
   messageBrainSources: Record<string, BrainCitationItem[]>;
+  messageCitedSources: Record<
+    string,
+    Array<{ url: string; title: string; domain?: string }>
+  >;
+  chatLastRenderedConvId: string | null;
+  chatPinToBottom: boolean;
   expandedDebugMessages: Record<string, boolean>;
   revealedPasswords: Record<string, string>;
   sourceStats: Record<string, SourceStatEntry>;
@@ -208,6 +214,9 @@ export const state: AppState = {
   messageProposals: {},
   messageFindings: {},
   messageBrainSources: {},
+  messageCitedSources: {},
+  chatLastRenderedConvId: null,
+  chatPinToBottom: true,
   expandedDebugMessages: {},
   revealedPasswords: {},
   sourceStats: {},
@@ -978,7 +987,7 @@ export function getAvailableModelsForPicker(): Array<{
         seen.add(m.id);
         base.push({
           id: m.id,
-          label: `${m.id} - ${m.label}`,
+          label: m.id,
         });
       }
     }
