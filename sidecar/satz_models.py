@@ -5472,11 +5472,13 @@ def make_sidecar_server(
             if route_path == "/mail/lane":
                 lane_name = query_params.get("name", "inbox")
                 cursor_val = int(query_params.get("cursor", "0") or 0)
-                return self._json(runtime.mail.get_lane(name=lane_name, cursor=cursor_val))
+                acct_id = query_params.get("account_id") or None
+                return self._json(runtime.mail.get_lane(name=lane_name, cursor=cursor_val, account_id=acct_id))
             if route_path == "/mail/status":
                 return self._json(runtime.mail.get_status())
             if route_path == "/mail/triage":
-                return self._json(runtime.mail.get_triage_set())
+                acct_id = query_params.get("account_id") or None
+                return self._json(runtime.mail.get_triage_set(account_id=acct_id))
             if route_path == "/mail/codes":
                 dom = query_params.get("domain", "")
                 return self._json({"ok": True, "codes": runtime.mail.get_active_codes_for_domain(dom)})
@@ -5487,7 +5489,8 @@ def make_sidecar_server(
                 return self._json(runtime.mail.get_eval_report())
             if route_path == "/mail/search":
                 q = query_params.get("q", "")
-                return self._json(runtime.mail.search_messages(q))
+                acct_id = query_params.get("account_id") or None
+                return self._json(runtime.mail.search_messages(q, account_id=acct_id))
             if route_path.startswith("/mail/message/"):
                 parts = [p for p in route_path.split("/") if p]
                 if len(parts) == 3 and parts[0] == "mail" and parts[1] == "message":

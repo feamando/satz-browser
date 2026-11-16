@@ -77,6 +77,7 @@ export interface AppState {
   showErrorLog: boolean;
   mailAccounts: MailAccountItem[];
   mailPresets: MailPreset[];
+  mailActiveAccountId: string | null;
   mailCounts: MailLaneCounts;
   mailInboxRows: Array<Record<string, unknown>>;
   mailActiveLane: "inbox" | "pings" | "orders" | "promos";
@@ -211,6 +212,7 @@ export const state: AppState = {
   showErrorLog: false,
   mailAccounts: [],
   mailPresets: [],
+  mailActiveAccountId: null,
   mailCounts: { inbox_unread: 0, pings: 0, orders: 0, promos: 0 },
   mailInboxRows: [],
   mailActiveLane: "inbox",

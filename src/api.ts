@@ -1379,11 +1379,16 @@ export async function sidecarSyncMail(
 
 export async function sidecarGetMailLane(
   name: "inbox" | "pings" | "orders" | "promos" = "inbox",
-  cursor = 0
+  cursor = 0,
+  accountId?: string | null
 ): Promise<MailLaneResponse> {
   try {
+    const acctParam =
+      accountId && accountId !== "all"
+        ? `&account_id=${encodeURIComponent(accountId)}`
+        : "";
     const res = await sidecarFetch(
-      `/mail/lane?name=${encodeURIComponent(name)}&cursor=${cursor}`
+      `/mail/lane?name=${encodeURIComponent(name)}&cursor=${cursor}${acctParam}`
     );
     if (!res.ok) {
       return {
@@ -1533,11 +1538,16 @@ export async function sidecarSaveMailAttachment(
 }
 
 export async function sidecarSearchMail(
-  query: string
+  query: string,
+  accountId?: string | null
 ): Promise<{ ok: boolean; rows: Array<Record<string, unknown>> }> {
   try {
+    const acctParam =
+      accountId && accountId !== "all"
+        ? `&account_id=${encodeURIComponent(accountId)}`
+        : "";
     const res = await sidecarFetch(
-      `/mail/search?q=${encodeURIComponent(query)}`
+      `/mail/search?q=${encodeURIComponent(query)}${acctParam}`
     );
     if (!res.ok) return { ok: false, rows: [] };
     return await res.json();
@@ -1641,7 +1651,9 @@ export async function sidecarUndoMailSend(
   }
 }
 
-export async function sidecarGetMailTriage(): Promise<{
+export async function sidecarGetMailTriage(
+  accountId?: string | null
+): Promise<{
   ok: boolean;
   unlocked?: boolean;
   overview?: string;
@@ -1657,7 +1669,11 @@ export async function sidecarGetMailTriage(): Promise<{
   expiring_promos?: Array<Record<string, unknown>>;
 }> {
   try {
-    const res = await sidecarFetch("/mail/triage");
+    const acctParam =
+      accountId && accountId !== "all"
+        ? `?account_id=${encodeURIComponent(accountId)}`
+        : "";
+    const res = await sidecarFetch(`/mail/triage${acctParam}`);
     if (!res.ok) return { ok: false };
     return await res.json();
   } catch {

@@ -1500,8 +1500,9 @@ class SatzMailPipeline:
             if not row:
                 return None
             msg = dict(row)
-            acct_row = conn.execute("SELECT email FROM accounts WHERE id = ?", (msg["account_id"],)).fetchone()
+            acct_row = conn.execute("SELECT email, label FROM accounts WHERE id = ?", (msg["account_id"],)).fetchone()
             account_email = str(acct_row["email"] or "").lower() if acct_row else ""
+            account_label = str(acct_row["label"] or account_email).strip() if acct_row else account_email
 
             existing_lbl = conn.execute(
                 "SELECT label, source FROM labels WHERE message_id = ?",
@@ -1651,6 +1652,7 @@ class SatzMailPipeline:
             extracts_map=extracts_map,
             sig_meta=sig_meta,
             account_email=account_email,
+            account_label=account_label,
             profile_id=bound_profile_id,
         )
 
@@ -1670,12 +1672,14 @@ class SatzMailPipeline:
         extracts_map: dict[str, tuple[str, str, float]],
         sig_meta: dict[str, str],
         account_email: str,
+        account_label: str = "",
         profile_id: str | None = None,
     ) -> None:
         """
         Section 4.5.5 & M18 §4:
         - Brain (`$source: mail:<message_id>`):
           - Binds to `profile_id` and drops if the profile is locked or deleted.
+          - Records the email profile (`account_email` / `account_label` / `user_profile`) on every stored entity with an explicit note.
           - Create `person` ONLY for senders the user has replied to OR received at least 2 `email`-labelled messages from.
           - Create `organization` from sender domain, skipping `FREE_MAIL_DOMAINS` and `noreply@` / `no-reply@` / `notifications@`.
           - Add `order` (`Entities/Orders`) and `promotion` (`Entities/Promotions`) entities.
@@ -1705,11 +1709,42 @@ class SatzMailPipeline:
             )
 
         message_id = msg["id"]
+        acct_id = str(msg.get("account_id") or "")
         from_addr = (msg["from_addr"] or "").strip().lower()
         from_name = (msg["from_name"] or "").strip()
         local_part = from_addr.split("@")[0] if "@" in from_addr else from_addr
         domain = from_addr.split("@")[-1] if "@" in from_addr else ""
         source_tag = f"mail:{message_id}"
+        eff_email_prof = (account_email or "").strip().lower() or "mail"
+        eff_acct_lbl = (account_label or eff_email_prof).strip()
+        email_profile_note = (
+            f"\n\n[Note: Indexed from email profile {eff_email_prof} ({eff_acct_lbl}) in user profile '{target_pid}'.]"
+        )
+        email_profile_rel = (
+            [{"type": "from_email_profile", "target": f"[[{eff_email_prof}]]"}]
+            if eff_email_prof and "@" in eff_email_prof
+            else []
+        )
+
+        # Ensure the email profile account itself is recorded in the Brain
+        if eff_email_prof and "@" in eff_email_prof:
+            brain.upsert_entity(
+                entity_type="account",
+                name=eff_email_prof,
+                summary=f"Email profile {eff_email_prof} ({eff_acct_lbl}) under user profile {target_pid}.",
+                attributes={
+                    "email": eff_email_prof,
+                    "email_profile": eff_email_prof,
+                    "account_label": eff_acct_lbl,
+                    "user_profile": target_pid,
+                    "$source": f"mail_account:{acct_id}",
+                },
+                content=f"Note: Email profile {eff_email_prof} ({eff_acct_lbl}) stored in user profile '{target_pid}'.",
+                aliases=[eff_email_prof],
+                source_url=f"mail_account:{acct_id}",
+                tier=1,
+                actor="mail/pipeline",
+            )
 
         org_name: str | None = None
         is_free_domain = domain in FREE_MAIL_DOMAINS
@@ -1721,9 +1756,15 @@ class SatzMailPipeline:
             brain.upsert_entity(
                 entity_type="organization",
                 name=org_name,
-                summary=f"Organization associated with domain {domain}.",
-                attributes={"domain": domain, "$source": source_tag},
-                relationships=[],
+                summary=f"Organization associated with domain {domain} (email profile: {eff_email_prof}).",
+                attributes={
+                    "domain": domain,
+                    "email_profile": eff_email_prof,
+                    "user_profile": target_pid,
+                    "$source": source_tag,
+                },
+                content=f"Organization {org_name} ({domain}).{email_profile_note}",
+                relationships=list(email_profile_rel),
                 aliases=[domain],
                 source_url=source_tag,
                 tier=2,
@@ -1767,6 +1808,8 @@ class SatzMailPipeline:
                     "email": from_addr,
                     "last_contact": last_contact_iso,
                     "message_count": email_msg_count,
+                    "email_profile": eff_email_prof,
+                    "user_profile": target_pid,
                     "$source": source_tag,
                 }
                 if sig_meta.get("role"):
@@ -1775,12 +1818,13 @@ class SatzMailPipeline:
                     attrs["company"] = sig_meta.get("company") or org_name
                 if sig_meta.get("phone"):
                     attrs["phone"] = sig_meta["phone"]
-                rels = [{"type": "works_for", "target": f"[[{org_name}]]"}] if org_name else []
+                rels = ([{"type": "works_for", "target": f"[[{org_name}]]"}] if org_name else []) + list(email_profile_rel)
                 brain.upsert_entity(
                     entity_type="person",
                     name=person_name,
-                    summary=f"Mail contact ({from_addr}), {email_msg_count} email messages.",
+                    summary=f"Mail contact ({from_addr}), {email_msg_count} email messages (email profile: {eff_email_prof}).",
                     attributes=attrs,
+                    content=f"Contact {person_name} <{from_addr}>.{email_profile_note}",
                     relationships=rels,
                     aliases=[from_addr],
                     source_url=source_tag,
@@ -1803,14 +1847,17 @@ class SatzMailPipeline:
                     "status": status_val,
                     "total": extracts_map.get("total", ("", "", 0.0))[0],
                     "tracking_url": extracts_map.get("tracking_url", ("", "", 0.0))[0],
+                    "email_profile": eff_email_prof,
+                    "user_profile": target_pid,
                     "$source": source_tag,
                 }
                 brain.upsert_entity(
                     entity_type="order",
                     name=order_title,
-                    summary=f"Order {order_no or tracking_no} from {merchant} ({status_val}).",
+                    summary=f"Order {order_no or tracking_no} from {merchant} ({status_val} · email profile: {eff_email_prof}).",
                     attributes=order_attrs,
-                    content=new_text[:1200],
+                    content=f"{new_text[:1100]}{email_profile_note}",
+                    relationships=list(email_profile_rel),
                     source_url=source_tag,
                     tier=1,
                     actor="mail/pipeline",
@@ -1819,9 +1866,14 @@ class SatzMailPipeline:
                     brain.upsert_entity(
                         entity_type="organization",
                         name=merchant,
-                        summary=f"Merchant {merchant}.",
-                        attributes={"domain": domain, "$source": source_tag},
-                        relationships=[{"type": "has_order", "target": f"[[{order_title}]]"}],
+                        summary=f"Merchant {merchant} (email profile: {eff_email_prof}).",
+                        attributes={
+                            "domain": domain,
+                            "email_profile": eff_email_prof,
+                            "user_profile": target_pid,
+                            "$source": source_tag,
+                        },
+                        relationships=[{"type": "has_order", "target": f"[[{order_title}]]"}, *email_profile_rel],
                         source_url=source_tag,
                         tier=2,
                         actor="mail/pipeline",
@@ -1839,14 +1891,17 @@ class SatzMailPipeline:
                     "voucher_code": code,
                     "discount_value": extracts_map.get("discount_value", ("", "", 0.0))[0],
                     "expiry": extracts_map.get("expiry", ("", "", 0.0))[0],
+                    "email_profile": eff_email_prof,
+                    "user_profile": target_pid,
                     "$source": source_tag,
                 }
                 brain.upsert_entity(
                     entity_type="promotion",
                     name=promo_title,
-                    summary=f"Promo code {code} for {company}.",
+                    summary=f"Promo code {code} for {company} (email profile: {eff_email_prof}).",
                     attributes=promo_attrs,
-                    content=new_text[:1200],
+                    content=f"{new_text[:1100]}{email_profile_note}",
+                    relationships=list(email_profile_rel),
                     source_url=source_tag,
                     tier=2,
                     actor="mail/pipeline",
@@ -1855,9 +1910,14 @@ class SatzMailPipeline:
                     brain.upsert_entity(
                         entity_type="organization",
                         name=company,
-                        summary=f"Company {company}.",
-                        attributes={"domain": domain, "$source": source_tag},
-                        relationships=[{"type": "has_promotion", "target": f"[[{promo_title}]]"}],
+                        summary=f"Company {company} (email profile: {eff_email_prof}).",
+                        attributes={
+                            "domain": domain,
+                            "email_profile": eff_email_prof,
+                            "user_profile": target_pid,
+                            "$source": source_tag,
+                        },
+                        relationships=[{"type": "has_promotion", "target": f"[[{promo_title}]]"}, *email_profile_rel],
                         source_url=source_tag,
                         tier=2,
                         actor="mail/pipeline",
@@ -1867,14 +1927,16 @@ class SatzMailPipeline:
         if label in ("email", "information") and new_text and len(new_text.strip()) >= 15:
             entity_name = person_created_name or org_name or from_name or from_addr or "mail"
             mail_url = f"satzmail://message/{message_id}"
+            annotated_text = f"[email profile: {eff_email_prof}]\n{new_text}"
+            extra_meta = json.dumps({"email_profile": eff_email_prof, "user_profile": target_pid, "account_id": acct_id})
             with self.runtime.store_lock:
                 self.runtime.store.db.execute(
                     """
                     INSERT OR REPLACE INTO satz_sources
                     (source_id, conversation_id, url, domain, title, text, extra_json, capture_mode, updated_at)
-                    VALUES (?, 'mail', ?, 'mail', ?, ?, '[]', 'mail', ?)
+                    VALUES (?, 'mail', ?, 'mail', ?, ?, ?, 'mail', ?)
                     """,
-                    (source_tag, mail_url, msg["subject"], new_text, time.time()),
+                    (source_tag, mail_url, f"[{eff_email_prof}] {msg['subject']}", annotated_text, extra_meta, time.time()),
                 )
                 if getattr(self.runtime, "ingest_queue", None) is not None and not getattr(self.runtime, "pause_learning", False):
                     self.runtime.ingest_queue.put(
@@ -1883,8 +1945,8 @@ class SatzMailPipeline:
                             "source_id": source_tag,
                             "url": mail_url,
                             "domain": domain or "mail",
-                            "title": msg["subject"],
-                            "text": new_text[:4000],
+                            "title": f"[{eff_email_prof}] {msg['subject']}",
+                            "text": annotated_text[:4000],
                             "profile_id": target_pid,
                         }
                     )
@@ -1893,7 +1955,7 @@ class SatzMailPipeline:
 
                     self.runtime.store.db.execute(
                         "INSERT OR IGNORE INTO satz_conv_passages (conversation_id, text_norm, url) VALUES ('mail', ?, ?)",
-                        (norm_text(new_text[:4000]), mail_url),
+                        (norm_text(annotated_text[:4000]), mail_url),
                     )
                 except Exception:
                     pass

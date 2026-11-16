@@ -495,6 +495,11 @@ function renderRailRegion(): void {
     onSelectConversation: (id) => {
       void selectConversation(id);
     },
+    onSelectMailAccount: (convId, accountId) => {
+      state.mailActiveAccountId = accountId;
+      state.mailSearchRows = null;
+      void selectConversation(convId);
+    },
     onNewConversation: () => {
       state.activeDetail = null;
       state.showKnowledgeView = false;
@@ -586,6 +591,32 @@ function renderTabStripRegion(): void {
         return;
       }
       renderWorkspaceRegions();
+    },
+    onSelectMailAccount: (accountId) => {
+      state.mailActiveAccountId = accountId;
+      state.mailSearchRows = null;
+      if (!state.activeTabId.startsWith("lane:") && state.activeTabId !== "chat") {
+        state.activeTabId = `lane:${state.mailActiveLane || "inbox"}`;
+      }
+      void (async () => {
+        await refreshMailState();
+        renderAllRegions();
+      })();
+    },
+    onAddMailAccount: async () => {
+      state.showBrainView = false;
+      state.showKnowledgeView = true;
+      state.settingsAccordionOpen.mail = true;
+      const [kb, docRoles, mCfg] = await Promise.all([
+        sidecarFetchKnowledge(),
+        sidecarFetchDoctor(),
+        sidecarGetModelConfig(),
+      ]);
+      if (kb) state.knowledge = kb;
+      state.doctorRoles = docRoles;
+      if (mCfg) state.modelConfig = mCfg;
+      await refreshMailState();
+      renderAllRegions();
     },
     onToggleCompareCandidate: (tabId) => {
       const idx = state.compareTabIds.indexOf(tabId);
@@ -2418,7 +2449,7 @@ async function openComposeTab(seed?: {
     "compose"
   );
   state.mailComposeDrafts[tab.id] = {
-    account_id: state.mailAccounts[0]?.id ?? "",
+    account_id: state.mailActiveAccountId ?? state.mailAccounts[0]?.id ?? "",
     to: seed?.to ?? "",
     cc: seed?.cc ?? "",
     bcc: "",

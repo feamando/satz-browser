@@ -9,6 +9,7 @@ import type { Conversation } from "./types";
 
 export interface RailActions {
   onSelectConversation: (id: string) => void;
+  onSelectMailAccount?: (convId: string, accountId: string | null) => void;
   onNewConversation: () => void;
   onTogglePin: (id: string) => void;
   onRenameConversation: (id: string, newTitle: string) => void;
@@ -183,18 +184,60 @@ function renderConversationRow(
   const relTime = formatRelativeTime(c.last_active_at || c.created_at);
   const menuOpen = !isMail && state.openMenuConvId === c.id;
   const isRenaming = !isMail && state.renamingConvId === c.id;
-  const inboxUnread =
-    state.mailCounts.inbox_unread || state.sidecar.mail?.inbox_unread || 0;
+  const totalUnread =
+    state.mailAccounts.length > 0
+      ? state.mailAccounts.reduce((acc, a) => acc + (a.inbox_unread ?? 0), 0) ||
+        state.mailCounts.inbox_unread ||
+        state.sidecar.mail?.inbox_unread ||
+        0
+      : state.mailCounts.inbox_unread || state.sidecar.mail?.inbox_unread || 0;
   const displayTitle = isMail
-    ? `mail (${inboxUnread})`
+    ? state.mailAccounts.length > 0
+      ? `all mail (${totalUnread})`
+      : `mail (${totalUnread})`
     : c.title;
   const hasWatchBadge =
     state.watchBadgeConvIds.includes(c.id) ||
     Boolean(state.sidecar.watch_badges?.includes(c.id));
 
+  const isCommonMailActive =
+    isMail &&
+    isActive &&
+    !state.showKnowledgeView &&
+    !state.showBrainView &&
+    state.mailActiveAccountId === null;
+  const isNormalConvActive =
+    !isMail && isActive && !state.showKnowledgeView && !state.showBrainView;
+
+  const mailAccountSubrowsHtml =
+    isMail && state.mailAccounts.length > 0
+      ? state.mailAccounts
+          .map((acct) => {
+            const acctActive =
+              isActive &&
+              !state.showKnowledgeView &&
+              !state.showBrainView &&
+              state.mailActiveAccountId === acct.id;
+            const acctUnread = acct.inbox_unread ?? 0;
+            const acctName = acct.email || acct.label;
+            return `
+              <div
+                class="rail-row ${acctActive ? "active" : ""}"
+                data-mail-rail-conv="${escapeHtml(c.id)}"
+                data-mail-rail-acct="${escapeHtml(acct.id)}"
+                title="View mail for ${escapeHtml(acctName)} (${acct.message_count ?? 0} messages)"
+              >
+                <span class="rail-row-title">  * ${escapeHtml(acctName)} (${acctUnread})</span>
+                <span class="rail-row-meta muted">${acct.message_count ?? 0} msg</span>
+              </div>
+            `;
+          })
+          .join("")
+      : "";
+
   return `
     <div>
-      <div class="rail-row ${isActive && !state.showKnowledgeView && !state.showBrainView ? "active" : ""}" data-conv-id="${escapeHtml(c.id)}">
+      <div class="rail-row ${isCommonMailActive || isNormalConvActive ? "active" : ""}" data-conv-id="${escapeHtml(c.id)}" ${isMail ? 'data-mail-rail-all="1"' : ""}>
         ${
           isRenaming
             ? `<input id="rail-rename-input-${escapeHtml(c.id)}" class="rail-rename-input" type="text" value="${escapeHtml(c.title)}" />`
@@ -209,6 +252,7 @@ function renderConversationRow(
             : `<button class="rail-menu-btn" data-menu-conv-id="${escapeHtml(c.id)}">...</button>`
         }
       </div>
+      ${mailAccountSubrowsHtml}
       ${
         menuOpen
           ? `
@@ -292,10 +336,16 @@ function bindRailEvents(container: HTMLElement, actions: RailActions): void {
       ) {
         return;
       }
-      const id = (row as HTMLElement).getAttribute("data-conv-id");
+      const el = row as HTMLElement;
+      const id = el.getAttribute("data-conv-id");
+      const isMailAll = el.getAttribute("data-mail-rail-all") === "1";
       if (id) {
         state.openMenuConvId = null;
-        actions.onSelectConversation(id);
+        if (isMailAll && actions.onSelectMailAccount) {
+          actions.onSelectMailAccount(id, null);
+        } else {
+          actions.onSelectConversation(id);
+        }
       }
     });
 
@@ -305,6 +355,23 @@ function bindRailEvents(container: HTMLElement, actions: RailActions): void {
       if (id) {
         state.openMenuConvId = state.openMenuConvId === id ? null : id;
         renderRail(actions);
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-mail-rail-acct]").forEach((row) => {
+    row.addEventListener("click", () => {
+      const el = row as HTMLElement;
+      const convId = el.getAttribute("data-mail-rail-conv") ?? "";
+      const acctId = el.getAttribute("data-mail-rail-acct") ?? "";
+      if (convId && acctId) {
+        state.openMenuConvId = null;
+        if (actions.onSelectMailAccount) {
+          actions.onSelectMailAccount(convId, acctId);
+        } else {
+          state.mailActiveAccountId = acctId;
+          actions.onSelectConversation(convId);
+        }
       }
     });
   });

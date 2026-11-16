@@ -272,6 +272,8 @@ export interface MailAccountItem {
   last_error: string;
   auth_failed?: boolean;
   message_count?: number;
+  inbox_unread?: number;
+  counts?: MailLaneCounts;
 }
 
 export interface MailLaneCounts {

@@ -134,6 +134,12 @@ export interface MailViewActions {
 export async function refreshMailState(): Promise<void> {
   const acctRes = await sidecarGetMailAccounts();
   state.mailAccounts = acctRes.accounts ?? [];
+  if (
+    state.mailActiveAccountId &&
+    !state.mailAccounts.some((a) => a.id === state.mailActiveAccountId)
+  ) {
+    state.mailActiveAccountId = null;
+  }
   state.mailPresets =
     acctRes.presets && acctRes.presets.length > 0
       ? acctRes.presets
@@ -143,7 +149,11 @@ export async function refreshMailState(): Promise<void> {
 
   if (acctRes.unlocked && state.mailAccounts.length > 0) {
     await apiEnsureMailConversation();
-    const laneRes = await sidecarGetMailLane(state.mailActiveLane, 0);
+    const laneRes = await sidecarGetMailLane(
+      state.mailActiveLane,
+      0,
+      state.mailActiveAccountId
+    );
     state.mailCounts = laneRes.counts ?? {
       inbox_unread: 0,
       pings: 0,
@@ -159,7 +169,7 @@ export async function refreshMailState(): Promise<void> {
     if (state.mailActiveLane === "inbox") {
       state.mailInboxRows = laneRes.rows ?? [];
     }
-    const triageRes = await sidecarGetMailTriage();
+    const triageRes = await sidecarGetMailTriage(state.mailActiveAccountId);
     if (triageRes.ok) {
       state.mailTriageOverview = triageRes.overview ?? "";
       state.mailTriageSources = triageRes.sources ?? [];
@@ -264,9 +274,9 @@ export function renderMailAccountsSectionHtml(): string {
               )
               .join("")}
           </select>
-          <input id="mail-acct-label" class="kb-input" type="text" placeholder="label (e.g. Gmail)" value="Gmail" />
-          <input id="mail-acct-email" class="kb-input" type="text" placeholder="email (you@gmail.com)" />
-          <input id="mail-acct-password" class="kb-input" type="password" placeholder="app password" />
+          <input id="mail-acct-email" class="kb-input" type="text" placeholder="email (you@gmail.com)_" />
+          <input id="mail-acct-label" class="kb-input" type="text" placeholder="account name (defaults to email address)_" value="" />
+          <input id="mail-acct-password" class="kb-input" type="password" placeholder="app password_" />
         </div>
         <div class="kb-form-row">
           <select id="mail-acct-protocol" class="kb-input">
@@ -339,7 +349,6 @@ export function bindMailAccountsEvents(
   presetSelect?.addEventListener("change", () => {
     const p = presets.find((x) => x.id === presetSelect.value);
     if (!p) return;
-    if (labelInput) labelInput.value = p.label;
     if (protocolSelect) protocolSelect.value = p.protocol;
     if (inHostInput) inHostInput.value = p.in_host;
     if (inPortInput) inPortInput.value = String(p.in_port);
@@ -349,19 +358,23 @@ export function bindMailAccountsEvents(
     if (smtpSecSelect) smtpSecSelect.value = p.smtp_security;
   });
 
-  const collectFormPayload = (): Record<string, unknown> => ({
-    preset: presetSelect?.value ?? "gmail",
-    label: labelInput?.value.trim() ?? "Mail",
-    email: emailInput?.value.trim() ?? "",
-    password: passwordInput?.value ?? "",
-    protocol: protocolSelect?.value ?? "imap",
-    in_host: inHostInput?.value.trim() ?? "",
-    in_port: Number(inPortInput?.value ?? 993),
-    in_security: inSecSelect?.value ?? "ssl",
-    smtp_host: smtpHostInput?.value.trim() ?? "",
-    smtp_port: Number(smtpPortInput?.value ?? 587),
-    smtp_security: smtpSecSelect?.value ?? "starttls",
-  });
+  const collectFormPayload = (): Record<string, unknown> => {
+    const emailVal = emailInput?.value.trim() ?? "";
+    const customLabel = labelInput?.value.trim() ?? "";
+    return {
+      preset: presetSelect?.value ?? "gmail",
+      label: customLabel || emailVal || "Mail",
+      email: emailVal,
+      password: passwordInput?.value ?? "",
+      protocol: protocolSelect?.value ?? "imap",
+      in_host: inHostInput?.value.trim() ?? "",
+      in_port: Number(inPortInput?.value ?? 993),
+      in_security: inSecSelect?.value ?? "ssl",
+      smtp_host: smtpHostInput?.value.trim() ?? "",
+      smtp_port: Number(smtpPortInput?.value ?? 587),
+      smtp_security: smtpSecSelect?.value ?? "starttls",
+    };
+  };
 
   container
     .querySelector("#mail-form-test-btn")
@@ -1034,10 +1047,17 @@ export function renderMailLaneView(
     `
       : "";
 
+  const activeAccountObj = state.mailAccounts.find(
+    (a) => a.id === state.mailActiveAccountId
+  );
+  const activeScopeLabel = activeAccountObj
+    ? activeAccountObj.email || activeAccountObj.label
+    : "all accounts (common view)";
+
   container.innerHTML = `
     <div class="knowledge-view">
       <div class="kb-header">
-        <span>mail · ${escapeHtml(lane)} (${rows.length}) · ${escapeHtml(clf.status_text)} · keys: j/k move, Enter open, r reply, c compose, e hide, 1-4 move, / search</span>
+        <span>mail · <strong>${escapeHtml(activeScopeLabel)}</strong> · ${escapeHtml(lane)} (${rows.length}) · ${escapeHtml(clf.status_text)} · keys: j/k move, Enter open, r reply, c compose, e hide, 1-4 move, / search</span>
         <div>
           ${
             showOnboardingBtn
@@ -1117,7 +1137,7 @@ export function renderMailLaneView(
       if (!q) {
         state.mailSearchRows = null;
       } else {
-        const res = await sidecarSearchMail(q);
+        const res = await sidecarSearchMail(q, state.mailActiveAccountId);
         state.mailSearchRows = res.rows ?? [];
       }
       await actions.onRefreshState();
@@ -1141,7 +1161,7 @@ export function renderMailLaneView(
       if (!q) {
         state.mailSearchRows = null;
       } else {
-        const res = await sidecarSearchMail(q);
+        const res = await sidecarSearchMail(q, state.mailActiveAccountId);
         state.mailSearchRows = res.rows ?? [];
       }
       await actions.onRefreshState();
@@ -1216,12 +1236,15 @@ export function renderMailLaneView(
 }
 
 function renderInboxRowsHtml(rows: Array<Record<string, unknown>>): string {
+  const showAccountBadge =
+    state.mailActiveAccountId === null && state.mailAccounts.length > 0;
   return rows
     .map((r, idx) => {
       const id = String(r.id ?? r.latest_message_id ?? "");
       const fromStr = String(
         r.from_name || r.from_addr || r.merchant || r.company || "unknown"
       );
+      const acctEmail = String(r.account_email ?? "");
       const subj = String(
         r.subject || r.order_number || r.domain || "(no subject)"
       );
@@ -1242,6 +1265,7 @@ function renderInboxRowsHtml(rows: Array<Record<string, unknown>>): string {
         >
           <span class="mail-col-from truncate">${unseen ? "* " : "  "}${escapeHtml(fromStr)}</span>
           <span class="mail-col-subject truncate">
+            ${showAccountBadge && acctEmail ? `<span class="source-cut-badge" title="Email account: ${escapeHtml(acctEmail)}">${escapeHtml(acctEmail)}</span> ` : ""}
             ${needsReply ? `<span class="source-cut-badge">reply</span> ` : ""}
             ${dueDate ? `<span class="source-cut-badge">due ${escapeHtml(dueDate.slice(5))}</span> ` : ""}
             ${escapeHtml(subj)}

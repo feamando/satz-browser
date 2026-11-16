@@ -564,6 +564,42 @@ class SatzMailManager:
         )
         return username, password
 
+    def _ensure_accounts_in_brain(self, accounts_list: list[dict[str, Any]]) -> None:
+        brain = getattr(self.runtime, "brain", None)
+        pm = getattr(self.runtime, "passwords", None)
+        if brain is None or getattr(brain, "locked", False) or pm is None or not pm.unlocked:
+            return
+        user_prof = str(pm.active_profile_id or "default")
+        try:
+            for acct in accounts_list:
+                email_addr = str(acct.get("email") or "").strip().lower()
+                if not email_addr:
+                    continue
+                acct_label = str(acct.get("label") or email_addr).strip()
+                proto = str(acct.get("protocol") or "imap").upper()
+                in_host = str(acct.get("in_host") or "")
+                brain.upsert_entity(
+                    entity_type="account",
+                    name=email_addr,
+                    summary=f"Email profile {email_addr} ({acct_label} · {proto} {in_host}) in user profile {user_prof}.",
+                    attributes={
+                        "email": email_addr,
+                        "email_profile": email_addr,
+                        "account_label": acct_label,
+                        "protocol": proto,
+                        "in_host": in_host,
+                        "user_profile": user_prof,
+                        "$source": f"mail_account:{acct.get('id')}",
+                    },
+                    content=f"Note: Email account profile {email_addr} ({acct_label}) configured and indexed under user profile '{user_prof}'.",
+                    aliases=[email_addr, acct_label] if acct_label.lower() != email_addr else [email_addr],
+                    source_url=f"mail_account:{acct.get('id')}",
+                    tier=1,
+                    actor="mail/account",
+                )
+        except Exception:
+            pass
+
     def list_accounts(self) -> dict[str, Any]:
         self.passwords._check_autolock()
         if not self.passwords.unlocked:
@@ -592,10 +628,11 @@ class SatzMailManager:
                     "SELECT COUNT(*) AS c FROM messages WHERE account_id = ? AND hidden = 0",
                     (aid,),
                 ).fetchone()
+                acct_counts = self._compute_lane_counts(conn, account_id=aid)
                 accounts.append(
                     {
                         "id": aid,
-                        "label": r["label"],
+                        "label": r["label"] or r["email"],
                         "email": r["email"],
                         "protocol": r["protocol"],
                         "in_host": r["in_host"],
@@ -610,14 +647,17 @@ class SatzMailManager:
                         "last_error": r["last_error"] or "",
                         "auth_failed": aid in self._auth_stopped_accounts or (r["last_error"] or "").startswith("[auth failed]"),
                         "message_count": int(msg_cnt_row["c"] if msg_cnt_row else 0),
+                        "inbox_unread": acct_counts["inbox_unread"],
+                        "counts": acct_counts,
                     }
                 )
-            return {
-                "unlocked": True,
-                "accounts": accounts,
-                "presets": list(MAIL_PRESETS.values()),
-                "settings": self.get_mail_settings(),
-            }
+        self._ensure_accounts_in_brain(accounts)
+        return {
+            "unlocked": True,
+            "accounts": accounts,
+            "presets": list(MAIL_PRESETS.values()),
+            "settings": self.get_mail_settings(),
+        }
 
     def _open_imap_client(self, host: str, port: int, security: str):
         if self.imap_factory is not None:
@@ -771,7 +811,19 @@ class SatzMailManager:
         preset = MAIL_PRESETS.get(preset_id, {})
         email_addr = str(payload.get("email") or payload.get("username") or "").strip()
         password = str(payload.get("password") or "").strip()
-        label = str(payload.get("label") or preset.get("label") or email_addr).strip()
+        raw_label = str(payload.get("label") or "").strip()
+        generic_labels = {
+            "",
+            "gmail",
+            "outlook",
+            "outlook / hotmail",
+            "icloud",
+            "gmx",
+            "web.de",
+            "custom imap",
+            "custom pop3",
+        }
+        label = email_addr if (raw_label.lower() in generic_labels and email_addr) else (raw_label or email_addr or str(preset.get("label") or "Mail"))
         protocol = str(payload.get("protocol") or preset.get("protocol") or "imap").strip().lower()
         in_host = str(payload.get("in_host") or preset.get("in_host") or "").strip()
         in_port = int(payload.get("in_port") or preset.get("in_port") or (995 if protocol == "pop3" else 993))
@@ -783,7 +835,7 @@ class SatzMailManager:
 
         raw_prefix = str(payload.get("vault_prefix") or "").strip().upper()
         if not raw_prefix:
-            clean_part = re.sub(r"[^A-Z0-9]+", "_", (preset_id or label or email_addr).upper()).strip("_")
+            clean_part = re.sub(r"[^A-Z0-9]+", "_", (email_addr or label or preset_id).upper()).strip("_")
             raw_prefix = f"MAIL_{clean_part}" if not clean_part.startswith("MAIL_") else clean_part
 
         # Check if credentials already exist in vault under raw_prefix
@@ -1654,15 +1706,27 @@ class SatzMailManager:
                 )
         return classifier_info, onboarding_candidates
 
-    def get_lane(self, name: str = "inbox", cursor: int = 0, limit: int = 50) -> dict[str, Any]:
+    def get_lane(
+        self,
+        name: str = "inbox",
+        cursor: int = 0,
+        limit: int = 50,
+        account_id: str | None = None,
+    ) -> dict[str, Any]:
         """
         Section 4.1, 4.8 & M19 §5: Returns lane rows (50 per page) for `inbox`, `pings`, `orders`, `promos`.
+        Supports filtering by `account_id` (or unified common view when `account_id` is None / 'all').
         """
         self.passwords._check_autolock()
+        eff_acct = (account_id or "").strip()
+        if eff_acct.lower() == "all":
+            eff_acct = ""
+
         if not self.passwords.unlocked:
             return {
                 "unlocked": False,
                 "lane": name,
+                "account_id": eff_acct or "all",
                 "rows": [],
                 "groups": [],
                 "counts": {"inbox_unread": 0, "pings": 0, "orders": 0, "promos": 0},
@@ -1679,16 +1743,20 @@ class SatzMailManager:
         lane = (name or "inbox").strip().lower()
         offset = max(0, int(cursor or 0))
         page_limit = max(1, min(200, int(limit or 50)))
+        acct_sql = " AND m.account_id = ? " if eff_acct else ""
+        acct_params: tuple[Any, ...] = (eff_acct,) if eff_acct else ()
 
         with self.db_lock:
             conn = self._ensure_connection()
-            counts = self._compute_lane_counts(conn)
+            counts = self._compute_lane_counts(conn, account_id=eff_acct or None)
             classifier_info, onboarding_candidates = self._compute_classifier_and_onboarding_info(conn)
 
             if lane == "inbox":
                 rows = conn.execute(
-                    """
-                    SELECT m.id, m.account_id, m.thread_id, m.from_name, m.from_addr, m.subject,
+                    f"""
+                    SELECT m.id, m.account_id, COALESCE(ac.email, '') AS account_email,
+                           COALESCE(ac.label, ac.email, '') AS account_label,
+                           m.thread_id, m.from_name, m.from_addr, m.subject,
                            m.snippet, m.date, m.seen, m.answered, m.flagged, m.has_attachments,
                            COALESCE(l.label, 'email') AS label,
                            COALESCE(l.confidence, 0.0) AS confidence,
@@ -1696,19 +1764,22 @@ class SatzMailManager:
                            a.due_date AS due_date,
                            COALESCE(a.ask, '') AS ask
                     FROM messages m
+                    LEFT JOIN accounts ac ON ac.id = m.account_id
                     LEFT JOIN labels l ON l.message_id = m.id
                     LEFT JOIN actions a ON a.message_id = m.id
                     WHERE m.hidden = 0
                       AND UPPER(m.folder) = 'INBOX'
                       AND COALESCE(l.label, 'email') = 'email'
+                      {acct_sql}
                     ORDER BY m.date DESC
                     LIMIT ? OFFSET ?
                     """,
-                    (page_limit, offset),
+                    (*acct_params, page_limit, offset),
                 ).fetchall()
                 return {
                     "unlocked": True,
                     "lane": "inbox",
+                    "account_id": eff_acct or "all",
                     "rows": [dict(r) for r in rows],
                     "next_cursor": offset + len(rows) if len(rows) == page_limit else None,
                     "counts": counts,
@@ -1718,17 +1789,20 @@ class SatzMailManager:
 
             if lane == "pings":
                 rows = conn.execute(
-                    """
-                    SELECT m.id, m.from_name, m.from_addr, m.subject, m.snippet, m.date, m.seen,
+                    f"""
+                    SELECT m.id, m.account_id, COALESCE(ac.email, '') AS account_email,
+                           m.from_name, m.from_addr, m.subject, m.snippet, m.date, m.seen,
                            COALESCE(e.value, '') AS platform
                     FROM messages m
+                    LEFT JOIN accounts ac ON ac.id = m.account_id
                     JOIN labels l ON l.message_id = m.id AND l.label = 'ping'
                     LEFT JOIN extracts e ON e.message_id = m.id AND e.field = 'platform'
                     WHERE m.hidden = 0
+                      {acct_sql}
                     ORDER BY m.date DESC
                     LIMIT ? OFFSET ?
                     """,
-                    (page_limit, offset),
+                    (*acct_params, page_limit, offset),
                 ).fetchall()
                 items = [dict(r) for r in rows]
                 groups_map: dict[str, dict[str, Any]] = {}
@@ -1742,6 +1816,7 @@ class SatzMailManager:
                 return {
                     "unlocked": True,
                     "lane": "pings",
+                    "account_id": eff_acct or "all",
                     "rows": items,
                     "groups": list(groups_map.values()),
                     "counts": counts,
@@ -1759,15 +1834,18 @@ class SatzMailManager:
                     "refunded": 5,
                 }
                 rows = conn.execute(
-                    """
-                    SELECT m.id, m.thread_id, m.from_name, m.from_addr, m.subject, m.snippet, m.date, m.seen
+                    f"""
+                    SELECT m.id, m.account_id, COALESCE(ac.email, '') AS account_email,
+                           m.thread_id, m.from_name, m.from_addr, m.subject, m.snippet, m.date, m.seen
                     FROM messages m
+                    LEFT JOIN accounts ac ON ac.id = m.account_id
                     JOIN labels l ON l.message_id = m.id AND l.label = 'information'
                     WHERE m.hidden = 0
+                      {acct_sql}
                     ORDER BY m.date DESC
                     LIMIT ? OFFSET ?
                     """,
-                    (page_limit, offset),
+                    (*acct_params, page_limit, offset),
                 ).fetchall()
                 orders_by_key: dict[str, dict[str, Any]] = {}
                 for r in rows:
@@ -1784,6 +1862,8 @@ class SatzMailManager:
                     msg_status = (ext.get("status") or "ordered").strip().lower()
                     email_entry = {
                         "id": mid,
+                        "account_id": r["account_id"],
+                        "account_email": r["account_email"],
                         "subject": r["subject"],
                         "date": r["date"],
                         "snippet": r["snippet"],
@@ -1794,6 +1874,7 @@ class SatzMailManager:
                         t_url = ext.get("tracking_url") or (self._default_tracking_url_for_number(t_no) if t_no else "")
                         orders_by_key[key] = {
                             "key": key,
+                            "account_email": r["account_email"],
                             "merchant": merchant,
                             "order_number": order_no,
                             "status": msg_status,
@@ -1852,6 +1933,7 @@ class SatzMailManager:
                 return {
                     "unlocked": True,
                     "lane": "orders",
+                    "account_id": eff_acct or "all",
                     "rows": list(orders_by_key.values()),
                     "counts": counts,
                     "classifier": classifier_info,
@@ -1860,15 +1942,18 @@ class SatzMailManager:
 
             if lane == "promos":
                 rows = conn.execute(
-                    """
-                    SELECT m.id, m.from_name, m.from_addr, m.subject, m.snippet, m.date, m.seen
+                    f"""
+                    SELECT m.id, m.account_id, COALESCE(ac.email, '') AS account_email,
+                           m.from_name, m.from_addr, m.subject, m.snippet, m.date, m.seen
                     FROM messages m
+                    LEFT JOIN accounts ac ON ac.id = m.account_id
                     JOIN labels l ON l.message_id = m.id AND l.label = 'promotion'
                     WHERE m.hidden = 0
+                      {acct_sql}
                     ORDER BY m.date DESC
                     LIMIT ? OFFSET ?
                     """,
-                    (page_limit, offset),
+                    (*acct_params, page_limit, offset),
                 ).fetchall()
                 companies: dict[str, dict[str, Any]] = {}
                 today_iso = datetime.date.today().isoformat()
@@ -1887,6 +1972,7 @@ class SatzMailManager:
                         {
                             "company": company,
                             "domain": dom,
+                            "account_email": r["account_email"],
                             "active_codes": [],
                             "expired_codes": [],
                             "emails": [],
@@ -1896,6 +1982,7 @@ class SatzMailManager:
                         grp["emails"].append(
                             {
                                 "id": mid,
+                                "account_email": r["account_email"],
                                 "subject": r["subject"],
                                 "date": r["date"],
                                 "snippet": r["snippet"],
@@ -1918,6 +2005,7 @@ class SatzMailManager:
                 return {
                     "unlocked": True,
                     "lane": "promos",
+                    "account_id": eff_acct or "all",
                     "rows": list(companies.values()),
                     "counts": counts,
                     "classifier": classifier_info,
@@ -1927,45 +2015,59 @@ class SatzMailManager:
             return {
                 "unlocked": True,
                 "lane": lane,
+                "account_id": eff_acct or "all",
                 "rows": [],
                 "counts": counts,
                 "classifier": classifier_info,
                 "onboarding_candidates": onboarding_candidates,
             }
 
-    def _compute_lane_counts(self, conn: sqlite3.Connection) -> dict[str, int]:
+    def _compute_lane_counts(self, conn: sqlite3.Connection, account_id: str | None = None) -> dict[str, int]:
+        eff_acct = (account_id or "").strip()
+        if eff_acct.lower() == "all":
+            eff_acct = ""
+        acct_sql = " AND m.account_id = ? " if eff_acct else ""
+        acct_params: tuple[Any, ...] = (eff_acct,) if eff_acct else ()
         inbox_unread = conn.execute(
-            """
+            f"""
             SELECT COUNT(*) AS c
             FROM messages m
             LEFT JOIN labels l ON l.message_id = m.id
             WHERE m.hidden = 0 AND UPPER(m.folder) = 'INBOX' AND m.seen = 0
               AND COALESCE(l.label, 'email') = 'email'
-            """
+              {acct_sql}
+            """,
+            acct_params,
         ).fetchone()
         pings_c = conn.execute(
-            """
+            f"""
             SELECT COUNT(*) AS c
             FROM messages m
             JOIN labels l ON l.message_id = m.id AND l.label = 'ping'
             WHERE m.hidden = 0 AND m.seen = 0
-            """
+              {acct_sql}
+            """,
+            acct_params,
         ).fetchone()
         orders_c = conn.execute(
-            """
+            f"""
             SELECT COUNT(*) AS c
             FROM messages m
             JOIN labels l ON l.message_id = m.id AND l.label = 'information'
             WHERE m.hidden = 0
-            """
+              {acct_sql}
+            """,
+            acct_params,
         ).fetchone()
         promos_c = conn.execute(
-            """
+            f"""
             SELECT COUNT(*) AS c
             FROM messages m
             JOIN labels l ON l.message_id = m.id AND l.label = 'promotion'
             WHERE m.hidden = 0
-            """
+              {acct_sql}
+            """,
+            acct_params,
         ).fetchone()
         return {
             "inbox_unread": int(inbox_unread["c"] if inbox_unread else 0),
@@ -2093,7 +2195,15 @@ class SatzMailManager:
         self._ensure_full_imap_message_fetched(message_id)
         with self.db_lock:
             conn = self._ensure_connection()
-            msg_row = conn.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
+            msg_row = conn.execute(
+                """
+                SELECT m.*, COALESCE(ac.email, '') AS account_email, COALESCE(ac.label, ac.email, '') AS account_label
+                FROM messages m
+                LEFT JOIN accounts ac ON ac.id = m.account_id
+                WHERE m.id = ?
+                """,
+                (message_id,),
+            ).fetchone()
             if not msg_row:
                 return {"ok": False, "error": f"Message {message_id} not found."}
             msg = dict(msg_row)
@@ -2399,9 +2509,15 @@ class SatzMailManager:
             "saved_path": str(src_path),
         }
 
-    def search_messages(self, query: str, limit: int = 50) -> dict[str, Any]:
+    def search_messages(
+        self,
+        query: str,
+        limit: int = 50,
+        account_id: str | None = None,
+    ) -> dict[str, Any]:
         """
         Section 4.8: FTS5 search over `messages_fts` (`subject`, `from_name`, `from_addr`, `new_text`).
+        Supports optional `account_id` filter.
         """
         self.passwords._check_autolock()
         if not self.passwords.unlocked:
@@ -2409,6 +2525,12 @@ class SatzMailManager:
         q = (query or "").strip()
         if not q:
             return {"ok": True, "unlocked": True, "rows": []}
+
+        eff_acct = (account_id or "").strip()
+        if eff_acct.lower() == "all":
+            eff_acct = ""
+        acct_sql = " AND m.account_id = ? " if eff_acct else ""
+        acct_params: tuple[Any, ...] = (eff_acct,) if eff_acct else ()
 
         # Sanitize FTS5 query tokens safely
         tokens = [re.sub(r'[^A-Za-z0-9@._äöüÄÖÜß-]+', "", t) for t in q.split()]
@@ -2421,31 +2543,35 @@ class SatzMailManager:
             conn = self._ensure_connection()
             try:
                 rows = conn.execute(
-                    """
-                    SELECT m.id, m.account_id, m.thread_id, m.from_name, m.from_addr, m.subject,
+                    f"""
+                    SELECT m.id, m.account_id, COALESCE(ac.email, '') AS account_email,
+                           m.thread_id, m.from_name, m.from_addr, m.subject,
                            m.snippet, m.date, m.seen, COALESCE(l.label, 'email') AS label
                     FROM messages_fts f
                     JOIN messages m ON m.id = f.message_id
+                    LEFT JOIN accounts ac ON ac.id = m.account_id
                     LEFT JOIN labels l ON l.message_id = m.id
-                    WHERE messages_fts MATCH ? AND m.hidden = 0
+                    WHERE messages_fts MATCH ? AND m.hidden = 0 {acct_sql}
                     ORDER BY m.date DESC
                     LIMIT ?
                     """,
-                    (fts_expr, max(1, min(100, int(limit or 50)))),
+                    (fts_expr, *acct_params, max(1, min(100, int(limit or 50)))),
                 ).fetchall()
             except Exception:
                 like_pat = f"%{q}%"
                 rows = conn.execute(
-                    """
-                    SELECT m.id, m.account_id, m.thread_id, m.from_name, m.from_addr, m.subject,
+                    f"""
+                    SELECT m.id, m.account_id, COALESCE(ac.email, '') AS account_email,
+                           m.thread_id, m.from_name, m.from_addr, m.subject,
                            m.snippet, m.date, m.seen, COALESCE(l.label, 'email') AS label
                     FROM messages m
+                    LEFT JOIN accounts ac ON ac.id = m.account_id
                     LEFT JOIN labels l ON l.message_id = m.id
-                    WHERE m.hidden = 0 AND (m.subject LIKE ? OR m.from_addr LIKE ? OR m.body_text LIKE ?)
+                    WHERE m.hidden = 0 AND (m.subject LIKE ? OR m.from_addr LIKE ? OR m.body_text LIKE ?) {acct_sql}
                     ORDER BY m.date DESC
                     LIMIT ?
                     """,
-                    (like_pat, like_pat, like_pat, max(1, min(100, int(limit or 50)))),
+                    (like_pat, like_pat, like_pat, *acct_params, max(1, min(100, int(limit or 50)))),
                 ).fetchall()
         return {"ok": True, "unlocked": True, "query": q, "rows": [dict(r) for r in rows]}
 
@@ -2912,7 +3038,7 @@ class SatzMailManager:
 
     # ── Milestone M14: Triage Set, Active Promo Codes, Digest & Eval Mode ──
 
-    def get_triage_set(self) -> dict[str, Any]:
+    def get_triage_set(self, account_id: str | None = None) -> dict[str, Any]:
         """
         Section 4.1 & 4.8 (M14): Returns the default context set for the Mail `chat` tab
         and `For you` digest:
@@ -2933,6 +3059,12 @@ class SatzMailManager:
                 "overview": "",
             }
 
+        eff_acct = (account_id or "").strip()
+        if eff_acct.lower() == "all":
+            eff_acct = ""
+        acct_sql = " AND m.account_id = ? " if eff_acct else ""
+        acct_params: tuple[Any, ...] = (eff_acct,) if eff_acct else ()
+
         now = time.time()
         seven_days_ago = now - 7 * 86400.0
         today_date = datetime.date.today()
@@ -2943,13 +3075,15 @@ class SatzMailManager:
             conn = self._ensure_connection()
             # 1. Unread `email` + `needs_reply` in last 7 days
             email_rows = conn.execute(
-                """
-                SELECT m.id, m.from_name, m.from_addr, m.subject, m.snippet, m.date, m.seen,
+                f"""
+                SELECT m.id, m.account_id, COALESCE(ac.email, '') AS account_email,
+                       m.from_name, m.from_addr, m.subject, m.snippet, m.date, m.seen,
                        COALESCE(a.needs_reply, 0) AS needs_reply,
                        a.due_date AS due_date,
                        COALESCE(a.ask, '') AS ask,
                        COALESCE(p.text, m.body_text) AS new_text
                 FROM messages m
+                LEFT JOIN accounts ac ON ac.id = m.account_id
                 LEFT JOIN labels l ON l.message_id = m.id
                 LEFT JOIN actions a ON a.message_id = m.id
                 LEFT JOIN parts p ON p.message_id = m.id AND p.kind = 'new'
@@ -2958,25 +3092,28 @@ class SatzMailManager:
                   AND COALESCE(l.label, 'email') = 'email'
                   AND m.date >= ?
                   AND (m.seen = 0 OR COALESCE(a.needs_reply, 0) = 1)
+                  {acct_sql}
                 ORDER BY COALESCE(a.needs_reply, 0) DESC, m.date DESC
                 LIMIT 10
                 """,
-                (seven_days_ago,),
+                (seven_days_ago, *acct_params),
             ).fetchall()
 
             # 2. Order (`information`) updates in last 7 days
             order_rows = conn.execute(
-                """
-                SELECT m.id, m.from_name, m.from_addr, m.subject, m.snippet, m.date,
+                f"""
+                SELECT m.id, m.account_id, COALESCE(ac.email, '') AS account_email,
+                       m.from_name, m.from_addr, m.subject, m.snippet, m.date,
                        COALESCE(p.text, m.body_text) AS new_text
                 FROM messages m
+                LEFT JOIN accounts ac ON ac.id = m.account_id
                 JOIN labels l ON l.message_id = m.id AND l.label = 'information'
                 LEFT JOIN parts p ON p.message_id = m.id AND p.kind = 'new'
-                WHERE m.hidden = 0 AND m.date >= ?
+                WHERE m.hidden = 0 AND m.date >= ? {acct_sql}
                 ORDER BY m.date DESC
                 LIMIT 8
                 """,
-                (seven_days_ago,),
+                (seven_days_ago, *acct_params),
             ).fetchall()
 
             order_updates: list[dict[str, Any]] = []
@@ -3001,16 +3138,19 @@ class SatzMailManager:
 
             # 3. Promo codes expiring in next 7 days (or active codes from recent promos)
             promo_rows = conn.execute(
-                """
-                SELECT m.id, m.from_name, m.from_addr, m.subject, m.snippet, m.date,
+                f"""
+                SELECT m.id, m.account_id, COALESCE(ac.email, '') AS account_email,
+                       m.from_name, m.from_addr, m.subject, m.snippet, m.date,
                        COALESCE(p.text, m.body_text) AS new_text
                 FROM messages m
+                LEFT JOIN accounts ac ON ac.id = m.account_id
                 JOIN labels l ON l.message_id = m.id AND l.label = 'promotion'
                 LEFT JOIN parts p ON p.message_id = m.id AND p.kind = 'new'
-                WHERE m.hidden = 0
+                WHERE m.hidden = 0 {acct_sql}
                 ORDER BY m.date DESC
                 LIMIT 25
-                """
+                """,
+                acct_params,
             ).fetchall()
 
             expiring_promos: list[dict[str, Any]] = []
