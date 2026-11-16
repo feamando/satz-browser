@@ -5871,9 +5871,51 @@ def make_sidecar_server(
 
             return self._json({"error": "not found"}, 404)
 
-    srv = ThreadingHTTPServer((host, port), Handler)
+    class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
+        # On Windows, SO_REUSEADDR allows multiple processes to bind to the same port
+        # simultaneously, routing traffic to the oldest orphaned process with a stale token.
+        allow_reuse_address = sys.platform != "win32"
+
+        def server_bind(self):
+            if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                try:
+                    self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                except Exception:
+                    pass
+            super().server_bind()
+
+    srv = ExclusiveThreadingHTTPServer((host, port), Handler)
     srv.auth_token = effective_token  # type: ignore[attr-defined]
     return srv
+
+
+def _is_parent_process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return True
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+            if not handle:
+                return False
+            try:
+                exit_code = ctypes.c_ulong(0)
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)) == 0:
+                    return False
+                return int(exit_code.value) == STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return True
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
 
 
 def main():
@@ -5883,6 +5925,7 @@ def main():
     parser.add_argument("--store", default=str(resolve_default_store_path()))
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8020)
+    parser.add_argument("--parent-pid", type=int, default=0)
     parser.add_argument("--preload-gemma", action="store_true", default=True)
     parser.add_argument("--no-preload-gemma", action="store_false", dest="preload_gemma")
     parser.add_argument("--bookmark-interval-minutes", type=float, default=30.0)
@@ -5898,7 +5941,7 @@ def main():
     srv_thread = threading.Thread(target=server.serve_forever, daemon=True)
     srv_thread.start()
     print(
-        f"[satz-sidecar] listening on http://{args.host}:{args.port} (sgs={runtime.sgs_root}, store={runtime.store_path})",
+        f"[satz-sidecar] listening on http://{args.host}:{args.port} (sgs={runtime.sgs_root}, store={runtime.store_path}, parent_pid={args.parent_pid})",
         flush=True,
     )
     if args.preload_gemma:
@@ -5909,7 +5952,13 @@ def main():
             runtime.record_error("gemma_preload", e)
     try:
         while True:
-            time.sleep(1.0)
+            time.sleep(1.5)
+            if args.parent_pid > 0 and not _is_parent_process_alive(args.parent_pid):
+                print(
+                    f"[satz-sidecar] parent process {args.parent_pid} exited; shutting down sidecar",
+                    flush=True,
+                )
+                break
     except KeyboardInterrupt:
         pass
     finally:

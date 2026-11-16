@@ -482,12 +482,57 @@ pub fn resolve_python_executable(repo_root: &std::path::Path, configured_python:
     }
 }
 
+fn kill_stale_sidecar_on_port(port: u16) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        if let Ok(output) = Command::new("netstat")
+            .args(["-ano", "-p", "TCP"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+        {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let needle = format!("127.0.0.1:{}", port);
+            for line in text.lines() {
+                if line.contains(&needle) && line.contains("LISTENING") {
+                    if let Some(pid_str) = line.split_whitespace().last() {
+                        if let Ok(pid) = pid_str.parse::<u32>() {
+                            if pid > 0 && pid != std::process::id() {
+                                let _ = Command::new("taskkill")
+                                    .args(["/F", "/T", "/PID", &pid.to_string()])
+                                    .creation_flags(CREATE_NO_WINDOW)
+                                    .output();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("lsof")
+            .args(["-ti", &format!("tcp:{}", port)])
+            .output()
+            .and_then(|out| {
+                let s = String::from_utf8_lossy(&out.stdout);
+                for pid_str in s.split_whitespace() {
+                    let _ = Command::new("kill").args(["-9", pid_str]).output();
+                }
+                Ok(())
+            });
+    }
+}
+
 fn spawn_sidecar(settings: &SatzSettings, app_data_dir: &PathBuf, token: &str) -> Option<Child> {
     let repo_root = resolve_repo_root(Some(settings));
     let script_path = repo_root.join("sidecar").join("satz_models.py");
     if !script_path.exists() {
         return None;
     }
+
+    kill_stale_sidecar_on_port(settings.port);
 
     let python_bin = resolve_python_executable(&repo_root, &settings.python);
 
@@ -514,6 +559,8 @@ fn spawn_sidecar(settings: &SatzSettings, app_data_dir: &PathBuf, token: &str) -
         .arg(&settings.gemma_path)
         .arg("--port")
         .arg(settings.port.to_string())
+        .arg("--parent-pid")
+        .arg(std::process::id().to_string())
         .arg("--store")
         .arg(store_path.to_string_lossy().to_string())
         .arg("--bookmark-interval-minutes")
@@ -896,6 +943,15 @@ pub fn run() {
             if let Some(sidecar) = app_handle.try_state::<SidecarState>() {
                 if let Ok(mut guard) = sidecar.child.lock() {
                     if let Some(mut child) = guard.take() {
+                        #[cfg(windows)]
+                        {
+                            use std::os::windows::process::CommandExt;
+                            const CREATE_NO_WINDOW: u32 = 0x08000000;
+                            let _ = Command::new("taskkill")
+                                .args(["/F", "/T", "/PID", &child.id().to_string()])
+                                .creation_flags(CREATE_NO_WINDOW)
+                                .output();
+                        }
                         let _ = child.kill();
                     }
                 }
