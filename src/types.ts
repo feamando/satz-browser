@@ -186,6 +186,7 @@ export interface SidecarHealth {
   pause_learning: boolean;
   errors?: SidecarErrorEntry[];
   mail?: MailStatusSummary | null;
+  watch_badges?: string[];
 }
 
 export interface MailPreset {
@@ -451,4 +452,41 @@ export interface CommandBarRoute {
   question?: string;
   query?: string;
   command_id?: CommandBarActionId;
+}
+
+export interface TaskStep {
+  id: string;
+  text: string;
+  kind: "log" | "send_gate";
+  status: "running" | "done" | "waiting_confirm" | "confirmed" | "cancelled" | "stopped";
+  ts: number;
+  action_summary?: string;
+  confirm_token?: string;
+}
+
+export interface AgentTaskCard {
+  id: string;
+  conversation_id: string;
+  agent: string;
+  goal: string;
+  steps: TaskStep[];
+  status: "running" | "waiting_confirm" | "completed" | "stopped" | "cancelled";
+  started_at: number;
+  stop_token: string;
+  result_md?: string;
+}
+
+export interface WatchItem {
+  watch_id: string;
+  store_watch_id?: number;
+  conversation_id: string;
+  query_or_url: string;
+  title: string;
+  cadence_seconds: number;
+  condition: string;
+  last_value: string;
+  previous_value: string;
+  last_checked_at: number;
+  changed_at: number;
+  badge_unread: boolean;
 }

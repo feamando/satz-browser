@@ -5,6 +5,7 @@ import {
   state,
 } from "./state";
 import type {
+  AgentTaskCard,
   BrainCitationItem,
   BrainProposalItem,
   CitationCheckEntry,
@@ -35,6 +36,11 @@ export interface ChatActions {
   onRecaptureAllTabs?: () => void;
   onAcceptProposal?: (proposalId: string, msgId: string) => void;
   onRejectProposal?: (proposalId: string, msgId: string) => void;
+  onRunComparer?: () => void;
+  onWatchAnswer?: (msgId: string, content: string) => void;
+  onStopTask?: (taskId: string, stopToken: string) => void;
+  onConfirmTaskStep?: (taskId: string, stepId: string, confirmToken: string) => void;
+  onCancelTaskStep?: (taskId: string, stepId: string) => void;
 }
 
 export function renderChatPanel(
@@ -157,6 +163,11 @@ export function renderChatPanel(
               })
               .join("")}
             <button id="chat-context-add-tab-btn" class="context-add-btn" title="open a new tab to add to context">[+ tab]</button>
+            ${
+              activeTabSources.length >= 2
+                ? `<button id="chat-compare-these-btn" class="context-add-btn" title="run Comparer agent across open tabs">[compare these]</button>`
+                : ""
+            }
           </div>
         </div>
         ${emptyContextBannerHtml}
@@ -184,9 +195,18 @@ export function renderChatPanel(
       `
       : "";
 
+  const convTasks = state.conversationTasks[detail.conversation.id] ?? [];
+  const taskCardsHtml = convTasks
+    .map((task) => renderTaskCardBlock(task))
+    .join("");
+  const watchNoticeHtml = state.watchStatusNotice
+    ? `<div class="kb-card muted">${escapeHtml(state.watchStatusNotice)}</div>`
+    : "";
+
   container.innerHTML = `
     <div class="chat-column">
       <div class="chat-messages" id="chat-messages-list">
+        ${watchNoticeHtml}
         ${
           isMailConv && state.mailTriageOverview
             ? renderMessageBlock(
@@ -199,7 +219,7 @@ export function renderChatPanel(
             : ""
         }
         ${
-          messages.length === 0 && !state.isStreaming && !(isMailConv && state.mailTriageOverview)
+          messages.length === 0 && convTasks.length === 0 && !state.isStreaming && !(isMailConv && state.mailTriageOverview)
             ? `<div class="muted">no messages in this conversation yet.</div>`
             : messages
                 .map((m) =>
@@ -220,6 +240,7 @@ export function renderChatPanel(
                 )
                 .join("")
         }
+        ${taskCardsHtml}
         ${
           state.isStreaming
             ? `
@@ -566,11 +587,16 @@ function renderMessageBlock(
     `
       : "";
 
+  const watchBtnHtml =
+    role === "assistant" && !isErrorMsg && msgId !== "mail-triage-overview"
+      ? ` <button class="citation-link" data-watch-msg="${escapeHtml(msgId)}" title="watch this answer or source for changes">[watch]</button>`
+      : "";
+
   return `
     <div class="msg-block ${isErrorMsg ? "msg-error-block" : ""}">
       <div class="msg-header">
         <span>${escapeHtml(role)}${statusBadge}</span>
-        <span>${modelLabel}${srcCountLabel}${escapeHtml(citeStatsLabel)}</span>
+        <span>${modelLabel}${srcCountLabel}${escapeHtml(citeStatsLabel)}${watchBtnHtml}</span>
       </div>
       <div class="msg-body">${formattedBody}</div>
       ${readFooterHtml}
@@ -581,6 +607,101 @@ function renderMessageBlock(
       ${openAsTabButtons}
     </div>
   `;
+}
+
+function renderTaskCardBlock(task: AgentTaskCard): string {
+  const isRunning =
+    task.status === "running" || task.status === "waiting_confirm";
+  const stopBtnHtml = isRunning
+    ? `<button class="citation-link" data-task-stop="${escapeHtml(task.id)}" data-stop-token="${escapeHtml(task.stop_token)}">[stop]</button>`
+    : "";
+
+  const stepsHtml = (task.steps ?? [])
+    .map((step) => {
+      if (step.kind === "send_gate") {
+        const summary = step.action_summary || step.text;
+        if (step.status === "waiting_confirm") {
+          return `
+            <div class="rail-row">
+              <span>[send-gate] ${escapeHtml(summary)}</span>
+              <span>
+                <button
+                  class="citation-link"
+                  data-task-confirm="${escapeHtml(task.id)}"
+                  data-step-id="${escapeHtml(step.id)}"
+                  data-confirm-token="${escapeHtml(step.confirm_token ?? "")}"
+                >[confirm]</button>
+                <button
+                  class="citation-link"
+                  data-task-cancel="${escapeHtml(task.id)}"
+                  data-step-id="${escapeHtml(step.id)}"
+                >[cancel]</button>
+              </span>
+            </div>
+          `;
+        }
+        return `<div class="streaming-step-line">[send-gate · ${escapeHtml(step.status)}] ${escapeHtml(summary)}</div>`;
+      }
+      const prefix = step.status === "running" ? "&gt;" : "ok";
+      return `<div class="streaming-step-line">${prefix} ${escapeHtml(step.text)}</div>`;
+    })
+    .join("");
+
+  const activeSourceIds = (state.activeDetail?.sources ?? []).map((s) => s.id);
+  const resultHtml = task.result_md
+    ? `<div class="msg-body">${formatCitationsInText(task.result_md, activeSourceIds)}</div>`
+    : "";
+
+  return `
+    <div class="msg-block" data-task-card="${escapeHtml(task.id)}">
+      <div class="msg-header">
+        <span>task · ${escapeHtml(task.agent)} [${escapeHtml(task.status)}]</span>
+        <span>goal: ${escapeHtml(task.goal)} ${stopBtnHtml}</span>
+      </div>
+      <div class="streaming-status-box">
+        <div class="streaming-steps-list">${stepsHtml}</div>
+      </div>
+      ${resultHtml}
+    </div>
+  `;
+}
+
+function renderMarkdownTablesInHtml(escapedWithCites: string): string {
+  const lines = escapedWithCites.split("\n");
+  const out: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i].trim();
+    const nextLine = (lines[i + 1] ?? "").trim();
+    if (
+      line.startsWith("|") &&
+      line.endsWith("|") &&
+      nextLine.startsWith("|") &&
+      nextLine.includes("---")
+    ) {
+      const parseRow = (r: string) =>
+        r
+          .slice(1, -1)
+          .split("|")
+          .map((c) => c.trim().replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>"));
+      const headers = parseRow(line);
+      i += 2;
+      const bodyRows: string[][] = [];
+      while (i < lines.length && lines[i].trim().startsWith("|") && lines[i].trim().endsWith("|")) {
+        bodyRows.push(parseRow(lines[i].trim()));
+        i += 1;
+      }
+      const thead = `<thead><tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead>`;
+      const tbody = `<tbody>${bodyRows
+        .map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`)
+        .join("")}</tbody>`;
+      out.push(`<table class="kb-table">${thead}${tbody}</table>`);
+      continue;
+    }
+    out.push(lines[i]);
+    i += 1;
+  }
+  return out.join("\n");
 }
 
 export function formatCitationsInText(
@@ -619,7 +740,7 @@ export function formatCitationsInText(
     return `<button class="citation-link" data-citation-idx="${idx}" data-citation-src="${escapeHtml(sourceId)}">[${idx}]</button>`;
   });
 
-  return withSrcCites.replace(/\[B(\d+)\]/g, (_match, digits) => {
+  const withBrainCites = withSrcCites.replace(/\[B(\d+)\]/g, (_match, digits) => {
     const bIdx = Number(digits);
     const bKey = `B${bIdx}`;
     const outOfRangeCheck = citationCheck?.find(
@@ -644,6 +765,7 @@ export function formatCitationsInText(
     }
     return `<button class="citation-link" data-brain-cite="${escapeHtml(bKey)}" data-brain-slug="${escapeHtml(slug)}" title="open Brain card: ${escapeHtml(labelName)}">[${escapeHtml(bKey)}]</button>`;
   });
+  return renderMarkdownTablesInHtml(withBrainCites);
 }
 
 function bindChatEvents(container: HTMLElement, actions: ChatActions): void {
@@ -835,6 +957,58 @@ function bindChatEvents(container: HTMLElement, actions: ChatActions): void {
       const mid = el.getAttribute("data-proposal-msg") ?? "";
       if (pid && actions.onRejectProposal) {
         actions.onRejectProposal(pid, mid);
+      }
+    });
+  });
+
+  container
+    .querySelector("#chat-compare-these-btn")
+    ?.addEventListener("click", () => {
+      if (actions.onRunComparer) {
+        actions.onRunComparer();
+      }
+    });
+
+  container.querySelectorAll("[data-watch-msg]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const mid = (btn as HTMLElement).getAttribute("data-watch-msg") ?? "";
+      const msgObj = state.activeDetail?.messages.find((m) => m.id === mid);
+      if (mid && actions.onWatchAnswer) {
+        actions.onWatchAnswer(mid, msgObj?.content ?? "");
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-task-stop]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const taskId = el.getAttribute("data-task-stop") ?? "";
+      const stopToken = el.getAttribute("data-stop-token") ?? "";
+      if (taskId && actions.onStopTask) {
+        actions.onStopTask(taskId, stopToken);
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-task-confirm]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const taskId = el.getAttribute("data-task-confirm") ?? "";
+      const stepId = el.getAttribute("data-step-id") ?? "";
+      const token = el.getAttribute("data-confirm-token") ?? "";
+      if (taskId && actions.onConfirmTaskStep) {
+        actions.onConfirmTaskStep(taskId, stepId, token);
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-task-cancel]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const taskId = el.getAttribute("data-task-cancel") ?? "";
+      const stepId = el.getAttribute("data-step-id") ?? "";
+      if (taskId && actions.onCancelTaskStep) {
+        actions.onCancelTaskStep(taskId, stepId);
       }
     });
   });

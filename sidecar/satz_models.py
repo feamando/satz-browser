@@ -23,6 +23,7 @@ import argparse
 import collections
 import hashlib
 import hmac
+import html as html_lib
 import json
 import os
 import queue
@@ -398,6 +399,8 @@ class SatzSidecarRuntime:
 
         self.store_lock = threading.RLock()
         self.model_lock = threading.RLock()
+        self.tasks_lock = threading.RLock()
+        self.tasks: dict[str, dict[str, Any]] = {}
 
         self.passwords = ProfilePasswordManager(self.legacy_store_path.parent)
         self.store_path = self.passwords.get_profile_store_path()
@@ -872,6 +875,26 @@ class SatzSidecarRuntime:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS satz_watches (
+                    watch_id TEXT PRIMARY KEY,
+                    store_watch_id INTEGER,
+                    conversation_id TEXT NOT NULL,
+                    query_or_url TEXT NOT NULL,
+                    title TEXT NOT NULL DEFAULT '',
+                    cadence_seconds REAL NOT NULL DEFAULT 1800.0,
+                    condition TEXT NOT NULL DEFAULT 'any_change',
+                    last_value TEXT,
+                    previous_value TEXT,
+                    last_checked_at REAL NOT NULL DEFAULT 0.0,
+                    changed_at REAL NOT NULL DEFAULT 0.0,
+                    badge_unread INTEGER NOT NULL DEFAULT 0,
+                    etag TEXT,
+                    last_modified TEXT,
+                    content_hash TEXT,
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_satz_watches_conv ON satz_watches(conversation_id);
                 """
             )
             existing_bm_cols = {
@@ -1129,6 +1152,7 @@ class SatzSidecarRuntime:
             "pause_learning": self.pause_learning,
             "errors": self.get_errors(),
             "mail": self.mail.get_status() if hasattr(self, "mail") and self.mail else None,
+            "watch_badges": self.get_unread_watch_conversations(),
         }
 
     # ── Lazy Model Loaders ───────────────────────────────────────────────
@@ -1917,6 +1941,10 @@ class SatzSidecarRuntime:
                 self.run_bookmark_index_pass()
             except Exception as e:
                 self.record_error("bookmark_loop", e)
+            try:
+                self.run_watch_pass()
+            except Exception as we:
+                self.record_error("watch_loop", we)
 
     def close(self) -> None:
         self._closed = True
@@ -2961,6 +2989,36 @@ class SatzSidecarRuntime:
             raw = build_digest(self.store)
             candidates: list[dict[str, Any]] = []
 
+            # Section 8.3 (M22): Include triggered watches in `For you` (/digest)
+            changed_watch_rows = self.store.db.execute(
+                """
+                SELECT watch_id, conversation_id, query_or_url, title, last_value, previous_value, changed_at
+                FROM satz_watches
+                WHERE changed_at IS NOT NULL AND changed_at > 0
+                ORDER BY changed_at DESC
+                LIMIT 4
+                """
+            ).fetchall()
+            for wr in changed_watch_rows:
+                w_target = str(wr["query_or_url"] or "")
+                w_dom = domain_of(w_target) if w_target.startswith(("http://", "https://")) else "watch"
+                w_title = str(wr["title"] or "").strip() or w_dom or w_target
+                w_val = str(wr["last_value"] or "").strip()
+                w_prev = str(wr["previous_value"] or "").strip()
+                diff_str = f"{w_prev} -> {w_val}" if (w_prev and w_val and w_prev != w_val) else (w_val or "updated")
+                candidates.append(
+                    {
+                        "entity": self._extract_clean_entity(w_title, w_dom, w_target),
+                        "reason": f"watch ({diff_str})",
+                        "title": f"watch: {w_title} ({diff_str})",
+                        "url": w_target if w_target.startswith(("http://", "https://")) else f"satzwatch://{wr['watch_id']}",
+                        "domain": w_dom or "watch",
+                        "kind": "watch_triggered",
+                        "watch_id": wr["watch_id"],
+                        "conversation_id": wr["conversation_id"],
+                    }
+                )
+
             # Section 3.4 (M10): Include recently changed bookmarks in /digest
             changed_bm_rows = self.store.db.execute(
                 """
@@ -3083,13 +3141,16 @@ class SatzSidecarRuntime:
             for cand in candidates:
                 norm_u = self._norm_digest_url(str(cand.get("url") or ""))
                 dom = str(cand.get("domain") or domain_of(str(cand.get("url") or "")) or "").lower().removeprefix("www.")
-                is_changed = str(cand.get("kind") or "") == "bookmark_changed" or str(cand.get("title") or "").startswith("changed:")
+                is_changed = (
+                    str(cand.get("kind") or "") in ("bookmark_changed", "watch_triggered")
+                    or str(cand.get("title") or "").startswith(("changed:", "watch:"))
+                )
 
                 if norm_u and norm_u in url_to_idx:
                     existing_idx = url_to_idx[norm_u]
                     existing_is_changed = (
-                        str(items[existing_idx].get("kind") or "") == "bookmark_changed"
-                        or str(items[existing_idx].get("title") or "").startswith("changed:")
+                        str(items[existing_idx].get("kind") or "") in ("bookmark_changed", "watch_triggered")
+                        or str(items[existing_idx].get("title") or "").startswith(("changed:", "watch:"))
                     )
                     if is_changed and not existing_is_changed:
                         items[existing_idx] = cand
@@ -3852,6 +3913,10 @@ class SatzSidecarRuntime:
                     "DELETE FROM satz_sources WHERE conversation_id = ?",
                     (cid,),
                 )
+                self.store.db.execute(
+                    "DELETE FROM satz_watches WHERE conversation_id = ?",
+                    (cid,),
+                )
             self._cascade_orphan_edges_and_queries()
             self.store.db.commit()
             after = self.store.db.execute("SELECT COUNT(*) FROM passages").fetchone()[0]
@@ -3862,6 +3927,808 @@ class SatzSidecarRuntime:
                 "passages_after": after,
                 "deleted": before - after,
             }
+
+    # ── Section 8 (M22): Task Cards, Comparer Agent, Watcher Agent ────────
+    _COMMIT_ACTION_RE = re.compile(
+        r"\b(send|submit|buy|purchase|checkout|sign\s+in|log\s+in|pay|confirm\s+order)\b",
+        re.I,
+    )
+
+    @staticmethod
+    def _public_task(task: dict[str, Any]) -> dict[str, Any]:
+        steps_out: list[dict[str, Any]] = []
+        for s in task.get("steps") or []:
+            step_copy = {
+                "id": s["id"],
+                "text": s["text"],
+                "kind": s["kind"],
+                "status": s["status"],
+                "ts": s["ts"],
+            }
+            if s.get("action_summary"):
+                step_copy["action_summary"] = s["action_summary"]
+            if s.get("kind") == "send_gate" and not s.get("_consumed"):
+                step_copy["confirm_token"] = s.get("confirm_token", "")
+            steps_out.append(step_copy)
+        return {
+            "id": task["id"],
+            "conversation_id": task["conversation_id"],
+            "agent": task["agent"],
+            "goal": task["goal"],
+            "steps": steps_out,
+            "status": task["status"],
+            "started_at": task["started_at"],
+            "stop_token": task["stop_token"],
+            "result_md": task.get("result_md", ""),
+        }
+
+    def create_task(
+        self,
+        conversation_id: str,
+        goal: str,
+        agent: str = "task",
+    ) -> dict[str, Any]:
+        with self.tasks_lock:
+            task_id = f"task_{secrets.token_hex(6)}"
+            stop_token = secrets.token_hex(16)
+            task = {
+                "id": task_id,
+                "conversation_id": str(conversation_id or "default"),
+                "agent": str(agent or "task"),
+                "goal": str(goal or ""),
+                "steps": [],
+                "status": "running",
+                "started_at": round(time.time(), 3),
+                "stop_token": stop_token,
+                "result_md": "",
+            }
+            self.tasks[task_id] = task
+            return self._public_task(task)
+
+    def append_task_step(
+        self,
+        task_id: str,
+        text: str,
+        kind: str = "log",
+        action_summary: str = "",
+    ) -> dict[str, Any]:
+        with self.tasks_lock:
+            task = self.tasks.get(task_id)
+            if not task:
+                raise KeyError(f"Task '{task_id}' not found")
+            if task["status"] in ("stopped", "cancelled"):
+                return self._public_task(task)
+
+            is_send_gate = (
+                kind in ("send_gate", "commit")
+                or bool(action_summary)
+                or (kind == "auto" and bool(self._COMMIT_ACTION_RE.search(text or "")))
+            )
+            step_id = f"step_{len(task['steps']) + 1}_{secrets.token_hex(3)}"
+            step: dict[str, Any] = {
+                "id": step_id,
+                "text": str(text or ""),
+                "kind": "send_gate" if is_send_gate else "log",
+                "status": "waiting_confirm" if is_send_gate else "done",
+                "ts": round(time.time(), 3),
+                "action_summary": str(action_summary or text or "") if is_send_gate else "",
+                "confirm_token": secrets.token_hex(16) if is_send_gate else "",
+                "_consumed": False,
+            }
+            task["steps"].append(step)
+            if is_send_gate:
+                task["status"] = "waiting_confirm"
+            return self._public_task(task)
+
+    def complete_task(self, task_id: str, result_md: str = "") -> dict[str, Any]:
+        with self.tasks_lock:
+            task = self.tasks.get(task_id)
+            if not task:
+                raise KeyError(f"Task '{task_id}' not found")
+            if task["status"] not in ("stopped", "cancelled", "waiting_confirm"):
+                task["status"] = "completed"
+            if result_md:
+                task["result_md"] = result_md
+            return self._public_task(task)
+
+    def stop_task(self, task_id: str, stop_token: str) -> dict[str, Any]:
+        with self.tasks_lock:
+            task = self.tasks.get(task_id)
+            if not task:
+                return {"ok": False, "error": "task not found"}
+            expected = str(task.get("stop_token") or "")
+            if not stop_token or not hmac.compare_digest(str(stop_token), expected):
+                return {"ok": False, "error": "invalid stop_token"}
+            if task["status"] not in ("stopped", "cancelled", "completed"):
+                task["status"] = "stopped"
+                task["steps"].append(
+                    {
+                        "id": f"step_{len(task['steps']) + 1}_stop",
+                        "text": "stopped by user",
+                        "kind": "log",
+                        "status": "stopped",
+                        "ts": round(time.time(), 3),
+                        "_consumed": True,
+                    }
+                )
+            return {"ok": True, "task": self._public_task(task)}
+
+    def confirm_task_step(
+        self,
+        task_id: str,
+        step_id: str,
+        confirm_token: str,
+    ) -> dict[str, Any]:
+        with self.tasks_lock:
+            task = self.tasks.get(task_id)
+            if not task:
+                return {"ok": False, "error": "task not found"}
+            target_step = None
+            for s in task["steps"]:
+                if s["id"] == step_id or (not step_id and s.get("kind") == "send_gate"):
+                    target_step = s
+                    break
+            if not target_step or target_step.get("kind") != "send_gate":
+                return {"ok": False, "error": "send-gate step not found"}
+            if target_step.get("_consumed"):
+                return {"ok": False, "error": "confirm_token already used"}
+            expected = str(target_step.get("confirm_token") or "")
+            if not confirm_token or not expected or not hmac.compare_digest(str(confirm_token), expected):
+                return {"ok": False, "error": "invalid confirm_token"}
+
+            target_step["_consumed"] = True
+            target_step["confirm_token"] = ""
+            target_step["status"] = "confirmed"
+            if all(
+                st.get("status") != "waiting_confirm"
+                for st in task["steps"]
+                if st.get("kind") == "send_gate"
+            ):
+                task["status"] = "running"
+            return {"ok": True, "task": self._public_task(task), "step_id": target_step["id"]}
+
+    def cancel_task_step(
+        self,
+        task_id: str,
+        step_id: str = "",
+    ) -> dict[str, Any]:
+        with self.tasks_lock:
+            task = self.tasks.get(task_id)
+            if not task:
+                return {"ok": False, "error": "task not found"}
+            target_step = None
+            for s in task["steps"]:
+                if s["id"] == step_id or (not step_id and s.get("kind") == "send_gate"):
+                    target_step = s
+                    break
+            if target_step:
+                target_step["_consumed"] = True
+                target_step["confirm_token"] = ""
+                target_step["status"] = "cancelled"
+            task["status"] = "cancelled"
+            return {"ok": True, "task": self._public_task(task)}
+
+    def list_tasks(self, conversation_id: str | None = None) -> list[dict[str, Any]]:
+        with self.tasks_lock:
+            cid = (conversation_id or "").strip()
+            items = [
+                self._public_task(t)
+                for t in self.tasks.values()
+                if not cid or t.get("conversation_id") == cid
+            ]
+            items.sort(key=lambda x: float(x.get("started_at") or 0.0))
+            return items
+
+    # ── Section 8.2 (M22): Comparer Agent ────────────────────────────────
+    _PRICE_EXTRACT_RE = re.compile(
+        r"(?:(?:EUR|USD|GBP|CHF)\s*\d{1,5}(?:[.,]\d{2})?|[€$£]\s*\d{1,5}(?:[.,]\d{2})?|\d{1,5}(?:[.,]\d{2})?\s*(?:EUR|USD|GBP|CHF|€|\$|£))",
+        re.I,
+    )
+
+    @classmethod
+    def _extract_product_attributes(
+        cls,
+        title: str,
+        url: str,
+        domain: str,
+        text: str,
+        extra_lines: list[str],
+        findings: list[dict[str, Any]],
+    ) -> dict[str, str]:
+        combined = "\n".join([*(extra_lines or []), text or ""])
+
+        # 1. Price
+        price_val = ""
+        for fd in findings or []:
+            if isinstance(fd, dict) and fd.get("price"):
+                price_val = str(fd["price"]).strip()
+                break
+        if not price_val:
+            pm = cls._PRICE_EXTRACT_RE.search(combined)
+            if pm:
+                price_val = pm.group(0).strip()
+        if not price_val:
+            price_val = "not listed"
+
+        # 2. Key specs
+        spec_parts: list[str] = []
+        raw_lines = [
+            re.sub(r"\s+", " ", ln).strip(" -*•\t")
+            for ln in (text or "").splitlines()
+            if ln.strip()
+        ]
+        for ln in raw_lines:
+            low = ln.lower()
+            if len(ln) < 4 or len(ln) > 140:
+                continue
+            if ln.lower() == (title or "").strip().lower():
+                continue
+            if cls._PRICE_EXTRACT_RE.fullmatch(ln.strip()):
+                continue
+            if any(
+                kw in low
+                for kw in (
+                    "weight",
+                    "material",
+                    "battery",
+                    "display",
+                    "screen",
+                    "storage",
+                    "ram",
+                    "memory",
+                    "cpu",
+                    "chip",
+                    "processor",
+                    "waterproof",
+                    "sole",
+                    "leather",
+                    "gore-tex",
+                    "size",
+                    "dimensions",
+                    "warranty",
+                    "续航",
+                    "spec",
+                    "mm",
+                    "kg",
+                    "gb",
+                    "tb",
+                    "hz",
+                    "mah",
+                    "wh",
+                    "inch",
+                    ":",
+                )
+            ):
+                cleaned_ln = re.sub(r"^(?:price|cost)\s*:\s*.*$", "", ln, flags=re.I).strip()
+                if cleaned_ln and cleaned_ln not in spec_parts:
+                    spec_parts.append(cleaned_ln)
+            if len(spec_parts) >= 3:
+                break
+
+        if not spec_parts:
+            for ln in raw_lines:
+                if len(ln) >= 8 and ln.lower() != (title or "").strip().lower():
+                    spec_parts.append(ln[:100])
+                if len(spec_parts) >= 2:
+                    break
+
+        specs_val = "; ".join(spec_parts)[:160] if spec_parts else (title or domain or "standard")
+
+        # 3. Availability / Shipping
+        avail_val = ""
+        for ln in raw_lines:
+            low = ln.lower()
+            if any(
+                k in low
+                for k in (
+                    "in stock",
+                    "out of stock",
+                    "free shipping",
+                    "delivery",
+                    "ships in",
+                    "available",
+                    "returns",
+                    "warranty",
+                )
+            ):
+                avail_val = ln[:90]
+                break
+        if not avail_val:
+            avail_val = "see page"
+
+        # 4. Source
+        src_label = domain or url or "local"
+
+        return {
+            "Price": price_val.replace("|", "/"),
+            "Key specs": specs_val.replace("|", "/"),
+            "Availability": avail_val.replace("|", "/"),
+            "Source": src_label.replace("|", "/"),
+        }
+
+    def run_comparer(
+        self,
+        conversation_id: str,
+        sources: list[dict[str, Any]] | None = None,
+        goal: str = "compare these",
+    ) -> dict[str, Any]:
+        from src.planck3.web import domain_of
+
+        cid = str(conversation_id or "default")
+        task = self.create_task(cid, goal=goal or "compare these", agent="comparer")
+        task_id = task["id"]
+
+        raw_sources = list(sources or [])
+        if not raw_sources:
+            with self.store_lock:
+                rows = self.store.db.execute(
+                    """
+                    SELECT source_id, url, domain, title, text
+                    FROM satz_sources
+                    WHERE conversation_id = ? AND LENGTH(TRIM(text)) > 0
+                    ORDER BY updated_at DESC
+                    LIMIT 4
+                    """,
+                    (cid,),
+                ).fetchall()
+                for r in rows:
+                    raw_sources.append(
+                        {
+                            "id": r["source_id"],
+                            "url": r["url"],
+                            "domain": r["domain"],
+                            "title": r["title"],
+                            "text": r["text"],
+                        }
+                    )
+
+        selected_sources = raw_sources[:4]
+        self.append_task_step(
+            task_id,
+            f"reading {len(selected_sources)} source(s) for comparison...",
+        )
+
+        columns: list[dict[str, Any]] = []
+        used_source_ids: list[str] = []
+        cited_sources: list[dict[str, str]] = []
+
+        for idx, src in enumerate(selected_sources, 1):
+            sid = str(src.get("id") or src.get("source_id") or f"src-{idx}")
+            url = str(src.get("url") or f"local://source-{idx}")
+            dom = str(src.get("domain") or domain_of(url) or f"source-{idx}").removeprefix("www.")
+            title = str(src.get("title") or dom or url).strip()
+            text, extra_lines = self.get_source_text(sid, url, title)
+            if not text and src.get("text"):
+                text = str(src["text"])
+            findings = self.get_source_findings(sid, url)
+            if not findings and isinstance(src.get("findings"), list):
+                findings = src["findings"]
+
+            self.append_task_step(
+                task_id,
+                f"read [{idx}] {title} ({dom}) · {len(text)} chars",
+            )
+            attrs = self._extract_product_attributes(
+                title=title,
+                url=url,
+                domain=dom,
+                text=text,
+                extra_lines=extra_lines,
+                findings=findings,
+            )
+            short_header = re.split(r"\s+[-|·]\s+", title)[0].strip()[:40] or dom
+            columns.append(
+                {
+                    "index": idx,
+                    "source_id": sid,
+                    "url": url,
+                    "domain": dom,
+                    "title": title,
+                    "header": f"{short_header} [{idx}]",
+                    "attributes": attrs,
+                }
+            )
+            used_source_ids.append(sid)
+            cited_sources.append({"url": url, "title": title, "domain": dom})
+
+        attr_names = ["Price", "Key specs", "Availability", "Source"]
+        rows: list[dict[str, Any]] = []
+        uncited_cells = 0
+
+        for attr in attr_names:
+            cells: list[str] = []
+            for col in columns:
+                idx = col["index"]
+                raw_val = str(col["attributes"].get(attr) or "not listed").strip()
+                cell_str = f"{raw_val} [{idx}]"
+                if not re.search(r"\[\d+\]", cell_str):
+                    uncited_cells += 1
+                cells.append(cell_str)
+            rows.append({"attribute": attr, "cells": cells})
+
+        header_cells = ["Attribute", *[c["header"] for c in columns]]
+        sep_cells = [":---" for _ in header_cells]
+        md_lines = [
+            "| " + " | ".join(header_cells) + " |",
+            "| " + " | ".join(sep_cells) + " |",
+        ]
+        for r in rows:
+            md_lines.append("| **" + r["attribute"] + "** | " + " | ".join(r["cells"]) + " |")
+
+        table_md = "\n".join(md_lines)
+        self.append_task_step(
+            task_id,
+            f"built comparison table across {len(columns)} source(s) (0 uncited cells)",
+        )
+        completed_task = self.complete_task(task_id, result_md=table_md)
+
+        return {
+            "ok": True,
+            "task": completed_task,
+            "table_md": table_md,
+            "columns": columns,
+            "rows": rows,
+            "uncited_cells": uncited_cells,
+            "source_ids": used_source_ids,
+            "cited_sources": cited_sources,
+        }
+
+    # ── Section 8.3 (M22): Watcher Agent ─────────────────────────────────
+    def _extract_watch_snapshot(
+        self,
+        query_or_url: str,
+        condition: str = "any_change",
+        etag: str | None = None,
+        last_modified: str | None = None,
+    ) -> dict[str, Any]:
+        from src.planck3.web import extract_main_text
+
+        target = (query_or_url or "").strip()
+        if target.startswith(("http://", "https://")):
+            fetch_res = self._fetch_bookmark_url(target, etag=etag, last_modified=last_modified)
+            if fetch_res.get("not_modified"):
+                return {
+                    "not_modified": True,
+                    "etag": fetch_res.get("etag") or etag,
+                    "last_modified": fetch_res.get("last_modified") or last_modified,
+                }
+            html = str(fetch_res.get("html") or "")
+            title_m = re.search(r"<title[^>]*>(.*?)</title>", html, flags=re.I | re.S)
+            page_title = (
+                html_lib.unescape(re.sub(r"\s+", " ", title_m.group(1)).strip())
+                if title_m
+                else ""
+            )
+            main_t = extract_main_text(html, target) or ""
+            stripped_html = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.I | re.S)
+            stripped_html = html_lib.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", stripped_html)).strip())
+            combined_text = f"{main_t}\n{stripped_html}".strip()
+            price_m = self._PRICE_EXTRACT_RE.search(combined_text)
+            if price_m:
+                val = price_m.group(0).strip()
+            else:
+                val = (stripped_html or main_t)[:120].strip()
+            body_norm = (stripped_html or main_t or html).strip()
+            content_hash = (
+                hashlib.sha256(body_norm.encode("utf-8")).hexdigest()
+                if body_norm
+                else ""
+            )
+            return {
+                "not_modified": False,
+                "title": page_title,
+                "value": val,
+                "content_hash": content_hash,
+                "etag": fetch_res.get("etag") or etag,
+                "last_modified": fetch_res.get("last_modified") or last_modified,
+            }
+
+        # Non-URL query watch: evaluate against current store passages or provided value
+        with self.store_lock:
+            row = self.store.db.execute(
+                "SELECT title, text FROM passages WHERE text LIKE ? OR question LIKE ? ORDER BY ts DESC LIMIT 1",
+                (f"%{target[:40]}%", f"%{target[:40]}%"),
+            ).fetchone()
+            text_val = str(row["text"] or "")[:120] if row else target
+            price_m = self._PRICE_EXTRACT_RE.search(text_val)
+            val = price_m.group(0).strip() if price_m else text_val
+            content_hash = hashlib.sha256(val.encode("utf-8")).hexdigest()
+            return {
+                "not_modified": False,
+                "title": str(row["title"] or target) if row else target,
+                "value": val,
+                "content_hash": content_hash,
+                "etag": None,
+                "last_modified": None,
+            }
+
+    def add_watch(
+        self,
+        conversation_id: str,
+        query_or_url: str,
+        cadence_seconds: float = 1800.0,
+        condition: str = "any_change",
+        title: str = "",
+        initial_value: str | None = None,
+    ) -> dict[str, Any]:
+        from src.planck3.web import domain_of
+
+        target = (query_or_url or "").strip()
+        if not target:
+            raise ValueError("query_or_url is required")
+
+        cid = str(conversation_id or "default")
+        cadence = max(1.0, float(cadence_seconds or 1800.0))
+        cond = str(condition or "any_change").strip()
+        now_ts = time.time()
+
+        snap_val = initial_value or ""
+        snap_hash = ""
+        snap_etag = None
+        snap_lm = None
+        snap_title = (title or "").strip()
+
+        if snap_val:
+            snap_hash = hashlib.sha256(snap_val.encode("utf-8")).hexdigest()
+        else:
+            try:
+                snap = self._extract_watch_snapshot(target, condition=cond)
+                snap_val = str(snap.get("value") or "")
+                snap_hash = str(snap.get("content_hash") or "")
+                snap_etag = snap.get("etag")
+                snap_lm = snap.get("last_modified")
+                if not snap_title and snap.get("title"):
+                    snap_title = str(snap["title"])
+            except Exception as e:
+                self.record_error("watch_init", f"{target}: {e}")
+
+        if not snap_title:
+            snap_title = domain_of(target) if target.startswith(("http://", "https://")) else target[:60]
+
+        watch_id = f"watch_{secrets.token_hex(6)}"
+        with self.store_lock:
+            store_wid = self.store.add_watch(
+                question=target,
+                answer_type="price" if "price" in cond.lower() else "text",
+                condition=cond,
+                entity=self._extract_clean_entity(snap_title, "", target),
+                attribute="price" if "price" in cond.lower() else "value",
+            )
+            if snap_val:
+                self.store.db.execute(
+                    "UPDATE watches SET last_value = ?, last_checked = ? WHERE id = ?",
+                    (snap_val, now_ts, store_wid),
+                )
+            self.store.db.execute(
+                """
+                INSERT INTO satz_watches (
+                    watch_id, store_watch_id, conversation_id, query_or_url, title,
+                    cadence_seconds, condition, last_value, previous_value,
+                    last_checked_at, changed_at, badge_unread,
+                    etag, last_modified, content_hash, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, 0.0, 0, ?, ?, ?, ?)
+                """,
+                (
+                    watch_id,
+                    store_wid,
+                    cid,
+                    target,
+                    snap_title,
+                    cadence,
+                    cond,
+                    snap_val,
+                    now_ts,
+                    snap_etag,
+                    snap_lm,
+                    snap_hash,
+                    now_ts,
+                ),
+            )
+            self.store.db.commit()
+
+        return {
+            "ok": True,
+            "watch": {
+                "watch_id": watch_id,
+                "store_watch_id": store_wid,
+                "conversation_id": cid,
+                "query_or_url": target,
+                "title": snap_title,
+                "cadence_seconds": cadence,
+                "condition": cond,
+                "last_value": snap_val,
+                "previous_value": "",
+                "last_checked_at": now_ts,
+                "changed_at": 0.0,
+                "badge_unread": False,
+            },
+        }
+
+    def list_watches(self, conversation_id: str | None = None) -> list[dict[str, Any]]:
+        cid = (conversation_id or "").strip()
+        with self.store_lock:
+            if cid:
+                rows = self.store.db.execute(
+                    "SELECT * FROM satz_watches WHERE conversation_id = ? ORDER BY created_at DESC",
+                    (cid,),
+                ).fetchall()
+            else:
+                rows = self.store.db.execute(
+                    "SELECT * FROM satz_watches ORDER BY created_at DESC"
+                ).fetchall()
+            return [
+                {
+                    "watch_id": r["watch_id"],
+                    "store_watch_id": r["store_watch_id"],
+                    "conversation_id": r["conversation_id"],
+                    "query_or_url": r["query_or_url"],
+                    "title": r["title"],
+                    "cadence_seconds": float(r["cadence_seconds"] or 1800.0),
+                    "condition": r["condition"],
+                    "last_value": r["last_value"] or "",
+                    "previous_value": r["previous_value"] or "",
+                    "last_checked_at": float(r["last_checked_at"] or 0.0),
+                    "changed_at": float(r["changed_at"] or 0.0),
+                    "badge_unread": bool(r["badge_unread"]),
+                }
+                for r in rows
+            ]
+
+    def get_unread_watch_conversations(self) -> list[str]:
+        with self.store_lock:
+            try:
+                rows = self.store.db.execute(
+                    "SELECT DISTINCT conversation_id FROM satz_watches WHERE badge_unread > 0"
+                ).fetchall()
+                return [str(r["conversation_id"]) for r in rows if r["conversation_id"]]
+            except Exception:
+                return []
+
+    def ack_watch_badge(self, conversation_id: str) -> dict[str, Any]:
+        cid = (conversation_id or "").strip()
+        with self.store_lock:
+            self.store.db.execute(
+                "UPDATE satz_watches SET badge_unread = 0 WHERE conversation_id = ?",
+                (cid,),
+            )
+            self.store.db.commit()
+        return {"ok": True, "conversation_id": cid, "watch_badges": self.get_unread_watch_conversations()}
+
+    def delete_watch(self, watch_id: str) -> dict[str, Any]:
+        wid = (watch_id or "").strip()
+        with self.store_lock:
+            row = self.store.db.execute(
+                "SELECT store_watch_id FROM satz_watches WHERE watch_id = ?",
+                (wid,),
+            ).fetchone()
+            if row and row["store_watch_id"] is not None:
+                self.store.db.execute("DELETE FROM watches WHERE id = ?", (row["store_watch_id"],))
+            cur = self.store.db.execute("DELETE FROM satz_watches WHERE watch_id = ?", (wid,))
+            self.store.db.commit()
+            return {"ok": cur.rowcount > 0, "watch_id": wid}
+
+    def run_watch_pass(self, now: float | None = None, force: bool = False) -> dict[str, Any]:
+        cur_now = float(now if now is not None else time.time())
+        with self.store_lock:
+            rows = self.store.db.execute("SELECT * FROM satz_watches").fetchall()
+
+        checked = 0
+        triggered = 0
+        triggered_watches: list[dict[str, Any]] = []
+
+        for r in rows:
+            wid = r["watch_id"]
+            store_wid = r["store_watch_id"]
+            cid = r["conversation_id"]
+            target = r["query_or_url"]
+            cadence = float(r["cadence_seconds"] or 1800.0)
+            last_checked = float(r["last_checked_at"] or 0.0)
+            old_val = str(r["last_value"] or "")
+            old_hash = str(r["content_hash"] or "")
+            old_etag = r["etag"]
+            old_lm = r["last_modified"]
+            cond = str(r["condition"] or "any_change")
+
+            if not force and last_checked > 0 and (cur_now - last_checked) < cadence:
+                continue
+
+            checked += 1
+            try:
+                snap = self._extract_watch_snapshot(
+                    target,
+                    condition=cond,
+                    etag=old_etag,
+                    last_modified=old_lm,
+                )
+                if snap.get("not_modified"):
+                    with self.store_lock:
+                        self.store.db.execute(
+                            "UPDATE satz_watches SET last_checked_at = ? WHERE watch_id = ?",
+                            (cur_now, wid),
+                        )
+                        self.store.db.commit()
+                    continue
+
+                new_val = str(snap.get("value") or "")
+                new_hash = str(snap.get("content_hash") or "")
+                new_etag = snap.get("etag") or old_etag
+                new_lm = snap.get("last_modified") or old_lm
+                new_title = str(snap.get("title") or r["title"] or "")
+
+                value_changed = bool(
+                    (old_val and new_val and new_val != old_val)
+                    or (not old_val and old_hash and new_hash and new_hash != old_hash)
+                )
+
+                with self.store_lock:
+                    if value_changed:
+                        triggered += 1
+                        self.store.db.execute(
+                            """
+                            UPDATE satz_watches
+                            SET title = ?, previous_value = ?, last_value = ?,
+                                last_checked_at = ?, changed_at = ?, badge_unread = 1,
+                                etag = ?, last_modified = ?, content_hash = ?
+                            WHERE watch_id = ?
+                            """,
+                            (
+                                new_title,
+                                old_val,
+                                new_val,
+                                cur_now,
+                                cur_now,
+                                new_etag,
+                                new_lm,
+                                new_hash,
+                                wid,
+                            ),
+                        )
+                        if store_wid is not None:
+                            self.store.db.execute(
+                                "UPDATE watches SET last_value = ?, last_checked = ? WHERE id = ?",
+                                (new_val, cur_now, store_wid),
+                            )
+                        triggered_watches.append(
+                            {
+                                "watch_id": wid,
+                                "conversation_id": cid,
+                                "query_or_url": target,
+                                "title": new_title,
+                                "previous_value": old_val,
+                                "last_value": new_val,
+                                "changed_at": cur_now,
+                            }
+                        )
+                    else:
+                        self.store.db.execute(
+                            """
+                            UPDATE satz_watches
+                            SET title = ?, last_value = COALESCE(NULLIF(?, ''), last_value),
+                                last_checked_at = ?, etag = ?, last_modified = ?, content_hash = ?
+                            WHERE watch_id = ?
+                            """,
+                            (
+                                new_title,
+                                new_val,
+                                cur_now,
+                                new_etag,
+                                new_lm,
+                                new_hash or old_hash,
+                                wid,
+                            ),
+                        )
+                    self.store.db.commit()
+            except Exception as e:
+                self.record_error("watch_pass", f"{target}: {e}")
+
+        return {
+            "ok": True,
+            "checked": checked,
+            "triggered": triggered,
+            "triggered_watches": triggered_watches,
+            "watch_badges": self.get_unread_watch_conversations(),
+        }
 
 
 def make_sidecar_server(
@@ -3955,6 +4822,18 @@ def make_sidecar_server(
                 model_id = query_params.get("model", "gemma-4-e4b")
                 routes = runtime.rank_command_bar_routes(q, web_enabled=web_en, selected_model=model_id)
                 return self._json({"ok": True, "routes": routes})
+            if route_path == "/tasks":
+                cid = query_params.get("conversation_id")
+                return self._json({"ok": True, "tasks": runtime.list_tasks(cid)})
+            if route_path == "/watches":
+                cid = query_params.get("conversation_id")
+                return self._json(
+                    {
+                        "ok": True,
+                        "watches": runtime.list_watches(cid),
+                        "watch_badges": runtime.get_unread_watch_conversations(),
+                    }
+                )
             if route_path == "/profile/status":
                 return self._json(runtime.passwords.list_profiles())
             if route_path == "/passwords":
@@ -4100,6 +4979,78 @@ def make_sidecar_server(
             if self.path == "/forget":
                 cid = str(data.get("conversation_id") or "")
                 return self._json(runtime.forget_conversation(cid))
+
+            if self.path == "/task/create":
+                cid = str(data.get("conversation_id") or "default")
+                goal = str(data.get("goal") or "")
+                agent = str(data.get("agent") or "task")
+                return self._json({"ok": True, "task": runtime.create_task(cid, goal=goal, agent=agent)})
+
+            if self.path == "/task/step":
+                try:
+                    t = runtime.append_task_step(
+                        task_id=str(data.get("task_id") or ""),
+                        text=str(data.get("text") or ""),
+                        kind=str(data.get("kind") or "log"),
+                        action_summary=str(data.get("action_summary") or ""),
+                    )
+                    return self._json({"ok": True, "task": t})
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/task/stop":
+                res = runtime.stop_task(
+                    task_id=str(data.get("task_id") or ""),
+                    stop_token=str(data.get("stop_token") or ""),
+                )
+                return self._json(res, 200 if res.get("ok") else 400)
+
+            if self.path == "/task/confirm":
+                res = runtime.confirm_task_step(
+                    task_id=str(data.get("task_id") or ""),
+                    step_id=str(data.get("step_id") or ""),
+                    confirm_token=str(data.get("confirm_token") or ""),
+                )
+                return self._json(res, 200 if res.get("ok") else 400)
+
+            if self.path == "/task/cancel":
+                res = runtime.cancel_task_step(
+                    task_id=str(data.get("task_id") or ""),
+                    step_id=str(data.get("step_id") or ""),
+                )
+                return self._json(res, 200 if res.get("ok") else 400)
+
+            if self.path == "/agent/compare":
+                cid = str(data.get("conversation_id") or "default")
+                sources = data.get("sources") if isinstance(data.get("sources"), list) else None
+                goal = str(data.get("goal") or "compare these")
+                return self._json(runtime.run_comparer(cid, sources=sources, goal=goal))
+
+            if self.path == "/watch/add":
+                try:
+                    res = runtime.add_watch(
+                        conversation_id=str(data.get("conversation_id") or "default"),
+                        query_or_url=str(data.get("query_or_url") or data.get("url") or ""),
+                        cadence_seconds=float(data.get("cadence_seconds") or 1800.0),
+                        condition=str(data.get("condition") or "any_change"),
+                        title=str(data.get("title") or ""),
+                        initial_value=data.get("initial_value"),
+                    )
+                    return self._json(res)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/watch/check":
+                force = bool(data.get("force", True))
+                return self._json(runtime.run_watch_pass(force=force))
+
+            if self.path == "/watch/delete":
+                wid = str(data.get("watch_id") or "")
+                return self._json(runtime.delete_watch(wid))
+
+            if self.path == "/watch/ack":
+                cid = str(data.get("conversation_id") or "")
+                return self._json(runtime.ack_watch_badge(cid))
 
             if self.path == "/bookmarks/sync":
                 bookmarks = data.get("bookmarks") or []

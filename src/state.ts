@@ -1,4 +1,5 @@
 import type {
+  AgentTaskCard,
   BookmarkItem,
   BrainCitationItem,
   BrainProposalItem,
@@ -18,6 +19,7 @@ import type {
   MailPreset,
   SidecarHealth,
   SourceStatEntry,
+  WatchItem,
 } from "./types";
 
 export const IS_MAC =
@@ -127,6 +129,10 @@ export interface AppState {
       status_msg?: string;
     }
   >;
+  conversationTasks: Record<string, AgentTaskCard[]>;
+  watches: WatchItem[];
+  watchBadgeConvIds: string[];
+  watchStatusNotice: string;
 }
 
 export const state: AppState = {
@@ -221,6 +227,10 @@ export const state: AppState = {
   mailOnboardingCandidates: [],
   mailOnboardingOpen: false,
   mailComposeDrafts: {},
+  conversationTasks: {},
+  watches: [],
+  watchBadgeConvIds: [],
+  watchStatusNotice: "",
 };
 
 export function escapeHtml(str: string): string {

@@ -1,0 +1,26 @@
+{
+  "milestone": "M21",
+  "platform": "windows",
+  "version": "0.5.0",
+  "date": "2026-11-09",
+  "checks": {
+    "unified_command_bar_mod_k": "Mod+K opens unified Command Bar overlay (#command-bar-overlay) and Start screen uses the same component (#start-command-bar-box)",
+    "route_1_url": "dw.com -> open_url (https://dw.com) with privacy disclosure [loads dw.com]",
+    "route_2_url_and_question": "dw.com what are the top stories today? -> url_and_question with privacy disclosure [loads dw.com · local model]",
+    "route_3_question": "what is the capital of Portugal? -> ask_model with privacy disclosure [local only] (or [web search · duckduckgo] when web is on)",
+    "route_4_mail_term": "mail: Jordan Reyes / Jordan Reyes -> search_mail with privacy disclosure [local only]",
+    "route_5_brain_term": "brain: zalando / zalando -> search_brain with privacy disclosure [local only]",
+    "route_6_command": "new conversation, bookmark, compare, lock -> run_command with privacy disclosure [local only]"
+  },
+  "screenshots": [
+    "01_launch_status_bar.png",
+    "02_dw_tab_toolbar_visible.png",
+    "03_dw_chat_cited_answer.png",
+    "04_zalando_tab_toolbar_visible.png",
+    "05_empty_tab_no_fabrication.png",
+    "06_mail_unlock_inline.png",
+    "07_mail_fixture_lanes.png",
+    "08_brain_entity_clean.png",
+    "09_profile_isolation.png"
+  ]
+}

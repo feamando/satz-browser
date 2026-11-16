@@ -193,3 +193,26 @@ Owner: Nikita Gorshkov · Date: 2026-11-09 · Spec: `docs/PLAN_v0.5.md` · Platf
 - `cargo test --manifest-path src-tauri/Cargo.toml`: **PASS** (`12/12` unit tests passing)
 - `..\sgs\.venv\Scripts\python.exe -m pytest sidecar -q`: **PASS** (`26/26` tests passing, including `test_m21.py` verifying all 6 example lines and privacy disclosures)
 - Smoke script artifacts saved to `docs/smoke/v0.5/m21/windows/`.
+
+---
+
+## 8. Milestone M22: First Agents (Task Card, Comparer, Watcher)
+
+### 8.1 What Changed
+- **Task Card Plumbing & Send-Gate Single-Use Tokens (`sidecar/satz_models.py`, `src/types.ts`, `src/state.ts`, `src/api.ts`, `src/chat.ts`, `src/main.ts`):**
+  - Added typed task objects (`{id, conversation_id, agent, goal, steps[], status, started_at, stop_token, result_md}`) managed by `SatzSidecarRuntime` (`create_task`, `append_task_step`, `complete_task`, `stop_task`, `confirm_task_step`, `cancel_task_step`, `list_tasks`) and exposed via `GET /tasks`, `POST /task/create`, `POST /task/step`, `POST /task/stop`, `POST /task/confirm`, and `POST /task/cancel`.
+  - Any step that would commit (`send_gate` / `commit` / `send` / `submit` / `buy` / `sign in`) generates a single-use `confirm_token`, sets task status to `waiting_confirm`, and renders `[confirm] [cancel]` in `renderTaskCardBlock` (`src/chat.ts`). Reusing a consumed `confirm_token` is rejected with `confirm_token already used`.
+- **Comparer Agent (`sidecar/satz_models.py`, `src/chat.ts`, `src/main.ts`):**
+  - Added `SatzSidecarRuntime.run_comparer(conversation_id, sources, goal)` (`POST /agent/compare`) which creates a `comparer` Task Card, reads up to 4 open/compared sources, extracts structured attributes (`Price`, `Key specs`, `Availability`, `Source`), and produces a Markdown comparison table with one column per source and every cell ending with its `[n]` citation (`uncited_cells == 0`).
+  - Added `[compare these]` buttons in the Compare View toolbar (`#compare-run-comparer-btn`) and the Chat context bar (`#chat-compare-these-btn`), plus `"compare these"` / `"/compare"` prompt handling in `handleSendChatMessage`, and Markdown pipe-table rendering (`renderMarkdownTablesInHtml`) in `src/chat.ts`.
+- **Watcher Agent (`sidecar/satz_models.py`, `src/chat.ts`, `src/rail.ts`, `src/main.ts`):**
+  - Added `satz_watches` table paired with the Planck `watches` table (`self.store.add_watch`) and methods `add_watch`, `list_watches`, `delete_watch`, `ack_watch_badge`, and `run_watch_pass` (`POST /watch/add`, `GET /watches`, `POST /watch/delete`, `POST /watch/ack`, `POST /watch/check`), reusing M10 conditional HTTP fetch (`If-None-Match` / `If-Modified-Since` / SHA-256 hash) plus price/value extraction.
+  - Added `[watch]` buttons on open site tabs (`[data-watch-tab]`) and assistant answers (`[data-watch-msg]`).
+  - Triggered watches surface at the top of `For you` (`/digest`) as `watch: <title> (<old> -> <new>)` and display a `[watch !]` badge on the conversation in the left rail (`src/rail.ts`), cleared when selecting the conversation.
+
+### 8.2 M22 Verification & Measurements (Windows 11 RTX 4090 Reference Box)
+- `npm run build`: **PASS** (`dist/` built in `335 ms`, 0 TypeScript errors)
+- `cargo check --manifest-path src-tauri/Cargo.toml`: **PASS**
+- `cargo test --manifest-path src-tauri/Cargo.toml`: **PASS** (`12/12` unit tests passing)
+- `..\sgs\.venv\Scripts\python.exe -m pytest sidecar -q`: **PASS** (`29/29` tests passing, including `test_m22.py`: Task Card `[stop]` + single-use `confirm_token` enforcement, Comparer Agent on 3 product pages with `uncited_cells == 0`, and Watcher Agent detecting local price change `EUR 129.00 -> EUR 99.00` and firing one `For you` item + conversation badge)
+- Smoke script artifacts saved to `docs/smoke/v0.5/m22/windows/`.

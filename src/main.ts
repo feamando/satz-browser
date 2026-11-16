@@ -22,6 +22,10 @@ import {
   apiSetConversationSummary,
   apiSetSourceInContext,
   sidecarAcceptBrainProposal,
+  sidecarAckWatchBadge,
+  sidecarAddWatch,
+  sidecarCancelTaskStep,
+  sidecarConfirmTaskStep,
   sidecarCreateProfile,
   sidecarDeleteBrainEntity,
   sidecarDeletePassage,
@@ -33,17 +37,21 @@ import {
   sidecarFetchKnowledge,
   sidecarGetMailCodes,
   sidecarImportEnvFile,
+  sidecarListTasks,
+  sidecarListWatches,
   sidecarLockProfile,
   sidecarMatchPasswordForUrl,
   sidecarRejectBrainProposal,
   sidecarRevealPassword,
   sidecarRunAnswer,
+  sidecarRunComparer,
   sidecarRunRead,
   sidecarSaveRawEnv,
   sidecarSearchBrain,
   sidecarSearchMail,
   sidecarSetDomainTrust,
   sidecarSetPauseLearning,
+  sidecarStopTask,
   sidecarStreamChat,
   sidecarSummarizeConversation,
   sidecarSyncBookmarks,
@@ -1037,6 +1045,12 @@ function renderSiteTabViewport(viewport: HTMLElement): void {
           `
               : ""
           }
+          <button
+            data-watch-tab="${escapeHtml(tab.id)}"
+            title="Watch this page for price or content changes"
+          >
+            [watch]
+          </button>
           <button id="toggle-agent-rail-btn" class="${state.agentRailOpen ? "active" : ""}">
             [chat rail ${MOD_LABEL}+j]
           </button>
@@ -1093,6 +1107,11 @@ function renderCompareViewport(viewport: HTMLElement): void {
   viewport.innerHTML = `
     <div class="chat-view">
       <div class="viewport-primary">
+        <div class="site-tab-toolbar">
+          <span class="muted">compare (${tabs.length} tiles)</span>
+          <button id="compare-run-comparer-btn" title="Run Comparer agent across compared tiles">[compare these]</button>
+          <button id="compare-exit-btn">[exit compare]</button>
+        </div>
         <div class="compare-grid panes-${count}">
           ${tabs
             .map(
@@ -1211,6 +1230,35 @@ function bindToolbarEvents(viewport: HTMLElement): void {
     });
   });
 
+  viewport.querySelectorAll("[data-watch-tab]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const tabId = el.getAttribute("data-watch-tab");
+      const tab = state.activeDetail?.tabs.find((t) => t.id === tabId);
+      if (tab && state.activeDetail) {
+        void handleWatchTarget(
+          state.activeDetail.conversation.id,
+          tab.url,
+          tab.title || extractDomain(tab.url)
+        );
+        el.textContent = "[watching]";
+      }
+    });
+  });
+
+  viewport
+    .querySelector("#compare-run-comparer-btn")
+    ?.addEventListener("click", () => {
+      void handleRunComparer("compare these");
+    });
+
+  viewport
+    .querySelector("#compare-exit-btn")
+    ?.addEventListener("click", () => {
+      state.compareMode = false;
+      renderWorkspaceRegions();
+    });
+
   if (resizeObserver) {
     viewport.querySelectorAll(".webview-slot").forEach((slot) => {
       resizeObserver?.observe(slot);
@@ -1312,7 +1360,138 @@ function getChatActions() {
         }
       })();
     },
+    onRunComparer: () => {
+      void handleRunComparer("compare these");
+    },
+    onWatchAnswer: (_msgId: string, content: string) => {
+      if (!state.activeDetail) return;
+      const convId = state.activeDetail.conversation.id;
+      const openTab = state.activeDetail.tabs.find((t) => t.is_open);
+      const primarySrc = state.activeDetail.sources[0];
+      const target =
+        openTab?.url && openTab.url !== "about:blank"
+          ? openTab.url
+          : primarySrc?.url || content.slice(0, 80);
+      const title =
+        openTab?.title ||
+        primarySrc?.title ||
+        state.activeDetail.conversation.title;
+      void handleWatchTarget(convId, target, title, content.slice(0, 120));
+    },
+    onStopTask: (taskId: string, stopToken: string) => {
+      void (async () => {
+        const res = await sidecarStopTask(taskId, stopToken);
+        if (res.ok && res.task && state.activeDetail) {
+          const cid = state.activeDetail.conversation.id;
+          state.conversationTasks[cid] = await sidecarListTasks(cid);
+          renderViewportRegion();
+        }
+      })();
+    },
+    onConfirmTaskStep: (taskId: string, stepId: string, confirmToken: string) => {
+      void (async () => {
+        const res = await sidecarConfirmTaskStep(taskId, stepId, confirmToken);
+        if (res.ok && state.activeDetail) {
+          const cid = state.activeDetail.conversation.id;
+          state.conversationTasks[cid] = await sidecarListTasks(cid);
+          renderViewportRegion();
+        }
+      })();
+    },
+    onCancelTaskStep: (taskId: string, stepId: string) => {
+      void (async () => {
+        const res = await sidecarCancelTaskStep(taskId, stepId);
+        if (res.ok && state.activeDetail) {
+          const cid = state.activeDetail.conversation.id;
+          state.conversationTasks[cid] = await sidecarListTasks(cid);
+          renderViewportRegion();
+        }
+      })();
+    },
   };
+}
+
+async function handleWatchTarget(
+  conversationId: string,
+  queryOrUrl: string,
+  title: string,
+  initialValue?: string
+): Promise<void> {
+  const res = await sidecarAddWatch({
+    conversation_id: conversationId,
+    query_or_url: queryOrUrl,
+    cadence_seconds: 1800,
+    condition: "any_change",
+    title,
+    initial_value: initialValue,
+  });
+  if (res.ok && res.watch) {
+    state.watchStatusNotice = `watch active: ${res.watch.title || queryOrUrl} (value: ${res.watch.last_value || "monitoring"})`;
+    const wList = await sidecarListWatches();
+    state.watches = wList.watches;
+    state.watchBadgeConvIds = wList.watch_badges;
+    renderAllRegions();
+    setTimeout(() => {
+      state.watchStatusNotice = "";
+      renderViewportRegion();
+    }, 5000);
+  }
+}
+
+async function handleRunComparer(goal = "compare these"): Promise<void> {
+  if (!state.activeDetail || state.isStreaming) return;
+  const convId = state.activeDetail.conversation.id;
+  state.agentRailOpen = true;
+  startStreamingProgress("running Comparer agent across open sources...", "comparing");
+  renderViewportRegion();
+
+  try {
+    await apiCaptureOpenTabs(convId);
+    state.activeDetail = await apiGetConversation(convId);
+    const activeTabSources = getActiveTabSources(state.activeDetail);
+    const compareSources =
+      state.compareMode && state.compareTabIds.length >= 2
+        ? activeTabSources.filter((s) => state.compareTabIds.includes(s.tab.id))
+        : activeTabSources;
+    const chosen = (compareSources.length >= 2 ? compareSources : activeTabSources).map(
+      (s) => ({
+        id: s.sourceId,
+        url: s.url,
+        title: s.title,
+        domain: s.domain,
+      })
+    );
+
+    const res = await sidecarRunComparer(convId, chosen, goal);
+    stopStreamingProgress();
+
+    if (res.ok && res.table_md) {
+      if (res.task) {
+        const existing = state.conversationTasks[convId] ?? [];
+        state.conversationTasks[convId] = [
+          ...existing.filter((t) => t.id !== res.task!.id),
+          res.task,
+        ];
+      }
+      const savedMsg = await apiAddMessage(
+        convId,
+        "assistant",
+        res.table_md,
+        "comparer (agent)",
+        JSON.stringify(res.source_ids ?? [])
+      );
+      state.activeDetail = await apiGetConversation(convId);
+      if (state.activeDetail && res.cited_sources) {
+        const msgObj = state.activeDetail.messages.find((m) => m.id === savedMsg.id);
+        if (msgObj) {
+          msgObj.cited_sources = res.cited_sources;
+        }
+      }
+    }
+  } finally {
+    stopStreamingProgress();
+    renderAllRegions();
+  }
 }
 
 async function selectConversation(conversationId: string): Promise<void> {
@@ -1321,8 +1500,26 @@ async function selectConversation(conversationId: string): Promise<void> {
   state.highlightedBrainSlug = null;
   state.compareMode = false;
   state.compareTabIds = [];
-  const detail = await apiGetConversation(conversationId);
+  if (
+    state.watchBadgeConvIds.includes(conversationId) ||
+    state.sidecar.watch_badges?.includes(conversationId)
+  ) {
+    state.watchBadgeConvIds = state.watchBadgeConvIds.filter(
+      (id) => id !== conversationId
+    );
+    if (state.sidecar.watch_badges) {
+      state.sidecar.watch_badges = state.sidecar.watch_badges.filter(
+        (id) => id !== conversationId
+      );
+    }
+    void sidecarAckWatchBadge(conversationId);
+  }
+  const [detail, tasks] = await Promise.all([
+    apiGetConversation(conversationId),
+    sidecarListTasks(conversationId),
+  ]);
   state.activeDetail = detail;
+  state.conversationTasks[conversationId] = tasks;
   if (detail) {
     const openTabs = detail.tabs.filter((t) => t.is_open);
     if (detail.conversation.origin === "mail") {
@@ -1777,6 +1974,16 @@ async function handleSendChatMessage(text: string): Promise<void> {
     );
     state.activeDetail = await apiGetConversation(convId);
     renderViewportRegion();
+    return;
+  }
+
+  const normalizedPrompt = text.trim().toLowerCase();
+  if (
+    normalizedPrompt === "compare these" ||
+    normalizedPrompt === "/compare" ||
+    normalizedPrompt.startsWith("compare these ")
+  ) {
+    await handleRunComparer(text.trim());
     return;
   }
 

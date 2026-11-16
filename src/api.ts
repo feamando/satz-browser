@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { extractDomain, state } from "./state";
 import type {
+  AgentTaskCard,
   BookmarkItem,
   BrainCitationItem,
   BrainProposalItem,
@@ -26,6 +27,7 @@ import type {
   SourceStatEntry,
   TabBoundsSpec,
   TabKind,
+  WatchItem,
 } from "./types";
 
 let sidecarBaseUrl = "";
@@ -480,6 +482,7 @@ export async function sidecarFetchHealth(): Promise<SidecarHealth> {
       pause_learning: Boolean(data.pause_learning),
       errors: Array.isArray(data.errors) ? data.errors : [],
       mail: data.mail ?? null,
+      watch_badges: Array.isArray(data.watch_badges) ? data.watch_badges : [],
     };
   } catch {
     return {
@@ -1696,6 +1699,202 @@ export async function sidecarGetMailEvalReport(): Promise<Record<string, unknown
   try {
     const res = await sidecarFetch("/mail/eval/report");
     if (!res.ok) return { ok: false };
+    return await res.json();
+  } catch {
+    return { ok: false };
+  }
+}
+
+export async function sidecarListTasks(
+  conversationId?: string
+): Promise<AgentTaskCard[]> {
+  try {
+    const q = conversationId
+      ? `?conversation_id=${encodeURIComponent(conversationId)}`
+      : "";
+    const res = await sidecarFetch(`/tasks${q}`);
+    if (!res.ok) return [];
+    const data = (await res.json()) as { tasks?: AgentTaskCard[] };
+    return Array.isArray(data.tasks) ? data.tasks : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function sidecarStopTask(
+  taskId: string,
+  stopToken: string
+): Promise<{ ok: boolean; task?: AgentTaskCard; error?: string }> {
+  try {
+    const res = await sidecarFetch("/task/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task_id: taskId, stop_token: stopToken }),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarConfirmTaskStep(
+  taskId: string,
+  stepId: string,
+  confirmToken: string
+): Promise<{ ok: boolean; task?: AgentTaskCard; error?: string }> {
+  try {
+    const res = await sidecarFetch("/task/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        task_id: taskId,
+        step_id: stepId,
+        confirm_token: confirmToken,
+      }),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarCancelTaskStep(
+  taskId: string,
+  stepId: string
+): Promise<{ ok: boolean; task?: AgentTaskCard; error?: string }> {
+  try {
+    const res = await sidecarFetch("/task/cancel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task_id: taskId, step_id: stepId }),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarRunComparer(
+  conversationId: string,
+  sources: Array<{
+    id?: string;
+    url: string;
+    title?: string;
+    domain?: string;
+    text?: string;
+  }>,
+  goal = "compare these"
+): Promise<{
+  ok: boolean;
+  task?: AgentTaskCard;
+  table_md?: string;
+  uncited_cells?: number;
+  source_ids?: string[];
+  cited_sources?: Array<{ url: string; title: string; domain?: string }>;
+  error?: string;
+}> {
+  try {
+    const res = await sidecarFetch("/agent/compare", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        conversation_id: conversationId,
+        sources,
+        goal,
+      }),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarAddWatch(payload: {
+  conversation_id: string;
+  query_or_url: string;
+  cadence_seconds?: number;
+  condition?: string;
+  title?: string;
+  initial_value?: string;
+}): Promise<{ ok: boolean; watch?: WatchItem; error?: string }> {
+  try {
+    const res = await sidecarFetch("/watch/add", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarListWatches(
+  conversationId?: string
+): Promise<{ watches: WatchItem[]; watch_badges: string[] }> {
+  try {
+    const q = conversationId
+      ? `?conversation_id=${encodeURIComponent(conversationId)}`
+      : "";
+    const res = await sidecarFetch(`/watches${q}`);
+    if (!res.ok) return { watches: [], watch_badges: [] };
+    const data = (await res.json()) as {
+      watches?: WatchItem[];
+      watch_badges?: string[];
+    };
+    return {
+      watches: Array.isArray(data.watches) ? data.watches : [],
+      watch_badges: Array.isArray(data.watch_badges) ? data.watch_badges : [],
+    };
+  } catch {
+    return { watches: [], watch_badges: [] };
+  }
+}
+
+export async function sidecarDeleteWatch(
+  watchId: string
+): Promise<{ ok: boolean }> {
+  try {
+    const res = await sidecarFetch("/watch/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ watch_id: watchId }),
+    });
+    return await res.json();
+  } catch {
+    return { ok: false };
+  }
+}
+
+export async function sidecarAckWatchBadge(
+  conversationId: string
+): Promise<{ ok: boolean; watch_badges?: string[] }> {
+  try {
+    const res = await sidecarFetch("/watch/ack", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversation_id: conversationId }),
+    });
+    return await res.json();
+  } catch {
+    return { ok: false };
+  }
+}
+
+export async function sidecarCheckWatches(
+  force = true
+): Promise<{
+  ok: boolean;
+  checked?: number;
+  triggered?: number;
+  watch_badges?: string[];
+}> {
+  try {
+    const res = await sidecarFetch("/watch/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force }),
+    });
     return await res.json();
   } catch {
     return { ok: false };

@@ -188,6 +188,9 @@ function renderConversationRow(
   const displayTitle = isMail
     ? `mail (${inboxUnread})`
     : c.title;
+  const hasWatchBadge =
+    state.watchBadgeConvIds.includes(c.id) ||
+    Boolean(state.sidecar.watch_badges?.includes(c.id));
 
   return `
     <div>
@@ -197,6 +200,7 @@ function renderConversationRow(
             ? `<input id="rail-rename-input-${escapeHtml(c.id)}" class="rail-rename-input" type="text" value="${escapeHtml(c.title)}" />`
             : `<span class="rail-row-title">${prefix}${escapeHtml(displayTitle)}</span>`
         }
+        ${hasWatchBadge ? `<span class="rail-row-meta" title="watched value changed">[watch !]</span>` : ""}
         <span class="rail-row-meta rail-row-src-count">${srcCount} src</span>
         <span class="rail-row-time">${escapeHtml(relTime)}</span>
         ${
