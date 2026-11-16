@@ -156,6 +156,8 @@ export async function syncWebviewsNow(): Promise<void> {
   if (
     !detail ||
     state.showKnowledgeView ||
+    state.showBrainView ||
+    state.commandBarOpen ||
     (!state.compareMode &&
       (state.activeTabId === "chat" || state.activeTabId.startsWith("lane:")))
   ) {
@@ -199,7 +201,13 @@ export async function syncWebviewsNow(): Promise<void> {
     for (const tabId of state.compareTabIds.slice(0, 4)) {
       const tab = detail.tabs.find((t) => t.id === tabId && t.is_open);
       const slot = document.getElementById(`webview-slot-${tabId}`);
-      if (tab && tab.kind !== "compose" && slot) {
+      if (
+        tab &&
+        tab.kind !== "compose" &&
+        tab.kind !== "mail" &&
+        !tab.url.startsWith("satzmail://") &&
+        slot
+      ) {
         visible.push(measureSlotBounds(tab.id, tab.url, slot));
       }
     }
@@ -208,7 +216,13 @@ export async function syncWebviewsNow(): Promise<void> {
       (t) => t.id === state.activeTabId && t.is_open
     );
     const slot = document.getElementById(`webview-slot-${state.activeTabId}`);
-    if (tab && tab.kind !== "compose" && slot) {
+    if (
+      tab &&
+      tab.kind !== "compose" &&
+      tab.kind !== "mail" &&
+      !tab.url.startsWith("satzmail://") &&
+      slot
+    ) {
       visible.push(measureSlotBounds(tab.id, tab.url, slot));
     }
   }

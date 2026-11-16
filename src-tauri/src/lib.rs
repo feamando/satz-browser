@@ -503,6 +503,10 @@ fn spawn_sidecar(settings: &SatzSettings, app_data_dir: &PathBuf, token: &str) -
 
     let mut cmd = Command::new(python_bin);
     cmd.env("SATZ_SIDECAR_TOKEN", token)
+        .env("PYTHONUNBUFFERED", "1")
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        .env("TQDM_DISABLE", "1")
         .arg(&script_path)
         .arg("--sgs-root")
         .arg(sgs_root_str)
@@ -517,10 +521,24 @@ fn spawn_sidecar(settings: &SatzSettings, app_data_dir: &PathBuf, token: &str) -
     if settings.preload_gemma {
         cmd.arg("--preload-gemma");
     }
+    let log_path = app_data_dir.join("sidecar.log");
+    let stdout_cfg = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::null());
+    let stderr_cfg = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::null());
+
     cmd.current_dir(&repo_root)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(stdout_cfg)
+        .stderr(stderr_cfg);
 
     #[cfg(windows)]
     {
@@ -804,9 +822,29 @@ pub fn run() {
             app.manage(wv_manager);
             app.manage(SidecarState {
                 child: Mutex::new(child_proc),
-                settings,
-                token,
+                settings: settings.clone(),
+                token: token.clone(),
                 base_url,
+            });
+
+            // Auto-restart watchdog: if the Python sidecar ever exits unexpectedly, respawn it
+            let app_handle_watchdog = app.handle().clone();
+            let watchdog_data_dir = app_data_dir.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep( std::time::Duration::from_secs(3));
+                if let Some(sc) = app_handle_watchdog.try_state::<SidecarState>() {
+                    if let Ok(mut guard) = sc.child.lock() {
+                        let exited = match guard.as_mut() {
+                            Some(c) => matches!(c.try_wait(), Ok(Some(_))),
+                            None => false,
+                        };
+                        if exited {
+                            *guard = spawn_sidecar(&sc.settings, &watchdog_data_dir, &sc.token);
+                        }
+                    }
+                } else {
+                    break;
+                }
             });
 
             #[cfg(target_os = "macos")]

@@ -75,6 +75,7 @@ import {
   renderEmailTabHeaderHtml,
   renderMailLaneView,
   sidecarGetMailMessage,
+  sidecarGetMailMessageHtml,
   sidecarHideMailMessage,
   sidecarLabelMailMessage,
   sidecarOpenMailMessage,
@@ -944,22 +945,73 @@ function renderSiteTabViewport(viewport: HTMLElement): void {
   if (tab.kind === "mail" || tab.url.startsWith("satzmail://")) {
     const mid = tab.url.replace("satzmail://message/", "").split("/")[0].trim();
     const cachedDetail = state.mailMessageDetails[mid];
-    if (!cachedDetail && mid) {
+    const cachedHtml = state.mailMessageHtml[mid];
+    if ((!cachedDetail || !cachedHtml) && mid) {
       void (async () => {
-        const res = await sidecarGetMailMessage(mid);
-        if (res.ok) {
+        const [res, htmlRes] = await Promise.all([
+          cachedDetail
+            ? Promise.resolve(cachedDetail)
+            : sidecarGetMailMessage(mid),
+          cachedHtml
+            ? Promise.resolve({ ok: true, ...cachedHtml })
+            : sidecarGetMailMessageHtml(mid),
+        ]);
+        let changed = false;
+        if (res.ok && !state.mailMessageDetails[mid]) {
           state.mailMessageDetails[mid] = res;
+          changed = true;
+        }
+        if (htmlRes.ok && htmlRes.html && !state.mailMessageHtml[mid]) {
+          state.mailMessageHtml[mid] = {
+            html: htmlRes.html,
+            csp:
+              htmlRes.csp ||
+              "default-src 'none'; img-src data: cid:; style-src 'unsafe-inline'; font-src data:",
+          };
+          changed = true;
+        }
+        if (changed) {
           renderViewportRegion();
         }
       })();
     }
+
+    const msgObj = (cachedDetail?.message ?? cachedDetail ?? {}) as Record<
+      string,
+      unknown
+    >;
+    const partsObj = (msgObj.parts ?? {}) as Record<string, string>;
+    const plainFallback = String(
+      partsObj.new || msgObj.body_text || msgObj.snippet || ""
+    );
+    const defaultCsp =
+      "default-src 'none'; img-src data: cid:; style-src 'unsafe-inline'; font-src data:";
+    const effectiveCsp = cachedHtml?.csp || defaultCsp;
+    const rawBodyHtml =
+      cachedHtml?.html ||
+      (plainFallback
+        ? `<!DOCTYPE html><html><head><meta charset="utf-8"><style>html,body{background:#000000;color:#e8e8e8;font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.5;margin:0;padding:14px;}pre{white-space:pre-wrap;word-wrap:break-word;font-family:inherit;margin:0;}</style></head><body><pre>${escapeHtml(plainFallback)}</pre></body></html>`
+        : "");
+    const srcdocWithCsp = rawBodyHtml
+      ? `<meta http-equiv="Content-Security-Policy" content="${escapeHtml(effectiveCsp)}">${rawBodyHtml}`
+      : "";
 
     viewport.innerHTML = `
       <div class="chat-view">
         <div class="viewport-primary">
           ${renderEmailTabHeaderHtml(tab, cachedDetail)}
           <div id="webview-slot-${escapeHtml(tab.id)}" class="webview-slot">
-            loading ${escapeHtml(tab.url)}...
+            ${
+              srcdocWithCsp
+                ? `<iframe
+                    id="email-iframe-${escapeHtml(tab.id)}"
+                    class="email-body-iframe"
+                    sandbox="allow-popups allow-popups-to-escape-sandbox"
+                    referrerpolicy="no-referrer"
+                    srcdoc="${escapeHtml(srcdocWithCsp)}"
+                  ></iframe>`
+                : `loading ${escapeHtml(tab.url)}...`
+            }
           </div>
         </div>
         ${
@@ -2253,16 +2305,33 @@ async function openEmailMessageTab(
 ): Promise<void> {
   if (!state.activeDetail) return;
   void sidecarOpenMailMessage(messageId);
-  const msgDetail = await sidecarGetMailMessage(messageId);
+  const [msgDetail, msgHtml] = await Promise.all([
+    sidecarGetMailMessage(messageId),
+    sidecarGetMailMessageHtml(messageId),
+  ]);
   if (msgDetail.ok) {
     state.mailMessageDetails[messageId] = msgDetail;
   }
-  const tab = await apiOpenTab(
-    state.activeDetail.conversation.id,
-    `satzmail://message/${messageId}`,
-    subject,
-    "mail"
+  if (msgHtml.ok && msgHtml.html) {
+    state.mailMessageHtml[messageId] = {
+      html: msgHtml.html,
+      csp:
+        msgHtml.csp ||
+        "default-src 'none'; img-src data: cid:; style-src 'unsafe-inline'; font-src data:",
+    };
+  }
+  const targetUrl = `satzmail://message/${messageId}`;
+  const existingTab = state.activeDetail.tabs.find(
+    (t) => t.is_open && t.url === targetUrl
   );
+  const tab =
+    existingTab ??
+    (await apiOpenTab(
+      state.activeDetail.conversation.id,
+      targetUrl,
+      subject,
+      "mail"
+    ));
   state.activeDetail = await apiGetConversation(
     state.activeDetail.conversation.id
   );
@@ -2407,12 +2476,20 @@ function bindEmailTabHeaderEvents(
       );
       if (!sender) return;
       await sidecarUpdateMailSettings({ allow_remote_images_sender: sender });
-      const updated = await sidecarGetMailMessage(messageId);
+      const [updated, updatedHtml] = await Promise.all([
+        sidecarGetMailMessage(messageId),
+        sidecarGetMailMessageHtml(messageId),
+      ]);
       if (updated.ok) {
         state.mailMessageDetails[messageId] = updated;
       }
-      if (state.activeTabId) {
-        void apiControlTab(state.activeTabId, "reload");
+      if (updatedHtml.ok && updatedHtml.html) {
+        state.mailMessageHtml[messageId] = {
+          html: updatedHtml.html,
+          csp:
+            updatedHtml.csp ||
+            "default-src 'none'; img-src https: data: cid:; style-src 'unsafe-inline'; font-src data:",
+        };
       }
       renderViewportRegion();
     });

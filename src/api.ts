@@ -1434,6 +1434,20 @@ export async function sidecarGetMailMessage(
   }
 }
 
+export async function sidecarGetMailMessageHtml(
+  messageId: string
+): Promise<{ ok: boolean; html?: string; csp?: string }> {
+  try {
+    const res = await sidecarFetch(
+      `/mail/message/${encodeURIComponent(messageId)}/html`
+    );
+    if (!res.ok) return { ok: false };
+    return await res.json();
+  } catch {
+    return { ok: false };
+  }
+}
+
 export async function sidecarOpenMailMessage(
   messageId: string
 ): Promise<Record<string, unknown>> {

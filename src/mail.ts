@@ -10,6 +10,7 @@ import {
   sidecarGetMailEvalReport,
   sidecarGetMailLane,
   sidecarGetMailMessage,
+  sidecarGetMailMessageHtml,
   sidecarGetMailTriage,
   sidecarHideMailMessage,
   sidecarLabelMailEval,
@@ -1276,7 +1277,7 @@ export function renderEmailTabHeaderHtml(
   const attachments = ((msg.attachments ?? []) as Array<Record<string, unknown>>);
 
   return `
-    <div class="kb-card" id="email-tab-header-${escapeHtml(tab.id)}">
+    <div class="kb-card email-tab-header" id="email-tab-header-${escapeHtml(tab.id)}">
       <div class="kb-card-header">
         <span><strong>${escapeHtml(subj)}</strong> · <span class="source-cut-badge">${escapeHtml(label)}</span></span>
         <div>
@@ -1619,6 +1620,7 @@ export function renderComposeTabView(
 
 export {
   sidecarGetMailMessage,
+  sidecarGetMailMessageHtml,
   sidecarHideMailMessage,
   sidecarLabelMailMessage,
   sidecarOpenMailMessage,

@@ -34,6 +34,10 @@ import sqlite3
 import sys
 import threading
 import time
+
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TQDM_DISABLE", "1")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1168,31 +1172,32 @@ class SatzSidecarRuntime:
             self.gemma_loading = True
             try:
                 import torch
+                from satz_brain import _SHARED_ENCODER_LOCK
                 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-                dev = self._detect_gemma_device()
-                self.gemma_device = dev
-                print(f"[satz-sidecar] loading Gemma 4 E4B from {gemma_dir} onto {dev} ...", flush=True)
-                tok = AutoTokenizer.from_pretrained(str(gemma_dir))
-                if dev == "cuda":
-                    model = AutoModelForCausalLM.from_pretrained(
-                        str(gemma_dir),
-                        dtype=torch.bfloat16,
-                        device_map={"": "cuda:0"},
-                    )
-                elif dev == "mps":
-                    model = AutoModelForCausalLM.from_pretrained(
-                        str(gemma_dir),
-                        dtype=torch.float16,
-                    ).to("mps")
-                else:
-                    model = AutoModelForCausalLM.from_pretrained(
-                        str(gemma_dir),
-                        dtype=torch.float32,
-                    )
-                model.eval()
-                self.gemma_tok = tok
-                self.gemma_model = model
+                with _SHARED_ENCODER_LOCK:
+                    dev = self._detect_gemma_device()
+                    self.gemma_device = dev
+                    print(f"[satz-sidecar] loading Gemma 4 E4B from {gemma_dir} onto {dev} ...", flush=True)
+                    tok = AutoTokenizer.from_pretrained(str(gemma_dir))
+                    if dev == "cuda":
+                        model = AutoModelForCausalLM.from_pretrained(
+                            str(gemma_dir),
+                            dtype=torch.bfloat16,
+                        ).to("cuda:0")
+                    elif dev == "mps":
+                        model = AutoModelForCausalLM.from_pretrained(
+                            str(gemma_dir),
+                            dtype=torch.float16,
+                        ).to("mps")
+                    else:
+                        model = AutoModelForCausalLM.from_pretrained(
+                            str(gemma_dir),
+                            dtype=torch.float32,
+                        )
+                    model.eval()
+                    self.gemma_tok = tok
+                    self.gemma_model = model
                 return self.gemma_tok, self.gemma_model
             finally:
                 self.gemma_loading = False
@@ -5062,7 +5067,6 @@ def make_sidecar_server(
                         name=str(data.get("name") or ""),
                         pin=str(data.get("pin") or ""),
                     )
-                    runtime._refresh_active_profile_brain()
                     return self._json({"ok": True, **res})
                 except Exception as e:
                     return self._json({"ok": False, "error": str(e)}, 400)
@@ -5073,7 +5077,6 @@ def make_sidecar_server(
                         profile_id=str(data.get("profile_id") or ""),
                         pin=str(data.get("pin") or ""),
                     )
-                    runtime._refresh_active_profile_brain()
                     runtime.bookmark_wake_event.set()
                     return self._json({"ok": True, **res})
                 except Exception as e:
@@ -5084,7 +5087,6 @@ def make_sidecar_server(
                     res = runtime.passwords.unlock_with_keychain(
                         profile_id=str(data.get("profile_id") or ""),
                     )
-                    runtime._refresh_active_profile_brain()
                     runtime.bookmark_wake_event.set()
                     return self._json({"ok": True, **res})
                 except Exception as e:
@@ -5092,7 +5094,6 @@ def make_sidecar_server(
 
             if self.path == "/profile/lock":
                 res = runtime.passwords.lock_profile()
-                runtime._refresh_active_profile_brain()
                 return self._json({"ok": True, **res})
 
             if self.path == "/profile/delete":
@@ -5101,7 +5102,6 @@ def make_sidecar_server(
                         profile_id=str(data.get("profile_id") or ""),
                         pin=str(data.get("pin") or ""),
                     )
-                    runtime._refresh_active_profile_brain()
                     return self._json({"ok": True, **res})
                 except Exception as e:
                     return self._json({"ok": False, "error": str(e)}, 400)
@@ -5305,16 +5305,29 @@ def main():
         bookmark_interval_minutes=args.bookmark_interval_minutes,
     )
     server = make_sidecar_server(runtime, host=args.host, port=args.port)
-    if args.preload_gemma:
-        runtime.start_gemma_preload()
+    srv_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    srv_thread.start()
     print(
         f"[satz-sidecar] listening on http://{args.host}:{args.port} (sgs={runtime.sgs_root}, store={runtime.store_path})",
         flush=True,
     )
+    if args.preload_gemma:
+        try:
+            runtime.ensure_gemma()
+            print("[satz-sidecar] gemma [warm] - preload complete", flush=True)
+        except Exception as e:
+            runtime.record_error("gemma_preload", e)
     try:
-        server.serve_forever()
+        while True:
+            time.sleep(1.0)
     except KeyboardInterrupt:
         pass
+    finally:
+        try:
+            server.shutdown()
+        except Exception:
+            pass
+        runtime.close()
 
 
 if __name__ == "__main__":

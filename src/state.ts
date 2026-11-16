@@ -85,6 +85,7 @@ export interface AppState {
   mailSearchQuery: string;
   mailSearchRows: Array<Record<string, unknown>> | null;
   mailMessageDetails: Record<string, Record<string, unknown>>;
+  mailMessageHtml: Record<string, { html: string; csp: string }>;
   mailTriageOverview: string;
   mailTriageSources: Array<{
     id: string;
@@ -209,6 +210,7 @@ export const state: AppState = {
   mailSearchQuery: "",
   mailSearchRows: null,
   mailMessageDetails: {},
+  mailMessageHtml: {},
   mailTriageOverview: "",
   mailTriageSources: [],
   siteTabPromoCodes: {},
