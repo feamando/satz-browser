@@ -5,6 +5,7 @@ import type {
   BrainProposalItem,
   BrainSearchResponse,
   BrowserTab,
+  ChatEmailCard,
   CommandBarActionId,
   CommandBarRoute,
   Conversation,
@@ -17,6 +18,7 @@ import type {
   MailAccountItem,
   MailLaneCounts,
   MailPreset,
+  ModelManagementConfig,
   SidecarHealth,
   SourceStatEntry,
   WatchItem,
@@ -134,6 +136,15 @@ export interface AppState {
   watches: WatchItem[];
   watchBadgeConvIds: string[];
   watchStatusNotice: string;
+  messageEmailCards: Record<string, ChatEmailCard[]>;
+  expandedChatEmails: Record<string, boolean>;
+  previewedAttachments: Record<
+    string,
+    { filename: string; mime: string; data_url: string; size: number }
+  >;
+  settingsAccordionOpen: Record<string, boolean>;
+  modelConfig: ModelManagementConfig | null;
+  modelConfigStatusMsg: string;
 }
 
 export const state: AppState = {
@@ -233,6 +244,18 @@ export const state: AppState = {
   watches: [],
   watchBadgeConvIds: [],
   watchStatusNotice: "",
+  messageEmailCards: {},
+  expandedChatEmails: {},
+  previewedAttachments: {},
+  settingsAccordionOpen: {
+    models: true,
+    profiles: false,
+    vault: false,
+    mail: false,
+    indexing: false,
+  },
+  modelConfig: null,
+  modelConfigStatusMsg: "",
 };
 
 export function escapeHtml(str: string): string {

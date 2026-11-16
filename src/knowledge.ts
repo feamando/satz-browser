@@ -39,6 +39,7 @@ export interface KnowledgeActions {
   onRevealPassword?: (service: string, field: string, pin: string) => void;
   onAutofillActiveTab?: () => void;
   onMailChanged?: () => Promise<void>;
+  onSaveModelConfig?: (payload: Record<string, unknown>) => Promise<void>;
   onCloseKnowledgeView: () => void;
 }
 
@@ -62,43 +63,128 @@ export function renderKnowledgeView(
   const vault = kb.vault;
   const vaultServices = vault?.services ?? [];
   const doctorRoles = state.doctorRoles ?? [];
+  const acc = state.settingsAccordionOpen;
+  const modelCfg = state.modelConfig ?? state.sidecar.model_config ?? null;
+  const geminiProvider = modelCfg?.cloud_providers?.find((p) => p.id === "gemini");
+  const geminiConfigured = Boolean(geminiProvider?.configured);
+  const roleChat = modelCfg?.roles?.chat ?? state.selectedModel ?? "gemma-4-e4b";
+  const roleWeb = modelCfg?.roles?.web_answer ?? "planck3 (web)";
+  const roleReader = modelCfg?.roles?.reader ?? "hertz (reader)";
 
   const doctorSectionHtml = `
       <div class="knowledge-section">
-        <div class="panel-header">
-          <span>models (/doctor · ${doctorRoles.length || 5} roles)</span>
+        <div class="panel-header accordion-header" data-settings-accordion="models">
+          <span>[${acc.models ? "-" : "+"}] 1. model management &amp; cloud setup (local /doctor + google gemini api)</span>
+          <span class="muted">${geminiConfigured ? `[gemini: ready · ${escapeHtml(geminiProvider?.key_source ?? "vault")}]` : "[local only · gemini not configured]"}</span>
         </div>
         ${
-          doctorRoles.length === 0
-            ? `<div class="muted">models [offline]: start sidecar to inspect model checkpoints and device placement.</div>`
-            : doctorRoles
-                .map((dr) => {
-                  const badge =
-                    dr.state === "ready"
-                      ? `[ready · ${escapeHtml(dr.device)}]`
-                      : dr.state === "cpu_only"
-                        ? `[cpu_only · ${escapeHtml(dr.device)}]`
-                        : `[missing]`;
-                  return `
-                    <div class="source-row">
-                      <div class="source-row-top">
-                        <span>
-                          <strong>${escapeHtml(dr.role)}</strong>
-                          <span class="muted">· ${escapeHtml(dr.model)}</span>
-                        </span>
-                        <span class="${dr.state === "missing" ? "msg-error-badge" : "status-item"}">${badge}</span>
+          !acc.models
+            ? ""
+            : `
+          <div class="kb-card">
+            <div class="kb-card-header">
+              <span><strong>role routing matrix</strong> (which model handles each browser task)</span>
+              <span class="muted">mail classifier &amp; brain encoder stay 100% local</span>
+            </div>
+            <div class="vault-form-row">
+              <label class="muted">chat &amp; synthesis:</label>
+              <select id="kb-role-chat-select" class="vault-input">
+                <option value="gemma-4-e4b" ${roleChat === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local · default)</option>
+                <option value="gemini-2.5-flash (cloud)" ${roleChat === "gemini-2.5-flash (cloud)" ? "selected" : ""}>gemini-2.5-flash (cloud · google api)</option>
+                <option value="gemini-2.5-pro (cloud)" ${roleChat === "gemini-2.5-pro (cloud)" ? "selected" : ""}>gemini-2.5-pro (cloud · google api)</option>
+              </select>
+              <label class="muted">web answer (+web):</label>
+              <select id="kb-role-web-select" class="vault-input">
+                <option value="planck3 (web)" ${roleWeb === "planck3 (web)" ? "selected" : ""}>planck3 (local read->weigh->write)</option>
+                <option value="gemini-2.5-flash (cloud)" ${roleWeb === "gemini-2.5-flash (cloud)" ? "selected" : ""}>gemini-2.5-flash (cloud)</option>
+              </select>
+              <label class="muted">page reader:</label>
+              <select id="kb-role-reader-select" class="vault-input">
+                <option value="hertz (reader)" ${roleReader === "hertz (reader)" ? "selected" : ""}>hertz 1.2 (local extractive reader)</option>
+                <option value="planck (reader)" ${roleReader === "planck (reader)" ? "selected" : ""}>planck (local extractive reader)</option>
+                <option value="gemma-4-e4b" ${roleReader === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local generative)</option>
+                <option value="gemini-2.5-flash (cloud)" ${roleReader === "gemini-2.5-flash (cloud)" ? "selected" : ""}>gemini-2.5-flash (cloud)</option>
+              </select>
+              <button id="kb-save-roles-btn">[apply role routing]</button>
+            </div>
+          </div>
+
+          <div class="kb-card">
+            <div class="kb-card-header">
+              <span><strong>cloud provider: google gemini api</strong> (gemini-2.5-flash · gemini-2.5-pro)</span>
+              <span class="status-item">${
+                geminiConfigured
+                  ? `[configured in ${escapeHtml(geminiProvider?.key_source ?? "vault")} · ${escapeHtml(geminiProvider?.masked_key ?? "***")}]`
+                  : "[not configured]"
+              }</span>
+            </div>
+            <div class="muted">
+              ${escapeHtml(
+                geminiProvider?.privacy_disclosure ??
+                  "Opt-in cloud provider: only active when a (cloud) model is selected. Sends prompt + checked source passages to generativelanguage.googleapis.com over HTTPS. Vault secrets and raw mail databases never leave your machine."
+              )}
+            </div>
+            <div class="vault-form-row">
+              <input
+                id="kb-gemini-api-key"
+                class="vault-input"
+                type="password"
+                spellcheck="false"
+                autocorrect="off"
+                autocapitalize="off"
+                placeholder="${isUnlocked ? "paste GEMINI_API_KEY (encrypted into active profile vault.enc)_" : "unlock a profile below to store GEMINI_API_KEY in vault.enc_"}"
+              />
+              <button id="kb-save-gemini-key-btn">[save key to vault.enc]</button>
+              <button id="kb-test-gemini-key-btn">[test connection]</button>
+              ${
+                geminiConfigured
+                  ? `<button id="kb-clear-gemini-key-btn">[clear key]</button>`
+                  : ""
+              }
+            </div>
+            ${
+              state.modelConfigStatusMsg
+                ? `<div class="profile-status-banner">${escapeHtml(state.modelConfigStatusMsg)}</div>`
+                : ""
+            }
+          </div>
+
+          <div class="rail-group-label">
+            <span>local on-device models (/doctor · ${doctorRoles.length || 5} roles)</span>
+          </div>
+          ${
+            doctorRoles.length === 0
+              ? `<div class="muted">models [offline]: start sidecar to inspect model checkpoints and device placement.</div>`
+              : doctorRoles
+                  .map((dr) => {
+                    const badge =
+                      dr.state === "ready"
+                        ? `[ready · ${escapeHtml(dr.device)}]`
+                        : dr.state === "cpu_only"
+                          ? `[cpu_only · ${escapeHtml(dr.device)}]`
+                          : `[missing]`;
+                    return `
+                      <div class="source-row">
+                        <div class="source-row-top">
+                          <span>
+                            <strong>${escapeHtml(dr.role)}</strong>
+                            <span class="muted">· ${escapeHtml(dr.model)}</span>
+                          </span>
+                          <span class="${dr.state === "missing" ? "msg-error-badge" : "status-item"}">${badge}</span>
+                        </div>
+                        ${
+                          dr.fix
+                            ? `<div class="muted">fix: ${escapeHtml(dr.fix)}</div>`
+                            : dr.path
+                              ? `<div class="muted">${escapeHtml(dr.path)}</div>`
+                              : ""
+                        }
                       </div>
-                      ${
-                        dr.fix
-                          ? `<div class="muted">fix: ${escapeHtml(dr.fix)}</div>`
-                          : dr.path
-                            ? `<div class="muted">${escapeHtml(dr.path)}</div>`
-                            : ""
-                      }
-                    </div>
-                  `;
-                })
-                .join("")
+                    `;
+                  })
+                  .join("")
+          }
+        `
         }
       </div>
   `;
@@ -107,8 +193,10 @@ export function renderKnowledgeView(
     <div class="knowledge-view">
       <div class="knowledge-section">
         <div class="panel-header">
-          <span>settings · profiles (6-digit pin) · .env password vault · mail accounts</span>
+          <span>settings · accordion navigation (click any section header to expand / collapse)</span>
           <div>
+            <button id="kb-expand-all-btn">[expand all]</button>
+            <button id="kb-collapse-all-btn">[collapse all]</button>
             <button id="kb-open-brain-btn">[brain · ${MOD_LABEL}+b]</button>
             <button id="kb-pause-btn" class="${kb.pause_learning ? "active" : ""}">
               [pause learning: ${kb.pause_learning ? "on" : "off"}]
@@ -133,14 +221,18 @@ export function renderKnowledgeView(
       ${doctorSectionHtml}
 
       <div class="knowledge-section">
-        <div class="panel-header">
-          <span>user profiles (name + 6-digit pin) (${profilesList.length})</span>
+        <div class="panel-header accordion-header" data-settings-accordion="profiles">
+          <span>[${acc.profiles ? "-" : "+"}] 2. user profiles &amp; security (name + 6-digit pin) (${profilesList.length})</span>
           ${
             isUnlocked
               ? `<button id="kb-lock-profile-btn">[lock active profile]</button>`
-              : ""
+              : `<span class="muted">[locked]</span>`
           }
         </div>
+        ${
+          !acc.profiles
+            ? ""
+            : `
         <div class="vault-form-row">
           <input
             id="kb-new-profile-name"
@@ -208,21 +300,25 @@ export function renderKnowledgeView(
                 )
                 .join("")
         }
+        `
+        }
       </div>
 
       <div class="knowledge-section">
-        <div class="panel-header">
-          <span>profile .env password management system (${isUnlocked ? `${vaultServices.length} services` : "locked"})</span>
+        <div class="panel-header accordion-header" data-settings-accordion="vault">
+          <span>[${acc.vault ? "-" : "+"}] 3. profile .env password vault (${isUnlocked ? `${vaultServices.length} services` : "locked"})</span>
           ${
             isUnlocked && state.activeDetail?.tabs.some((t) => t.is_open)
               ? `<button id="kb-autofill-tab-btn" title="Auto-fill & login on open tab using active profile .env credentials">[auto-fill open tab]</button>`
-              : ""
+              : `<span class="muted">AES-256-GCM + Argon2id</span>`
           }
         </div>
         ${
-          !isUnlocked
-            ? `<div class="muted">locked: vault credentials (vault.enc), Mail (mail.sqlite), the Satz Brain (BRAIN.md), and the passage store (planck_store.sqlite) are scoped to an unlocked profile. with no profile unlocked, Brain writes are refused ("unlock a profile to save to your Brain") and passages stay in an ephemeral in-memory store.</div>`
-            : `
+          !acc.vault
+            ? ""
+            : !isUnlocked
+              ? `<div class="muted">locked: vault credentials (vault.enc), Mail (mail.sqlite), the Satz Brain (BRAIN.md), and the passage store (planck_store.sqlite) are scoped to an unlocked profile.</div>`
+              : `
           <div class="muted">
             profile .env file: ${escapeHtml(vault?.env_path ?? "")} · only accessible while profile "${escapeHtml(activeProfile?.name ?? "")}" is unlocked. used by the agent when prompted and in the background for bookmarks.
           </div>
@@ -255,12 +351,11 @@ export function renderKnowledgeView(
             vaultServices.length === 0
               ? `<div class="muted">no credentials in this profile's vault.enc yet. add a service above or paste/import a .env file below.</div>`
               : vaultServices
-                  .map(
-                    (s) => {
-                      const revPwd = state.revealedPasswords[`${s.service}:password`];
-                      const revTok = state.revealedPasswords[`${s.service}:token`];
-                      const revCook = state.revealedPasswords[`${s.service}:cookie`];
-                      return `
+                  .map((s) => {
+                    const revPwd = state.revealedPasswords[`${s.service}:password`];
+                    const revTok = state.revealedPasswords[`${s.service}:token`];
+                    const revCook = state.revealedPasswords[`${s.service}:cookie`];
+                    return `
                 <div class="rail-row">
                   <span>
                     <strong>${escapeHtml(s.service)}</strong>
@@ -293,8 +388,7 @@ export function renderKnowledgeView(
                   </span>
                 </div>
               `;
-                    }
-                  )
+                  })
                   .join("")
           }
 
@@ -309,12 +403,23 @@ export function renderKnowledgeView(
         }
       </div>
 
-      ${renderMailAccountsSectionHtml()}
+      <div class="knowledge-section">
+        <div class="panel-header accordion-header" data-settings-accordion="mail">
+          <span>[${acc.mail ? "-" : "+"}] 4. mail accounts &amp; classifier eval (${state.mailAccounts.length} accounts)</span>
+          <span class="muted">IMAP / POP3 / SMTP</span>
+        </div>
+        ${!acc.mail ? "" : renderMailAccountsSectionHtml()}
+      </div>
 
       <div class="knowledge-section">
-        <div class="panel-header">
-          <span>continuously indexed bookmarks (${bookmarksIndexed.length})</span>
+        <div class="panel-header accordion-header" data-settings-accordion="indexing">
+          <span>[${acc.indexing ? "-" : "+"}] 5. background indexing &amp; bookmarks (${bookmarksIndexed.length})</span>
+          <span class="muted">30-min conditional fetch</span>
         </div>
+        ${
+          !acc.indexing
+            ? ""
+            : `
         <div class="muted">
           bookmarked sources are continuously fetched, authenticated (via unlocked profile .env when applicable), and indexed in the background.
         </div>
@@ -338,9 +443,74 @@ export function renderKnowledgeView(
                 )
                 .join("")
         }
+        `
+        }
       </div>
     </div>
   `;
+
+  container.querySelectorAll("[data-settings-accordion]").forEach((hdr) => {
+    hdr.addEventListener("click", (e) => {
+      const target = e.target as HTMLElement;
+      if (target.closest("button")) return;
+      const key = (hdr as HTMLElement).getAttribute("data-settings-accordion") ?? "";
+      if (key) {
+        state.settingsAccordionOpen[key] = !state.settingsAccordionOpen[key];
+        renderKnowledgeView(container, actions);
+      }
+    });
+  });
+
+  container.querySelector("#kb-expand-all-btn")?.addEventListener("click", () => {
+    for (const k of ["models", "profiles", "vault", "mail", "indexing"]) {
+      state.settingsAccordionOpen[k] = true;
+    }
+    renderKnowledgeView(container, actions);
+  });
+
+  container.querySelector("#kb-collapse-all-btn")?.addEventListener("click", () => {
+    for (const k of ["models", "profiles", "vault", "mail", "indexing"]) {
+      state.settingsAccordionOpen[k] = false;
+    }
+    renderKnowledgeView(container, actions);
+  });
+
+  container.querySelector("#kb-save-roles-btn")?.addEventListener("click", () => {
+    if (!actions.onSaveModelConfig) return;
+    const chatSel = (container.querySelector("#kb-role-chat-select") as HTMLSelectElement | null)?.value ?? "gemma-4-e4b";
+    const webSel = (container.querySelector("#kb-role-web-select") as HTMLSelectElement | null)?.value ?? "planck3 (web)";
+    const readerSel = (container.querySelector("#kb-role-reader-select") as HTMLSelectElement | null)?.value ?? "hertz (reader)";
+    void actions.onSaveModelConfig({
+      role_chat: chatSel,
+      role_web_answer: webSel,
+      role_reader: readerSel,
+    });
+  });
+
+  container.querySelector("#kb-save-gemini-key-btn")?.addEventListener("click", () => {
+    if (!actions.onSaveModelConfig) return;
+    const keyVal = (container.querySelector("#kb-gemini-api-key") as HTMLInputElement | null)?.value.trim() ?? "";
+    void actions.onSaveModelConfig({
+      gemini_api_key: keyVal,
+      verify_key: true,
+    });
+  });
+
+  container.querySelector("#kb-test-gemini-key-btn")?.addEventListener("click", () => {
+    if (!actions.onSaveModelConfig) return;
+    const keyVal = (container.querySelector("#kb-gemini-api-key") as HTMLInputElement | null)?.value.trim() ?? "";
+    void actions.onSaveModelConfig({
+      gemini_api_key: keyVal,
+      test_gemini: true,
+    });
+  });
+
+  container.querySelector("#kb-clear-gemini-key-btn")?.addEventListener("click", () => {
+    if (!actions.onSaveModelConfig) return;
+    void actions.onSaveModelConfig({
+      clear_gemini_key: true,
+    });
+  });
 
   container.querySelector("#kb-open-brain-btn")?.addEventListener("click", () => {
     if (actions.onSwitchToBrain) {

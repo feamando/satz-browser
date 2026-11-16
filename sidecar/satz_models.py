@@ -66,6 +66,7 @@ STATIC_SYSTEM_PROMPT = (
     "  Valid types: 'place', 'person', 'account', 'organization', 'project', 'note', 'decision'.\n"
     "- Every time you use a fact from a numbered source in SOURCES, cite it inline as [1], [2], etc.\n"
     "- Every time you use a fact from a numbered Brain item in SATZ BRAIN KNOWLEDGE BASE, cite it inline as [B1], [B2], etc.\n"
+    "- When listing videos, articles, products, or web pages that have URLs in SOURCES (such as under [EXTRACTED PAGE ITEMS & IMAGES] or [KEY LINKS ON PAGE]), format each item's title as an inline Markdown link [Title](https://...) followed by its [n] citation.\n"
     "- Keep answers concise and never use em dashes."
 )
 
@@ -1151,13 +1152,198 @@ class SatzSidecarRuntime:
                 planck3_status(),
                 reader_status("hertz (reader)", hertz_ckpt),
                 reader_status("planck (reader)", planck_ckpt),
+                *self._cloud_model_health_entries(),
             ],
             "ingest_queue_len": self.ingest_queue.qsize(),
             "pause_learning": self.pause_learning,
             "errors": self.get_errors(),
             "mail": self.mail.get_status() if hasattr(self, "mail") and self.mail else None,
             "watch_badges": self.get_unread_watch_conversations(),
+            "model_config": self.get_model_management_config(),
         }
+
+    # ── Cloud Model & Role Management (Section 7 & 8) ────────────────────
+    def _resolve_gemini_api_key(self) -> tuple[str, str]:
+        if getattr(self, "passwords", None) is not None and self.passwords.unlocked:
+            env_map = self.passwords.get_unlocked_credentials_map()
+            for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GEMINI_TOKEN", "GEMINI_PASSWORD"):
+                v = (env_map.get(k) or "").strip()
+                if v:
+                    return v, "vault"
+        env_v = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
+        if env_v:
+            return env_v, "env"
+        return "", "none"
+
+    def _cloud_model_health_entries(self) -> list[dict[str, Any]]:
+        key, src = self._resolve_gemini_api_key()
+        state_val = "ready" if key else "missing"
+        detail_val = f"cloud · key in {src}" if key else "add GEMINI_API_KEY in settings"
+        return [
+            {
+                "id": "gemini-2.5-flash (cloud)",
+                "state": state_val,
+                "device": "cloud",
+                "detail": detail_val,
+            },
+            {
+                "id": "gemini-2.5-pro (cloud)",
+                "state": state_val,
+                "device": "cloud",
+                "detail": detail_val,
+            },
+        ]
+
+    def get_model_management_config(self) -> dict[str, Any]:
+        key, key_src = self._resolve_gemini_api_key()
+        with self.store_lock:
+            rows = self.store.db.execute(
+                "SELECT key, value FROM satz_meta WHERE key LIKE 'model_role_%'"
+            ).fetchall()
+            meta = {r["key"]: r["value"] for r in rows}
+
+        role_chat = meta.get("model_role_chat") or "gemma-4-e4b"
+        role_web = meta.get("model_role_web_answer") or "planck3 (web)"
+        role_reader = meta.get("model_role_reader") or "hertz (reader)"
+
+        return {
+            "ok": True,
+            "roles": {
+                "chat": role_chat,
+                "web_answer": role_web,
+                "reader": role_reader,
+                "mail_classifier": "local heuristic + distilbert + gemma",
+                "brain_encoder": "planck13 (local)",
+            },
+            "cloud_providers": [
+                {
+                    "id": "gemini",
+                    "label": "Google Gemini API",
+                    "configured": bool(key),
+                    "key_source": key_src,
+                    "masked_key": (f"{key[:4]}...{key[-4:]}" if len(key) >= 10 else ("***" if key else "")),
+                    "models": [
+                        {
+                            "id": "gemini-2.5-flash (cloud)",
+                            "slug": "gemini-2.5-flash",
+                            "label": "Gemini 2.5 Flash (fast daily synthesis & multi-tab reading)",
+                        },
+                        {
+                            "id": "gemini-2.5-pro (cloud)",
+                            "slug": "gemini-2.5-pro",
+                            "label": "Gemini 2.5 Pro (deep reasoning & complex comparison)",
+                        },
+                    ],
+                    "privacy_disclosure": (
+                        "Opt-in cloud provider: only active when a (cloud) model is selected. "
+                        "Sends prompt + checked source passages to generativelanguage.googleapis.com over HTTPS. "
+                        "Vault secrets and raw mail databases never leave your machine."
+                    ),
+                }
+            ],
+        }
+
+    def update_model_management_config(self, data: dict[str, Any]) -> dict[str, Any]:
+        api_key = str(data.get("gemini_api_key") or "").strip()
+        clear_key = bool(data.get("clear_gemini_key", False))
+        test_only = bool(data.get("test_gemini", False))
+
+        if clear_key and self.passwords.unlocked:
+            try:
+                self.passwords.delete_service_credential("GEMINI")
+            except Exception:
+                pass
+            cur = self.passwords.get_unlocked_credentials_map()
+            cur.pop("GEMINI_API_KEY", None)
+            raw_lines = [f"{k}={v}" for k, v in cur.items()]
+            self.passwords.save_raw_env("\n".join(raw_lines))
+
+        if api_key and not test_only:
+            if not self.passwords.unlocked:
+                return {"ok": False, "error": "Unlock your profile with your 6-digit PIN first to store GEMINI_API_KEY in vault.enc."}
+            self.passwords.save_raw_env(f"GEMINI_API_KEY={api_key}")
+
+        with self.store_lock:
+            for role_key, param_name in (
+                ("model_role_chat", "role_chat"),
+                ("model_role_web_answer", "role_web_answer"),
+                ("model_role_reader", "role_reader"),
+            ):
+                if param_name in data and data[param_name]:
+                    self.store.db.execute(
+                        "INSERT OR REPLACE INTO satz_meta (key, value) VALUES (?, ?)",
+                        (role_key, str(data[param_name]).strip()),
+                    )
+            self.store.db.commit()
+
+        test_result: dict[str, Any] = {}
+        if test_only or data.get("verify_key"):
+            eff_key = api_key or self._resolve_gemini_api_key()[0]
+            if not eff_key:
+                return {"ok": False, "error": "No Gemini API key provided or stored in vault."}
+            try:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash?key={urllib.parse.quote(eff_key)}"
+                req = urllib.request.Request(url, method="GET")
+                with urllib.request.urlopen(req, timeout=8.0) as resp:
+                    info = json.loads(resp.read().decode("utf-8", errors="replace"))
+                    test_result = {
+                        "test_ok": True,
+                        "test_message": f"connected to {info.get('displayName') or 'Gemini 2.5 Flash'} [ok]",
+                    }
+            except Exception as exc:
+                return {"ok": False, "error": f"Gemini connection check failed: {exc}"}
+
+        return {
+            **self.get_model_management_config(),
+            **test_result,
+        }
+
+    def _generate_with_gemini_cloud(
+        self,
+        model_id: str,
+        chat_msgs: list[dict[str, str]],
+    ) -> str:
+        api_key, _ = self._resolve_gemini_api_key()
+        if not api_key:
+            raise RuntimeError(
+                "Gemini API key not configured. Open [settings] -> [model management & cloud setup] and save your GEMINI_API_KEY to vault.enc."
+            )
+        slug = "gemini-2.5-pro" if "pro" in model_id.lower() else "gemini-2.5-flash"
+        sys_parts: list[dict[str, str]] = []
+        contents: list[dict[str, Any]] = []
+        for m in chat_msgs:
+            role = m.get("role") or "user"
+            txt = str(m.get("content") or "")
+            if role == "system":
+                sys_parts.append({"text": txt})
+            else:
+                g_role = "model" if role == "assistant" else "user"
+                contents.append({"role": g_role, "parts": [{"text": txt}]})
+        if not contents:
+            contents.append({"role": "user", "parts": [{"text": "Hello"}]})
+
+        payload: dict[str, Any] = {
+            "contents": contents,
+            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1536},
+        }
+        if sys_parts:
+            payload["systemInstruction"] = {"parts": sys_parts}
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{slug}:generateContent?key={urllib.parse.quote(api_key)}"
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=25.0) as resp:
+            raw = json.loads(resp.read().decode("utf-8", errors="replace"))
+        cands = raw.get("candidates") or []
+        if not cands:
+            raise RuntimeError(f"Gemini returned no candidates: {raw}")
+        parts = ((cands[0].get("content") or {}).get("parts")) or []
+        return "".join(str(p.get("text") or "") for p in parts).strip()
 
     # ── Lazy Model Loaders ───────────────────────────────────────────────
     def ensure_gemma(self):
@@ -2016,7 +2202,19 @@ class SatzSidecarRuntime:
                 parts = m.get("parts") or {}
                 new_t = (parts.get("new") or m.get("body_text") or "").strip()
                 quote_t = (parts.get("quote") or "").strip()
-                header_line = f"From: {m.get('from_name') or ''} <{m.get('from_addr') or ''}>\nSubject: {m.get('subject') or ''}\n"
+                atts = m.get("attachments") or []
+                att_line = ""
+                if atts:
+                    att_names = [
+                        f"{a.get('filename')} ({a.get('mime')}, {max(1, int(a.get('size') or 0) // 1024)} KB)"
+                        for a in atts
+                    ]
+                    att_line = f"Attachments: {', '.join(att_names)}\n"
+                header_line = (
+                    f"From: {m.get('from_name') or ''} <{m.get('from_addr') or ''}>\n"
+                    f"Subject: {m.get('subject') or ''}\n"
+                    f"{att_line}"
+                )
                 combined_mail = f"{header_line}\n{new_t}"
                 if quote_t:
                     combined_mail += f"\n\n--- Quoted Thread ---\n{quote_t}"
@@ -2538,6 +2736,7 @@ class SatzSidecarRuntime:
         web_enabled: bool = False,
         conversation_summary: str = "",
         mail_enabled: bool = False,
+        model_id: str = "gemma-4-e4b",
     ):
         """Generator yielding SSE dicts: {'delta': ...} then {'done': True, 'source_ids': [...], 'ms': ...}."""
         from src.planck3.candidates import main_entity
@@ -2747,123 +2946,140 @@ class SatzSidecarRuntime:
             conversation_summary=conversation_summary,
         )
 
-        if self.gemma_model is None:
-            yield {
-                "status": f"loading gemma-4-e4b into {self.gemma_device or self._detect_gemma_device()} memory...",
-                "phase": "model_load",
-            }
-            load_done = threading.Event()
-            load_err: list[Exception] = []
-
-            def _load_worker():
-                try:
-                    self.ensure_gemma()
-                except Exception as exc:
-                    load_err.append(exc)
-                finally:
-                    load_done.set()
-
-            lt = threading.Thread(target=_load_worker, daemon=True)
-            lt.start()
-            while not load_done.wait(timeout=5.0):
-                yield {"phase": "heartbeat"}
-            if load_err:
-                raise load_err[0]
-        tok, model = self.ensure_gemma()
-        import torch
-        from transformers import TextIteratorStreamer
-
-        yield {
-            "status": f"running gemma-4-e4b prefill over {len(used_source_ids)} source(s) ({len(context_str):,} chars)...",
-            "phase": "generating",
-        }
-
-        inputs = tok.apply_chat_template(
-            chat_msgs,
-            add_generation_prompt=True,
-            return_tensors="pt",
-            return_dict=True,
-        ).to(model.device)
-
-        streamer = TextIteratorStreamer(tok, skip_prompt=True, skip_special_tokens=True)
-        gen_kwargs = dict(
-            **inputs,
-            streamer=streamer,
-            max_new_tokens=1024,
-            do_sample=False,
-        )
-
-        gen_errors: list[str] = []
-        chunk_queue: queue.Queue[str | None] = queue.Queue()
-
-        def _generate():
-            try:
-                with torch.no_grad():
-                    model.generate(**gen_kwargs)
-            except Exception as exc:
-                gen_errors.append(str(exc))
-                try:
-                    streamer.end()
-                except Exception:
-                    pass
-
-        def _pump_streamer():
-            try:
-                for piece in streamer:
-                    chunk_queue.put(piece)
-            finally:
-                chunk_queue.put(None)
-
-        gen_thread = threading.Thread(target=_generate, daemon=True)
-        pump_thread = threading.Thread(target=_pump_streamer, daemon=True)
-        gen_thread.start()
-        pump_thread.start()
-
         full_raw = ""
         emitted_len = 0
         in_brain_tag = False
-        first_token_seen = False
 
-        while True:
-            try:
-                chunk = chunk_queue.get(timeout=5.0)
-            except queue.Empty:
-                yield {"phase": "heartbeat"}
-                continue
-            if chunk is None:
-                break
-            if not chunk:
-                continue
-            if not first_token_seen:
-                first_token_seen = True
+        if str(model_id or "").lower().startswith("gemini-"):
+            yield {
+                "status": f"calling {model_id} over HTTPS ({len(used_source_ids)} source(s), {len(context_str):,} chars)...",
+                "phase": "generating",
+            }
+            cloud_raw = self._generate_with_gemini_cloud(model_id, chat_msgs).replace("\u2014", "-")
+            full_raw = cloud_raw
+            tag_pos = full_raw.find("<brain_store")
+            visible_cloud = full_raw[:tag_pos] if tag_pos != -1 else full_raw
+            if visible_cloud:
+                yield {"status": "streaming response tokens...", "phase": "streaming"}
+                yield {"delta": visible_cloud}
+                emitted_len = len(visible_cloud)
+            if tag_pos != -1:
+                in_brain_tag = True
+        else:
+            if self.gemma_model is None:
                 yield {
-                    "status": "streaming response tokens...",
-                    "phase": "streaming",
+                    "status": f"loading gemma-4-e4b into {self.gemma_device or self._detect_gemma_device()} memory...",
+                    "phase": "model_load",
                 }
-            cleaned = chunk.replace("\u2014", "-")
-            full_raw += cleaned
+                load_done = threading.Event()
+                load_err: list[Exception] = []
 
-            if not in_brain_tag:
-                tag_pos = full_raw.find("<brain_store")
-                if tag_pos != -1:
-                    in_brain_tag = True
-                    if tag_pos > emitted_len:
-                        delta_out = full_raw[emitted_len:tag_pos]
-                        emitted_len = tag_pos
-                        if delta_out:
-                            yield {"delta": delta_out}
-                else:
-                    # Hold back a small tail in case '<brain_store' is being split across tokens
-                    safe_end = max(emitted_len, len(full_raw) - 14)
-                    if safe_end > emitted_len:
-                        delta_out = full_raw[emitted_len:safe_end]
-                        emitted_len = safe_end
-                        if delta_out:
-                            yield {"delta": delta_out}
+                def _load_worker():
+                    try:
+                        self.ensure_gemma()
+                    except Exception as exc:
+                        load_err.append(exc)
+                    finally:
+                        load_done.set()
 
-        gen_thread.join(timeout=5.0)
-        if gen_errors:
-            raise RuntimeError(gen_errors[0])
+                lt = threading.Thread(target=_load_worker, daemon=True)
+                lt.start()
+                while not load_done.wait(timeout=5.0):
+                    yield {"phase": "heartbeat"}
+                if load_err:
+                    raise load_err[0]
+            tok, model = self.ensure_gemma()
+            import torch
+            from transformers import TextIteratorStreamer
+
+            yield {
+                "status": f"running gemma-4-e4b prefill over {len(used_source_ids)} source(s) ({len(context_str):,} chars)...",
+                "phase": "generating",
+            }
+
+            inputs = tok.apply_chat_template(
+                chat_msgs,
+                add_generation_prompt=True,
+                return_tensors="pt",
+                return_dict=True,
+            ).to(model.device)
+
+            streamer = TextIteratorStreamer(tok, skip_prompt=True, skip_special_tokens=True)
+            gen_kwargs = dict(
+                **inputs,
+                streamer=streamer,
+                max_new_tokens=1024,
+                do_sample=False,
+            )
+
+            gen_errors: list[str] = []
+            chunk_queue: queue.Queue[str | None] = queue.Queue()
+
+            def _generate():
+                try:
+                    with torch.no_grad():
+                        model.generate(**gen_kwargs)
+                except Exception as exc:
+                    gen_errors.append(str(exc))
+                    try:
+                        streamer.end()
+                    except Exception:
+                        pass
+
+            def _pump_streamer():
+                try:
+                    for piece in streamer:
+                        chunk_queue.put(piece)
+                finally:
+                    chunk_queue.put(None)
+
+            gen_thread = threading.Thread(target=_generate, daemon=True)
+            pump_thread = threading.Thread(target=_pump_streamer, daemon=True)
+            gen_thread.start()
+            pump_thread.start()
+
+            first_token_seen = False
+
+            while True:
+                try:
+                    chunk = chunk_queue.get(timeout=5.0)
+                except queue.Empty:
+                    yield {"phase": "heartbeat"}
+                    continue
+                if chunk is None:
+                    break
+                if not chunk:
+                    continue
+                if not first_token_seen:
+                    first_token_seen = True
+                    yield {
+                        "status": "streaming response tokens...",
+                        "phase": "streaming",
+                    }
+                cleaned = chunk.replace("\u2014", "-")
+                full_raw += cleaned
+
+                if not in_brain_tag:
+                    tag_pos = full_raw.find("<brain_store")
+                    if tag_pos != -1:
+                        in_brain_tag = True
+                        if tag_pos > emitted_len:
+                            delta_out = full_raw[emitted_len:tag_pos]
+                            emitted_len = tag_pos
+                            if delta_out:
+                                yield {"delta": delta_out}
+                    else:
+                        # Hold back a small tail in case '<brain_store' is being split across tokens
+                        safe_end = max(emitted_len, len(full_raw) - 14)
+                        if safe_end > emitted_len:
+                            delta_out = full_raw[emitted_len:safe_end]
+                            emitted_len = safe_end
+                            if delta_out:
+                                yield {"delta": delta_out}
+
+            gen_thread.join(timeout=5.0)
+            if gen_errors:
+                raise RuntimeError(gen_errors[0])
 
         # Flush any remaining text and execute any <brain_store> directives
         primary_url = str(hydrated_sources[0].get("url") or "") if hydrated_sources else ""
@@ -2944,6 +3160,43 @@ class SatzSidecarRuntime:
             if len(collected_findings) >= 8:
                 break
 
+        # Collect inline email cards (and their attachments) for any referenced mail:<id> sources
+        email_cards: list[dict[str, Any]] = []
+        if getattr(self, "mail", None) is not None and self.passwords.unlocked:
+            seen_mail_ids: set[str] = set()
+            for hs in hydrated_sources:
+                sid = str(hs.get("id") or "")
+                u = str(hs.get("url") or "")
+                mid = ""
+                if sid.startswith("mail:"):
+                    mid = sid.split("mail:", 1)[1].strip()
+                elif u.startswith("satzmail://message/"):
+                    mid = u.split("satzmail://message/", 1)[1].split("/")[0].strip()
+                if not mid or mid in seen_mail_ids:
+                    continue
+                seen_mail_ids.add(mid)
+                det = self.mail.get_message_detail(mid)
+                if det.get("ok") and det.get("message"):
+                    m_obj = det["message"]
+                    parts_obj = m_obj.get("parts") or {}
+                    email_cards.append(
+                        {
+                            "message_id": mid,
+                            "source_id": sid or f"mail:{mid}",
+                            "subject": str(m_obj.get("subject") or "(no subject)"),
+                            "from_name": str(m_obj.get("from_name") or ""),
+                            "from_addr": str(m_obj.get("from_addr") or ""),
+                            "date": float(m_obj.get("date") or 0.0),
+                            "label": str(m_obj.get("label") or "email"),
+                            "snippet": str(m_obj.get("snippet") or "")[:200],
+                            "body_text": str(parts_obj.get("new") or m_obj.get("body_text") or "")[:4000],
+                            "quoted_text": str(parts_obj.get("quote") or "")[:2000],
+                            "attachments": m_obj.get("attachments") or [],
+                        }
+                    )
+                if len(email_cards) >= 6:
+                    break
+
         ms = int((time.perf_counter() - t0) * 1000)
         done_payload: dict[str, Any] = {
             "done": True,
@@ -2958,6 +3211,8 @@ class SatzSidecarRuntime:
         }
         if collected_findings:
             done_payload["findings"] = collected_findings
+        if email_cards:
+            done_payload["email_cards"] = email_cards
         if cited_web_sources:
             done_payload["cited_sources"] = cited_web_sources
         if stored_entities:
@@ -4813,6 +5068,8 @@ def make_sidecar_server(
 
             if route_path == "/doctor":
                 return self._json(runtime.get_doctor())
+            if route_path == "/models/config":
+                return self._json(runtime.get_model_management_config())
             if route_path == "/digest":
                 return self._json(runtime.get_digest())
             if route_path == "/knowledge":
@@ -4870,6 +5127,9 @@ def make_sidecar_server(
                     return self._json(runtime.mail.get_message_detail(parts[2]))
                 if len(parts) == 4 and parts[0] == "mail" and parts[1] == "message" and parts[3] == "html":
                     return self._json(runtime.mail.get_sanitized_message_html(parts[2]))
+                if len(parts) == 4 and parts[0] == "mail" and parts[1] == "message" and parts[3] == "attachment":
+                    part_id = query_params.get("part_id", "")
+                    return self._json(runtime.mail.get_attachment_data(parts[2], part_id))
             return self._json({"error": "not found"}, 404)
 
         def do_POST(self):
@@ -4923,6 +5183,10 @@ def make_sidecar_server(
             if self.path == "/knowledge/pause":
                 paused = bool(data.get("pause_learning", False))
                 return self._json({"ok": True, "pause_learning": runtime.set_pause_learning(paused)})
+
+            if self.path == "/models/config":
+                res = runtime.update_model_management_config(data)
+                return self._json(res, 200 if res.get("ok") else 400)
 
             if self.path == "/knowledge/delete_passage":
                 pid = str(data.get("passage_id") or "")
@@ -5247,6 +5511,7 @@ def make_sidecar_server(
                 web_enabled = bool(data.get("web", False))
                 mail_enabled = bool(data.get("mail", False))
                 conversation_summary = str(data.get("summary") or "")
+                model_id = str(data.get("model") or "gemma-4-e4b")
 
                 self.send_response(200)
                 self._send_cors_headers()
@@ -5262,6 +5527,7 @@ def make_sidecar_server(
                         web_enabled=web_enabled,
                         conversation_summary=conversation_summary,
                         mail_enabled=mail_enabled,
+                        model_id=model_id,
                     ):
                         line = f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                         self.wfile.write(line.encode("utf-8"))

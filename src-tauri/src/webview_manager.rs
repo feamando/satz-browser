@@ -605,6 +605,27 @@ const DOM_CAPTURE_JS: &str = r#"(() => {
 
     const findings = [];
     const seenImgs = new Set();
+    const seenVideoIds = new Set();
+    const ytLinks = Array.from(document.querySelectorAll('a#video-title[href], a[href*="/watch?v="], a[href*="youtu.be/"]'));
+    for (let i = 0; i < ytLinks.length && findings.length < 8; i++) {
+      const a = ytLinks[i];
+      const href = a.href || '';
+      const vm = href.match(/(?:[?&]v=|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+      if (!vm) continue;
+      const vid = vm[1];
+      if (seenVideoIds.has(vid)) continue;
+      const rawTitle = (a.innerText || a.getAttribute('title') || a.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+      if (!rawTitle || rawTitle.length < 4) continue;
+      seenVideoIds.add(vid);
+      const thumbUrl = 'https://i.ytimg.com/vi/' + vid + '/hqdefault.jpg';
+      seenImgs.add(thumbUrl);
+      findings.push({
+        image_url: thumbUrl,
+        title: rawTitle.slice(0, 140),
+        price: 'video',
+        page_url: 'https://www.youtube.com/watch?v=' + vid
+      });
+    }
     const imgEls = Array.from(document.querySelectorAll('article img, [data-testid*="product" i] img, [class*="product" i] img, [class*="card" i] img, main img, img'));
     for (let i = 0; i < imgEls.length && findings.length < 8; i++) {
       const img = imgEls[i];
@@ -638,6 +659,22 @@ const DOM_CAPTURE_JS: &str = r#"(() => {
         `[ITEM ${idx + 1}] ${f.title}${f.price ? ' (' + f.price + ')' : ''} | link: ${f.page_url} | image: ${f.image_url}`
       );
       parts.push('[EXTRACTED PAGE ITEMS & IMAGES]\n' + fLines.join('\n'));
+    }
+
+    const pageLinks = [];
+    const seenHrefs = new Set();
+    const anchorEls = Array.from(document.querySelectorAll('main a[href], article a[href], [role="main"] a[href], h1 a[href], h2 a[href], h3 a[href], a#video-title[href]'));
+    for (let i = 0; i < anchorEls.length && pageLinks.length < 15; i++) {
+      const a = anchorEls[i];
+      const href = a.href || '';
+      if (!href.startsWith('http') || seenHrefs.has(href)) continue;
+      const txt = (a.innerText || a.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+      if (txt.length < 10 || txt.length > 160) continue;
+      seenHrefs.add(href);
+      pageLinks.push(`- [${txt}](${href})`);
+    }
+    if (pageLinks.length > 0) {
+      parts.push('[KEY LINKS ON PAGE]\n' + pageLinks.join('\n'));
     }
 
     const mainEl = document.querySelector('[role="main"], main, article');

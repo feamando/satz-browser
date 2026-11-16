@@ -11,6 +11,8 @@ const LOCAL_MODELS: LocalModelId[] = [
   "planck3 (web)",
   "hertz (reader)",
   "planck (reader)",
+  "gemini-2.5-flash (cloud)",
+  "gemini-2.5-pro (cloud)",
 ];
 
 export interface StartScreenActions {

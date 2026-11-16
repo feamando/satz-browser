@@ -35,7 +35,9 @@ import {
   sidecarFetchDoctor,
   sidecarFetchHealth,
   sidecarFetchKnowledge,
+  sidecarGetMailAttachmentData,
   sidecarGetMailCodes,
+  sidecarGetModelConfig,
   sidecarImportEnvFile,
   sidecarListTasks,
   sidecarListWatches,
@@ -57,6 +59,7 @@ import {
   sidecarSyncBookmarks,
   sidecarUnlockProfile,
   sidecarUnlockProfileKeychain,
+  sidecarUpdateModelConfig,
   sidecarUpsertBrainEntity,
   sidecarUpsertPassword,
 } from "./api";
@@ -552,12 +555,14 @@ function renderRailRegion(): void {
       state.showKnowledgeView = !state.showKnowledgeView;
       if (state.showKnowledgeView) {
         state.showBrainView = false;
-        const [kb, docRoles] = await Promise.all([
+        const [kb, docRoles, mCfg] = await Promise.all([
           sidecarFetchKnowledge(),
           sidecarFetchDoctor(),
+          sidecarGetModelConfig(),
         ]);
         if (kb) state.knowledge = kb;
         state.doctorRoles = docRoles;
+        if (mCfg) state.modelConfig = mCfg;
         await refreshMailState();
       }
       renderAllRegions();
@@ -672,12 +677,14 @@ function renderViewportRegion(): void {
       onSwitchToSettings: async () => {
         state.showBrainView = false;
         state.showKnowledgeView = true;
-        const [kb, docRoles] = await Promise.all([
+        const [kb, docRoles, mCfg] = await Promise.all([
           sidecarFetchKnowledge(),
           sidecarFetchDoctor(),
+          sidecarGetModelConfig(),
         ]);
         if (kb) state.knowledge = kb;
         state.doctorRoles = docRoles;
+        if (mCfg) state.modelConfig = mCfg;
         await refreshMailState();
         renderAllRegions();
       },
@@ -839,6 +846,21 @@ function renderViewportRegion(): void {
       },
       onMailChanged: async () => {
         await refreshLists();
+        renderAllRegions();
+      },
+      onSaveModelConfig: async (payload) => {
+        const res = await sidecarUpdateModelConfig(payload);
+        if (res.ok) {
+          state.modelConfig = res;
+          if (res.roles?.chat) {
+            state.selectedModel = res.roles.chat as LocalModelId;
+          }
+          state.modelConfigStatusMsg =
+            res.test_message || "saved model configuration.";
+        } else {
+          state.modelConfigStatusMsg = `error: ${res.error ?? "failed to update model configuration"}`;
+        }
+        state.sidecar = await sidecarFetchHealth();
         renderAllRegions();
       },
       onCloseKnowledgeView: () => {
@@ -1460,7 +1482,38 @@ function getChatActions() {
         }
       })();
     },
+    onOpenEmailTab: (messageId: string, subject: string) => {
+      void openEmailMessageTab(messageId, subject);
+    },
+    onPreviewMailAttachment: (messageId: string, partId: string) => {
+      void handleToggleAttachmentPreview(messageId, partId);
+    },
+    onDownloadMailAttachment: (messageId: string, partId: string) => {
+      void sidecarSaveMailAttachment(messageId, partId);
+    },
   };
+}
+
+async function handleToggleAttachmentPreview(
+  messageId: string,
+  partId: string
+): Promise<void> {
+  const key = `${messageId}:${partId}`;
+  if (state.previewedAttachments[key]) {
+    delete state.previewedAttachments[key];
+    renderViewportRegion();
+    return;
+  }
+  const res = await sidecarGetMailAttachmentData(messageId, partId);
+  if (res.ok && res.data_url) {
+    state.previewedAttachments[key] = {
+      filename: res.filename || "attachment",
+      mime: res.mime || "application/pdf",
+      data_url: res.data_url,
+      size: res.size || 0,
+    };
+    renderViewportRegion();
+  }
 }
 
 async function handleWatchTarget(
@@ -1579,9 +1632,9 @@ async function selectConversation(conversationId: string): Promise<void> {
       await refreshMailState();
       state.activeTabId = "lane:inbox";
       state.agentRailOpen = true;
-    } else if (detail.conversation.origin === "direct" && openTabs.length > 0) {
+    } else if (detail.conversation.origin === "direct" && openTabs.length > 0 && detail.messages.length === 0) {
       state.activeTabId = openTabs[0].id;
-      state.agentRailOpen = false;
+      state.agentRailOpen = true;
     } else {
       state.activeTabId = "chat";
       state.agentRailOpen = true;
@@ -1808,13 +1861,13 @@ async function handleStartSubmission(raw: string): Promise<void> {
 async function startDirectBrowsing(rawUrl: string): Promise<void> {
   const url = normalizeUrl(rawUrl);
   const domain = extractDomain(url);
-  const conv = await apiCreateConversation(domain, "direct");
+  const conv = await apiCreateConversation(domain, "chat");
   const tab = await apiOpenTab(conv.id, url, domain);
   state.activeDetail = await apiGetConversation(conv.id);
   state.showKnowledgeView = false;
   state.compareMode = false;
   state.activeTabId = tab.id;
-  state.agentRailOpen = false;
+  state.agentRailOpen = true;
   await refreshLists();
   renderAllRegions();
 }
@@ -2241,6 +2294,9 @@ async function handleSendChatMessage(text: string): Promise<void> {
     if (streamRes.brain_sources && streamRes.brain_sources.length > 0) {
       state.messageBrainSources[savedMsg.id] = streamRes.brain_sources;
     }
+    if (streamRes.email_cards && streamRes.email_cards.length > 0) {
+      state.messageEmailCards[savedMsg.id] = streamRes.email_cards;
+    }
     state.activeDetail = await apiGetConversation(convId);
     if (state.activeDetail) {
       const msgObj = state.activeDetail.messages.find(
@@ -2255,6 +2311,9 @@ async function handleSendChatMessage(text: string): Promise<void> {
         }
         if (state.messageBrainSources[savedMsg.id]) {
           msgObj.brain_sources = state.messageBrainSources[savedMsg.id];
+        }
+        if (state.messageEmailCards[savedMsg.id]) {
+          msgObj.email_cards = state.messageEmailCards[savedMsg.id];
         }
         if (streamRes.cited_sources && streamRes.cited_sources.length > 0) {
           msgObj.cited_sources = streamRes.cited_sources;
@@ -2492,6 +2551,14 @@ function bindEmailTabHeaderEvents(
         };
       }
       renderViewportRegion();
+    });
+  });
+
+  viewport.querySelectorAll("[data-email-preview-att]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const el = btn as HTMLElement;
+      const partId = el.getAttribute("data-part-id") || "";
+      await handleToggleAttachmentPreview(messageId, partId);
     });
   });
 

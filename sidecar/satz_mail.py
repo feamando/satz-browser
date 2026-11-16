@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import datetime
 import email
 import email.header
@@ -188,7 +189,8 @@ def strip_html_tags(raw_html: str) -> str:
 def sanitize_email_html(raw_html: str, allow_remote_images: bool = False) -> str:
     """
     Section 4.6 (M13): Strips <script>, inline event handlers (on*), <iframe/object/embed>,
-    and blocks remote http(s) images unless allow_remote_images is enabled for that sender.
+    normalizes dark-on-dark inline text colors for the #000000 terminal canvas, and blocks
+    remote http(s) images unless allow_remote_images is enabled for that sender.
     """
     if not raw_html:
         return "<html><body><pre>(empty message)</pre></body></html>"
@@ -196,6 +198,14 @@ def sanitize_email_html(raw_html: str, allow_remote_images: bool = False) -> str
     h = re.sub(r"(?is)<(script|iframe|object|embed|applet|meta|base|link)\b[^>]*/?>", "", h)
     h = re.sub(r'(?i)\s+on[a-z0-9_]+\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]+)', "", h)
     h = re.sub(r'(?i)(href|src)\s*=\s*["\']\s*javascript:[^"\']*["\']', r'\1="#"', h)
+    # Remove dark inline color attributes/styles (e.g. Apple Mail <font color="#000000" style="color: rgb(0, 0, 0)">)
+    h = re.sub(r'(?i)\bcolor\s*=\s*["\']#[0-3][0-9a-f]{5}["\']', 'color="#e8e8e8"', h)
+    h = re.sub(r'(?i)-webkit-text-stroke-color\s*:\s*[^;"]+;?', "", h)
+    h = re.sub(
+        r'(?i)(?<![a-z-])color\s*:\s*(?:#0{3,6}|#000001|#[0-2][0-9a-f]{5}|rgb\(\s*[0-4]?\d\s*,\s*[0-4]?\d\s*,\s*[0-4]?\d\s*\)|black)\b;?',
+        "color: #e8e8e8;",
+        h,
+    )
     if not allow_remote_images:
         h = re.sub(
             r'(?i)(<img\b[^>]*?\bsrc\s*=\s*["\'])https?://[^"\']+(["\'])',
@@ -1179,7 +1189,7 @@ class SatzMailManager:
                     st_f, f_data = imap.uid(
                         "FETCH",
                         str(uid_val),
-                        "(FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.20000>)",
+                        "(FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.500000>)",
                     )
                     if st_f != "OK" or not f_data:
                         continue
@@ -1384,17 +1394,35 @@ class SatzMailManager:
                 ctype = (part.get_content_type() or "text/plain").lower()
                 disp = str(part.get_content_disposition() or "").lower()
                 fname = decode_mime_header(part.get_filename())
-                if disp == "attachment" or fname:
+                if not fname:
+                    ct_name = part.get_param("name")
+                    if ct_name:
+                        fname = decode_mime_header(str(ct_name))
+                is_binary_part = ctype not in ("text/plain", "text/html") and (
+                    ctype.startswith(("application/", "image/", "audio/", "video/"))
+                    or disp in ("attachment", "inline")
+                )
+                if disp == "attachment" or fname or is_binary_part:
                     payload_bytes = part.get_payload(decode=True) or b""
-                    attachment_rows.append(
-                        {
-                            "part_id": str(part_idx),
-                            "filename": fname or f"attachment-{part_idx}",
-                            "mime": ctype,
-                            "size": len(payload_bytes),
-                            "bytes": payload_bytes,
-                        }
-                    )
+                    if payload_bytes:
+                        ext_guess = (
+                            ".pdf"
+                            if "pdf" in ctype
+                            else ".png"
+                            if "png" in ctype
+                            else ".jpg"
+                            if ("jpeg" in ctype or "jpg" in ctype)
+                            else ".bin"
+                        )
+                        attachment_rows.append(
+                            {
+                                "part_id": str(part_idx),
+                                "filename": fname or f"attachment-{part_idx}{ext_guess}",
+                                "mime": ctype,
+                                "size": len(payload_bytes),
+                                "bytes": payload_bytes,
+                            }
+                        )
                     continue
                 if ctype == "text/plain":
                     try:
@@ -1980,6 +2008,80 @@ class SatzMailManager:
 
     # ── Milestone M13: Message Reading, Search, Compose & SMTP Send Gate ──
 
+    def _ensure_full_imap_message_fetched(self, message_id: str, force: bool = False) -> None:
+        if not self.passwords.unlocked:
+            return
+        fetched_set: set[str] = getattr(self, "_full_fetched_ids", set())
+        if not hasattr(self, "_full_fetched_ids"):
+            self._full_fetched_ids = fetched_set
+        if not force and message_id in fetched_set:
+            return
+
+        with self.db_lock:
+            conn = self._ensure_connection()
+            row = conn.execute(
+                "SELECT id, account_id, folder, uid, subject, snippet, body_text, has_attachments FROM messages WHERE id = ?",
+                (message_id,),
+            ).fetchone()
+            if not row:
+                return
+            has_att = int(row["has_attachments"] or 0)
+            body_t = str(row["body_text"] or "")
+            snip = str(row["snippet"] or "")
+            subj = str(row["subject"] or "")
+            uid = int(row["uid"] or 0)
+            acct_id = str(row["account_id"] or "")
+            folder = str(row["folder"] or "INBOX")
+            acct = conn.execute("SELECT * FROM accounts WHERE id = ?", (acct_id,)).fetchone()
+
+        needs_full = force or (
+            has_att == 0
+            and (
+                "\ufffc" in snip
+                or "\ufffc" in body_t
+                or len(body_t) < 400
+                or any(
+                    kw in f"{subj} {body_t}".lower()
+                    for kw in ("rechnung", "invoice", "attached", "anhang", "anbei", "pdf", "receipt")
+                )
+            )
+        )
+        fetched_set.add(message_id)
+        if not needs_full or acct is None or uid <= 0:
+            return
+        if str(acct["protocol"] or "imap").lower() != "imap":
+            return
+
+        username, password = self._resolve_credentials_for_prefix(acct["vault_prefix"])
+        if not (username and password):
+            return
+        try:
+            imap = self._open_imap_client(acct["in_host"], int(acct["in_port"]), acct["in_security"])
+            try:
+                imap.login(username, password)
+                st, _ = imap.select(f'"{folder}"' if " " in folder else folder, readonly=True)
+                if st == "OK":
+                    st_f, f_data = imap.uid(
+                        "FETCH",
+                        str(uid),
+                        "(FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.10000000>)",
+                    )
+                    if st_f == "OK" and f_data:
+                        self._ingest_imap_fetched_item(
+                            account_id=acct_id,
+                            folder_name=folder,
+                            role="inbox",
+                            uid=uid,
+                            fetch_data=f_data,
+                        )
+            finally:
+                try:
+                    imap.logout()
+                except Exception:
+                    pass
+        except Exception as exc:
+            self.runtime.record_error("mail_full_fetch", f"{message_id}: {exc}")
+
     def get_message_detail(self, message_id: str) -> dict[str, Any]:
         """
         Section 4.6 & 4.8: Returns headers, parts, labels, extracts, actions, attachments,
@@ -1988,6 +2090,7 @@ class SatzMailManager:
         self.passwords._check_autolock()
         if not self.passwords.unlocked:
             return {"ok": False, "error": "Profile is locked."}
+        self._ensure_full_imap_message_fetched(message_id)
         with self.db_lock:
             conn = self._ensure_connection()
             msg_row = conn.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
@@ -2125,19 +2228,24 @@ class SatzMailManager:
 
         base_style = (
             "<style>"
-            "html,body{background:#000000;color:#e8e8e8;font-family:'JetBrains Mono',monospace;"
+            "html,body{background:#000000 !important;color:#e8e8e8 !important;font-family:'JetBrains Mono',monospace;"
             "font-size:13px;line-height:1.5;margin:0;padding:14px;}"
-            "a{color:#e8e8e8;text-decoration:underline;}"
-            "pre{white-space:pre-wrap;word-break:break-word;margin:0;font-family:inherit;}"
-            "blockquote{border-left:1px solid #333333;margin:8px 0;padding-left:10px;color:#9a9a9a;}"
+            "body *,font,span,div,p,td,th,li,h1,h2,h3,h4,h5,h6{color:#e8e8e8 !important;-webkit-text-stroke-color:#e8e8e8 !important;background-color:transparent !important;}"
+            "a,a *{color:#ffffff !important;text-decoration:underline !important;}"
+            "pre{white-space:pre-wrap;word-break:break-word;margin:0;font-family:inherit;color:#e8e8e8 !important;}"
+            "blockquote{border-left:1px solid #333333;margin:8px 0;padding-left:10px;color:#9a9a9a !important;}"
             "</style>"
         )
 
         if raw_html:
             clean_body = sanitize_email_html(raw_html, allow_remote_images=allow_remote)
+            visible_check = strip_html_tags(clean_body).replace("\ufffc", "").strip()
+            if len(visible_check) < 8 and body_text.strip():
+                escaped_txt = html_lib.escape(body_text.replace("\ufffc", "").strip())
+                clean_body = f"<pre>{escaped_txt}</pre>\n{clean_body}"
             final_html = f"<!DOCTYPE html><html><head><meta charset=\"utf-8\">{base_style}</head><body>{clean_body}</body></html>"
         else:
-            escaped_txt = html_lib.escape(body_text or "(empty message)")
+            escaped_txt = html_lib.escape((body_text or "").replace("\ufffc", "").strip() or "(empty message)")
             final_html = f"<!DOCTYPE html><html><head><meta charset=\"utf-8\">{base_style}</head><body><pre>{escaped_txt}</pre></body></html>"
 
         return {
@@ -2239,6 +2347,57 @@ class SatzMailManager:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "saved_to": str(dest_path), "filename": fname}
+
+    def get_attachment_data(self, message_id: str, part_id: str) -> dict[str, Any]:
+        """
+        Returns base64 data URL and metadata for inline preview of an email attachment
+        (PDF, image, text) inside the Email tab or inside Chat.
+        """
+        self.passwords._check_autolock()
+        if not self.passwords.unlocked:
+            return {"ok": False, "error": "Profile is locked."}
+        self._ensure_full_imap_message_fetched(message_id)
+        with self.db_lock:
+            conn = self._ensure_connection()
+            row = conn.execute(
+                "SELECT filename, mime, size, part_id, saved_path FROM attachments WHERE message_id = ? AND part_id = ?",
+                (message_id, str(part_id)),
+            ).fetchone()
+            if not row and not part_id:
+                row = conn.execute(
+                    "SELECT filename, mime, size, part_id, saved_path FROM attachments WHERE message_id = ? ORDER BY part_id ASC LIMIT 1",
+                    (message_id,),
+                ).fetchone()
+            if not row:
+                return {"ok": False, "error": "Attachment not found."}
+            src_path = Path(row["saved_path"])
+            fname = str(row["filename"] or f"attachment-{row['part_id']}")
+            mime = str(row["mime"] or "application/octet-stream").lower()
+            size = int(row["size"] or 0)
+
+        if not src_path.exists():
+            return {"ok": False, "error": "Attachment file missing on disk."}
+
+        if mime == "application/octet-stream":
+            if fname.lower().endswith(".pdf"):
+                mime = "application/pdf"
+            elif fname.lower().endswith(".png"):
+                mime = "image/png"
+            elif fname.lower().endswith((".jpg", ".jpeg")):
+                mime = "image/jpeg"
+
+        raw_bytes = src_path.read_bytes()
+        b64 = base64.b64encode(raw_bytes).decode("ascii")
+        return {
+            "ok": True,
+            "message_id": message_id,
+            "part_id": str(row["part_id"]),
+            "filename": fname,
+            "mime": mime,
+            "size": size or len(raw_bytes),
+            "data_url": f"data:{mime};base64,{b64}",
+            "saved_path": str(src_path),
+        }
 
     def search_messages(self, query: str, limit: int = 50) -> dict[str, Any]:
         """

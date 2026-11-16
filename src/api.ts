@@ -7,6 +7,7 @@ import type {
   BrainProposalItem,
   BrainSearchResponse,
   BrowserTab,
+  ChatEmailCard,
   ChatMessage,
   CitationCheckEntry,
   Conversation,
@@ -22,6 +23,7 @@ import type {
   MailLaneResponse,
   MailPreset,
   MailStatusSummary,
+  ModelManagementConfig,
   SidecarHealth,
   SourceItem,
   SourceStatEntry,
@@ -483,6 +485,7 @@ export async function sidecarFetchHealth(): Promise<SidecarHealth> {
       errors: Array.isArray(data.errors) ? data.errors : [],
       mail: data.mail ?? null,
       watch_badges: Array.isArray(data.watch_badges) ? data.watch_badges : [],
+      model_config: data.model_config,
     };
   } catch {
     return {
@@ -1123,6 +1126,7 @@ export async function sidecarStreamChat(
   annotated_text?: string;
   source_stats?: SourceStatEntry[];
   findings?: FindingItem[];
+  email_cards?: ChatEmailCard[];
   error?: string;
   stalled?: boolean;
 }> {
@@ -1155,6 +1159,7 @@ export async function sidecarStreamChat(
   let annotatedText: string | undefined;
   let sourceStats: SourceStatEntry[] | undefined;
   let findings: FindingItem[] | undefined;
+  let emailCards: ChatEmailCard[] | undefined;
   let streamError: string | undefined;
   let stalled = false;
 
@@ -1205,6 +1210,7 @@ export async function sidecarStreamChat(
             annotated_text?: string;
             source_stats?: SourceStatEntry[];
             findings?: FindingItem[];
+            email_cards?: ChatEmailCard[];
           };
           if (payload.phase === "heartbeat") {
             continue;
@@ -1243,6 +1249,9 @@ export async function sidecarStreamChat(
             if (payload.findings && Array.isArray(payload.findings)) {
               findings = payload.findings;
             }
+            if (payload.email_cards && Array.isArray(payload.email_cards)) {
+              emailCards = payload.email_cards;
+            }
           }
         } catch {
           // Ignore malformed SSE line
@@ -1275,6 +1284,7 @@ export async function sidecarStreamChat(
     annotated_text: annotatedText,
     source_stats: sourceStats,
     findings,
+    email_cards: emailCards,
     error: streamError,
     stalled,
   };
@@ -1912,6 +1922,65 @@ export async function sidecarCheckWatches(
     return await res.json();
   } catch {
     return { ok: false };
+  }
+}
+
+export async function sidecarGetMailAttachmentData(
+  messageId: string,
+  partId: string
+): Promise<{
+  ok: boolean;
+  filename?: string;
+  mime?: string;
+  size?: number;
+  data_url?: string;
+  saved_path?: string;
+  error?: string;
+}> {
+  try {
+    const res = await sidecarFetch(
+      `/mail/message/${encodeURIComponent(messageId)}/attachment?part_id=${encodeURIComponent(partId)}`
+    );
+    if (!res.ok) return { ok: false };
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarGetModelConfig(): Promise<ModelManagementConfig | null> {
+  try {
+    const res = await sidecarFetch("/models/config");
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function sidecarUpdateModelConfig(
+  payload: Record<string, unknown>
+): Promise<ModelManagementConfig> {
+  try {
+    const res = await sidecarFetch("/models/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (e) {
+    return {
+      ok: false,
+      roles: {
+        chat: "gemma-4-e4b",
+        web_answer: "planck3 (web)",
+        reader: "hertz (reader)",
+        mail_classifier: "local",
+        brain_encoder: "planck13 (local)",
+      },
+      cloud_providers: [],
+      error: String(e),
+    };
   }
 }
 

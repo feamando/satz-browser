@@ -80,6 +80,28 @@ export interface SidecarErrorEntry {
   message: string;
 }
 
+export interface EmailAttachmentItem {
+  filename: string;
+  mime: string;
+  size: number;
+  part_id: string;
+  saved_path?: string;
+}
+
+export interface ChatEmailCard {
+  message_id: string;
+  source_id: string;
+  subject: string;
+  from_name: string;
+  from_addr: string;
+  date: number;
+  label: string;
+  snippet: string;
+  body_text: string;
+  quoted_text?: string;
+  attachments: EmailAttachmentItem[];
+}
+
 export interface ChatMessage {
   id: string;
   conversation_id: string;
@@ -96,6 +118,7 @@ export interface ChatMessage {
   brain_sources?: BrainCitationItem[];
   proposals?: BrainProposalItem[];
   findings?: FindingItem[];
+  email_cards?: ChatEmailCard[];
 }
 
 export interface BrainProposalItem {
@@ -157,7 +180,9 @@ export type LocalModelId =
   | "gemma-4-e4b"
   | "planck3 (web)"
   | "hertz (reader)"
-  | "planck (reader)";
+  | "planck (reader)"
+  | "gemini-2.5-flash (cloud)"
+  | "gemini-2.5-pro (cloud)";
 
 export type ModelHealthState = "not_loaded" | "loading" | "ready" | "missing";
 
@@ -178,6 +203,31 @@ export interface DoctorRoleEntry {
   fix: string;
 }
 
+export interface CloudProviderInfo {
+  id: string;
+  label: string;
+  configured: boolean;
+  key_source: string;
+  masked_key: string;
+  models: Array<{ id: string; slug: string; label: string }>;
+  privacy_disclosure: string;
+}
+
+export interface ModelManagementConfig {
+  ok: boolean;
+  roles: {
+    chat: string;
+    web_answer: string;
+    reader: string;
+    mail_classifier: string;
+    brain_encoder: string;
+  };
+  cloud_providers: CloudProviderInfo[];
+  test_ok?: boolean;
+  test_message?: string;
+  error?: string;
+}
+
 export interface SidecarHealth {
   online: boolean;
   version?: string;
@@ -187,6 +237,7 @@ export interface SidecarHealth {
   errors?: SidecarErrorEntry[];
   mail?: MailStatusSummary | null;
   watch_badges?: string[];
+  model_config?: ModelManagementConfig;
 }
 
 export interface MailPreset {

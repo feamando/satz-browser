@@ -1308,16 +1308,32 @@ export function renderEmailTabHeaderHtml(
       ${
         attachments.length > 0
           ? `<div class="rail-row">
-              <span class="muted">attachments:</span>
+              <span class="muted">attachments (${attachments.length}):</span>
               <div>
                 ${attachments
-                  .map(
-                    (a) =>
-                      `<button data-email-save-att="${escapeHtml(mid)}" data-part-id="${escapeHtml(String(a.part_id ?? ""))}">[save ${escapeHtml(String(a.filename ?? "file"))}]</button>`
-                  )
+                  .map((a) => {
+                    const partId = String(a.part_id ?? "");
+                    const fname = String(a.filename ?? "file");
+                    const sizeKb = Math.max(1, Math.round(Number(a.size ?? 0) / 1024));
+                    const attKey = `${mid}:${partId}`;
+                    const isPrev = Boolean(state.previewedAttachments[attKey]);
+                    return `<button data-email-preview-att="${escapeHtml(mid)}" data-part-id="${escapeHtml(partId)}">[${isPrev ? "hide" : "preview"} ${escapeHtml(fname)} (${sizeKb} KB)]</button> <button data-email-save-att="${escapeHtml(mid)}" data-part-id="${escapeHtml(partId)}">[save ${escapeHtml(fname)}]</button>`;
+                  })
                   .join(" ")}
               </div>
-            </div>`
+            </div>
+            ${attachments
+              .map((a) => {
+                const partId = String(a.part_id ?? "");
+                const attKey = `${mid}:${partId}`;
+                const prev = state.previewedAttachments[attKey];
+                if (!prev || !prev.data_url) return "";
+                if (prev.mime.startsWith("image/")) {
+                  return `<div class="kb-card"><img class="chat-attachment-img" src="${escapeHtml(prev.data_url)}" alt="${escapeHtml(prev.filename)}" /></div>`;
+                }
+                return `<div class="kb-card"><embed class="chat-attachment-embed" type="${escapeHtml(prev.mime)}" src="${escapeHtml(prev.data_url)}" /></div>`;
+              })
+              .join("")}`
           : ""
       }
     </div>

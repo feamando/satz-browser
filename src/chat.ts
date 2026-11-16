@@ -1,5 +1,6 @@
 import {
   escapeHtml,
+  extractDomain,
   formatPlainErrorMessage,
   getActiveTabSources,
   state,
@@ -8,6 +9,7 @@ import type {
   AgentTaskCard,
   BrainCitationItem,
   BrainProposalItem,
+  ChatEmailCard,
   CitationCheckEntry,
   FindingItem,
   LocalModelId,
@@ -18,6 +20,8 @@ const LOCAL_MODELS: LocalModelId[] = [
   "planck3 (web)",
   "hertz (reader)",
   "planck (reader)",
+  "gemini-2.5-flash (cloud)",
+  "gemini-2.5-pro (cloud)",
 ];
 
 export interface ChatActions {
@@ -41,6 +45,9 @@ export interface ChatActions {
   onStopTask?: (taskId: string, stopToken: string) => void;
   onConfirmTaskStep?: (taskId: string, stepId: string, confirmToken: string) => void;
   onCancelTaskStep?: (taskId: string, stepId: string) => void;
+  onOpenEmailTab?: (messageId: string, subject: string) => void;
+  onPreviewMailAttachment?: (messageId: string, partId: string) => void;
+  onDownloadMailAttachment?: (messageId: string, partId: string) => void;
 }
 
 export function renderChatPanel(
@@ -235,7 +242,8 @@ export function renderChatPanel(
                     m.citations_ok,
                     m.citations_flagged,
                     m.findings ?? state.messageFindings[m.id],
-                    m.brain_sources ?? state.messageBrainSources[m.id]
+                    m.brain_sources ?? state.messageBrainSources[m.id],
+                    m.email_cards ?? state.messageEmailCards[m.id]
                   )
                 )
                 .join("")
@@ -280,7 +288,7 @@ export function renderChatPanel(
         </div>
 
         <div class="composer-meta-row">
-          <span>${state.sidecar.online ? "models [ok]" : "models [offline]"}</span>
+          <span>${state.sidecar.online ? "models [ok]" : "models [offline]"} · ${state.selectedModel.includes("cloud") ? "[cloud · sends context to gemini api]" : "[local only]"}</span>
           <div class="composer-controls">
             <label class="muted">model:</label>
             <select id="chat-model-select">
@@ -396,7 +404,8 @@ function renderMessageBlock(
   citationsOk?: number | null,
   citationsFlagged?: number | null,
   findings?: FindingItem[],
-  brainSources?: BrainCitationItem[]
+  brainSources?: BrainCitationItem[],
+  emailCards?: ChatEmailCard[]
 ): string {
   let sourceIds: string[] = [];
   if (sourceIdsJson) {
@@ -478,19 +487,95 @@ function renderMessageBlock(
     `
       : "";
 
-  const openAsTabButtons =
+  const ytVideos: Array<{ videoId: string; title: string; url: string }> = [];
+  const seenVidIds = new Set<string>();
+  const addYtIfMatch = (rawUrl: string, rawTitle: string) => {
+    const m = rawUrl.match(
+      /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([A-Za-z0-9_-]{11})/
+    );
+    if (m && !seenVidIds.has(m[1])) {
+      seenVidIds.add(m[1]);
+      ytVideos.push({
+        videoId: m[1],
+        title: rawTitle || `YouTube video (${m[1]})`,
+        url: `https://www.youtube.com/watch?v=${m[1]}`,
+      });
+    }
+  };
+  for (const f of findings ?? []) {
+    addYtIfMatch(f.page_url || f.image_url, f.title);
+  }
+  for (const cs of citedSources ?? []) {
+    addYtIfMatch(cs.url, cs.title);
+  }
+  const inlineYtMatches = content.matchAll(
+    /https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_-]{11})/g
+  );
+  for (const m of inlineYtMatches) {
+    addYtIfMatch(m[0], `YouTube video (${m[1]})`);
+  }
+
+  const embeddedVideosHtml =
+    ytVideos.length > 0
+      ? `
+      <div class="msg-findings-section">
+        <div class="muted msg-findings-header">embedded video players (${ytVideos.length}):</div>
+        <div class="chat-video-grid">
+          ${ytVideos
+            .slice(0, 4)
+            .map(
+              (v) => `
+            <div class="kb-card chat-video-card">
+              <iframe
+                class="chat-video-embed"
+                src="https://www.youtube-nocookie.com/embed/${escapeHtml(v.videoId)}"
+                title="${escapeHtml(v.title)}"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                allowfullscreen
+                loading="lazy"
+              ></iframe>
+              <div class="rail-row">
+                <span class="truncate" title="${escapeHtml(v.title)}">${escapeHtml(v.title)}</span>
+                <button class="citation-link" data-open-tab-url="${escapeHtml(v.url)}" data-open-tab-title="${escapeHtml(v.title)}">[open tab]</button>
+              </div>
+            </div>
+          `
+            )
+            .join("")}
+        </div>
+      </div>
+    `
+      : "";
+
+  const nonVideoFindings = (findings ?? []).filter(
+    (f) =>
+      !/(?:youtube\.com\/watch\?v=|youtu\.be\/)/.test(
+        f.page_url || f.image_url || ""
+      )
+  );
+
+  const pagePreviewCardsHtml =
     citedSources && citedSources.length > 0
       ? `
-      <div class="composer-controls">
-        ${citedSources
-          .map(
-            (cs) => `
-          <button class="citation-link" data-open-tab-url="${escapeHtml(cs.url)}" data-open-tab-title="${escapeHtml(cs.title)}">
-            [open as tab: ${escapeHtml(cs.title || cs.url)}]
-          </button>
-        `
-          )
-          .join("")}
+      <div class="msg-findings-section">
+        <div class="muted msg-findings-header">page previews (${citedSources.length}):</div>
+        <div class="chat-preview-cards-grid">
+          ${citedSources
+            .map((cs, idx) => {
+              const dom = extractDomain(cs.url);
+              return `
+              <div class="kb-card chat-page-preview-card" data-open-tab-url="${escapeHtml(cs.url)}" data-open-tab-title="${escapeHtml(cs.title)}">
+                <div class="kb-card-header">
+                  <span><strong>[${idx + 1}] ${escapeHtml(dom)}</strong></span>
+                  <button class="citation-link" data-open-tab-url="${escapeHtml(cs.url)}" data-open-tab-title="${escapeHtml(cs.title)}">[open tab ↗]</button>
+                </div>
+                <div class="truncate" title="${escapeHtml(cs.title || cs.url)}">${escapeHtml(cs.title || cs.url)}</div>
+                <div class="muted truncate">${escapeHtml(cs.url)}</div>
+              </div>
+            `;
+            })
+            .join("")}
+        </div>
       </div>
     `
       : "";
@@ -525,12 +610,12 @@ function renderMessageBlock(
       : "";
 
   const findingsHtml =
-    findings && findings.length > 0
+    nonVideoFindings.length > 0
       ? `
       <div class="msg-findings-section">
-        <div class="muted msg-findings-header">captured visual findings (${findings.length}):</div>
+        <div class="muted msg-findings-header">captured visual findings (${nonVideoFindings.length}):</div>
         <div class="msg-findings-grid">
-          ${findings
+          ${nonVideoFindings
             .map(
               (f) => `
             <div
@@ -557,6 +642,8 @@ function renderMessageBlock(
       </div>
     `
       : "";
+
+  const emailCardsHtml = renderChatEmailCardsHtml(msgId, emailCards, sourceIds);
 
   const citedBrainItems =
     role === "assistant" && !isErrorMsg && brainSources && brainSources.length > 0
@@ -601,10 +688,134 @@ function renderMessageBlock(
       <div class="msg-body">${formattedBody}</div>
       ${readFooterHtml}
       ${brainCitationsListHtml}
+      ${embeddedVideosHtml}
+      ${emailCardsHtml}
       ${findingsHtml}
+      ${pagePreviewCardsHtml}
       ${proposalsHtml}
       ${retryButtonHtml}
-      ${openAsTabButtons}
+    </div>
+  `;
+}
+
+function renderChatEmailCardsHtml(
+  msgId: string,
+  emailCards: ChatEmailCard[] | undefined,
+  sourceIds: string[]
+): string {
+  const cards: ChatEmailCard[] = [...(emailCards ?? [])];
+  const seenIds = new Set(cards.map((c) => c.message_id));
+
+  for (const sid of sourceIds) {
+    if (sid.startsWith("mail:")) {
+      const mid = sid.slice(5).trim();
+      if (mid && !seenIds.has(mid)) {
+        const cached = state.mailMessageDetails[mid];
+        const mObj = (cached?.message ?? cached) as Record<string, unknown> | undefined;
+        if (mObj && mObj.id) {
+          seenIds.add(mid);
+          const parts = (mObj.parts ?? {}) as Record<string, string>;
+          cards.push({
+            message_id: mid,
+            source_id: sid,
+            subject: String(mObj.subject ?? "(no subject)"),
+            from_name: String(mObj.from_name ?? ""),
+            from_addr: String(mObj.from_addr ?? ""),
+            date: Number(mObj.date ?? 0),
+            label: String(mObj.label ?? "email"),
+            snippet: String(mObj.snippet ?? ""),
+            body_text: String(parts.new || mObj.body_text || ""),
+            quoted_text: String(parts.quote || ""),
+            attachments: (mObj.attachments as ChatEmailCard["attachments"]) ?? [],
+          });
+        }
+      }
+    }
+  }
+
+  if (cards.length === 0) return "";
+
+  return `
+    <div class="msg-findings-section">
+      <div class="muted msg-findings-header">referenced emails &amp; attachments (${cards.length}):</div>
+      ${cards
+        .map((ec) => {
+          const expandKey = `${msgId}:${ec.message_id}`;
+          const isExpanded = Boolean(state.expandedChatEmails[expandKey]);
+          const fromDisp = ec.from_name
+            ? `${ec.from_name} <${ec.from_addr}>`
+            : ec.from_addr;
+          const atts = ec.attachments ?? [];
+          const attsHtml =
+            atts.length > 0
+              ? `
+            <div class="composer-controls">
+              <span class="muted">attachments (${atts.length}):</span>
+              ${atts
+                .map((att) => {
+                  const attKey = `${ec.message_id}:${att.part_id}`;
+                  const previewObj = state.previewedAttachments[attKey];
+                  const sizeKb = Math.max(1, Math.round((att.size || 0) / 1024));
+                  return `
+                    <span class="context-pill">
+                      <span>${escapeHtml(att.filename)} (${sizeKb} KB)</span>
+                      <button
+                        class="citation-link"
+                        data-chat-preview-att="${escapeHtml(ec.message_id)}"
+                        data-part-id="${escapeHtml(String(att.part_id))}"
+                      >${previewObj ? "[hide preview]" : "[preview in chat]"}</button>
+                      <button
+                        class="citation-link"
+                        data-chat-download-att="${escapeHtml(ec.message_id)}"
+                        data-part-id="${escapeHtml(String(att.part_id))}"
+                      >[download]</button>
+                    </span>
+                  `;
+                })
+                .join("")}
+            </div>
+            ${atts
+              .map((att) => {
+                const attKey = `${ec.message_id}:${att.part_id}`;
+                const prev = state.previewedAttachments[attKey];
+                if (!prev || !prev.data_url) return "";
+                if (prev.mime.startsWith("image/")) {
+                  return `<div class="kb-card"><img class="chat-attachment-img" src="${escapeHtml(prev.data_url)}" alt="${escapeHtml(prev.filename)}" /></div>`;
+                }
+                return `<div class="kb-card"><embed class="chat-attachment-embed" type="${escapeHtml(prev.mime)}" src="${escapeHtml(prev.data_url)}" /></div>`;
+              })
+              .join("")}
+          `
+              : "";
+
+          return `
+            <div class="kb-card">
+              <div class="kb-card-header">
+                <span><strong>${escapeHtml(ec.subject)}</strong> · <span class="source-cut-badge">${escapeHtml(ec.label)}</span></span>
+                <div>
+                  <button
+                    class="citation-link"
+                    data-chat-toggle-email="${escapeHtml(expandKey)}"
+                    data-email-mid="${escapeHtml(ec.message_id)}"
+                  >${isExpanded ? "[hide email in chat]" : "[open email in chat]"}</button>
+                  <button
+                    class="citation-link"
+                    data-chat-open-email-tab="${escapeHtml(ec.message_id)}"
+                    data-email-subj="${escapeHtml(ec.subject)}"
+                  >[open in tab]</button>
+                </div>
+              </div>
+              <div class="muted">from: ${escapeHtml(fromDisp)}</div>
+              ${
+                isExpanded
+                  ? `<div class="msg-body chat-inline-email-body"><pre>${escapeHtml(ec.body_text || ec.snippet || "(empty body)")}${ec.quoted_text ? `\n\n--- Quoted Thread ---\n${escapeHtml(ec.quoted_text)}` : ""}</pre></div>`
+                  : `<div class="muted truncate">${escapeHtml(ec.snippet || ec.body_text.slice(0, 160))}</div>`
+              }
+              ${attsHtml}
+            </div>
+          `;
+        })
+        .join("")}
     </div>
   `;
 }
@@ -765,7 +976,14 @@ export function formatCitationsInText(
     }
     return `<button class="citation-link" data-brain-cite="${escapeHtml(bKey)}" data-brain-slug="${escapeHtml(slug)}" title="open Brain card: ${escapeHtml(labelName)}">[${escapeHtml(bKey)}]</button>`;
   });
-  return renderMarkdownTablesInHtml(withBrainCites);
+  const withMdLinksAndBold = withBrainCites
+    .replace(
+      /\[([^\][]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      (_m, labelTxt, urlTxt) =>
+        `<button class="citation-link inline-page-link" data-open-tab-url="${urlTxt}" data-open-tab-title="${labelTxt}" title="open ${urlTxt} in tab">${labelTxt} ↗</button>`
+    )
+    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  return renderMarkdownTablesInHtml(withMdLinksAndBold);
 }
 
 function bindChatEvents(container: HTMLElement, actions: ChatActions): void {
@@ -1009,6 +1227,53 @@ function bindChatEvents(container: HTMLElement, actions: ChatActions): void {
       const stepId = el.getAttribute("data-step-id") ?? "";
       if (taskId && actions.onCancelTaskStep) {
         actions.onCancelTaskStep(taskId, stepId);
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-chat-toggle-email]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const key = el.getAttribute("data-chat-toggle-email") ?? "";
+      const mid = el.getAttribute("data-email-mid") ?? "";
+      if (!key) return;
+      state.expandedChatEmails[key] = !state.expandedChatEmails[key];
+      if (state.expandedChatEmails[key] && mid && actions.onPreviewMailAttachment) {
+        // Ensure full message detail is loaded if not cached yet
+      }
+      renderChatPanel(container, actions);
+    });
+  });
+
+  container.querySelectorAll("[data-chat-open-email-tab]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const mid = el.getAttribute("data-chat-open-email-tab") ?? "";
+      const subj = el.getAttribute("data-email-subj") ?? "mail";
+      if (mid && actions.onOpenEmailTab) {
+        actions.onOpenEmailTab(mid, subj);
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-chat-preview-att]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const mid = el.getAttribute("data-chat-preview-att") ?? "";
+      const partId = el.getAttribute("data-part-id") ?? "";
+      if (mid && actions.onPreviewMailAttachment) {
+        actions.onPreviewMailAttachment(mid, partId);
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-chat-download-att]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const mid = el.getAttribute("data-chat-download-att") ?? "";
+      const partId = el.getAttribute("data-part-id") ?? "";
+      if (mid && actions.onDownloadMailAttachment) {
+        actions.onDownloadMailAttachment(mid, partId);
       }
     });
   });
