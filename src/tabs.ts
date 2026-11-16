@@ -211,6 +211,7 @@ export async function syncWebviewsNow(): Promise<void> {
     state.showKnowledgeView ||
     state.showBrainView ||
     state.commandBarOpen ||
+    state.profilePromptOpen ||
     (!state.compareMode &&
       (state.activeTabId === "chat" || state.activeTabId.startsWith("lane:")))
   ) {

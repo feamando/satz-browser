@@ -87,7 +87,11 @@ import {
 } from "./mail";
 import { renderRail } from "./rail";
 import { renderSourcesPanel } from "./sources";
-import { renderCommandBarOverlay, renderStartScreen } from "./start";
+import {
+  renderCommandBarOverlay,
+  renderProfileUnlockOverlay,
+  renderStartScreen,
+} from "./start";
 import {
   classifyStartInput,
   escapeHtml,
@@ -197,6 +201,13 @@ async function initApp(): Promise<void> {
       void handleToggleBrainView();
     },
     onEscape: () => {
+      if (state.profilePromptOpen) {
+        state.profilePromptOpen = false;
+        state.profilePromptDismissed = true;
+        renderProfileUnlockOverlay(getProfilePromptActions());
+        scheduleWebviewLayoutSync();
+        return;
+      }
       if (state.commandBarOpen) {
         state.commandBarOpen = false;
         renderCommandBarOverlay(getStartScreenActions());
@@ -359,11 +370,23 @@ async function pollSidecarState(): Promise<void> {
       if (kb) {
         state.knowledge = kb;
         if (kb.profile?.unlocked) {
+          state.profilePromptOpen = false;
           await refreshMailState();
           await refreshLists();
+        } else if (!state.profilePromptDismissed) {
+          state.profilePromptOpen = true;
+          renderProfileUnlockOverlay(getProfilePromptActions());
+          scheduleWebviewLayoutSync();
         }
         renderRailRegion();
+        if (!state.activeDetail && !state.showKnowledgeView && !state.showBrainView) {
+          renderViewportRegion();
+        }
       }
+    } else if (state.knowledge.profile.unlocked && state.profilePromptOpen) {
+      state.profilePromptOpen = false;
+      renderProfileUnlockOverlay(getProfilePromptActions());
+      scheduleWebviewLayoutSync();
     }
     if (!state.activeDetail && state.digestItems.length === 0) {
       state.digestItems = await sidecarFetchDigest();
@@ -1693,6 +1716,66 @@ function handleToggleCommandBar(): void {
   state.commandBarOpen = !state.commandBarOpen;
   state.commandBarSelectedIdx = 0;
   renderCommandBarOverlay(getStartScreenActions());
+}
+
+function getProfilePromptActions() {
+  return {
+    onUnlockProfile: (profileId: string, pin: string) => {
+      void (async () => {
+        state.revealedPasswords = {};
+        const res = await sidecarUnlockProfile(profileId, pin);
+        if (res.ok) {
+          state.profileStatusMessage = "";
+          state.profilePromptOpen = false;
+          state.profilePromptDismissed = false;
+        } else {
+          state.profileStatusMessage = `error: ${res.error ?? "invalid 6-digit PIN"}`;
+        }
+        const [kb, mCfg] = await Promise.all([
+          sidecarFetchKnowledge(),
+          sidecarGetModelConfig(),
+        ]);
+        if (kb) state.knowledge = kb;
+        if (mCfg) state.modelConfig = mCfg;
+        if (res.ok) {
+          await refreshMailState();
+          await refreshLists();
+        }
+        renderProfileUnlockOverlay(getProfilePromptActions());
+        renderAllRegions();
+      })();
+    },
+    onCreateProfile: (name: string, pin: string) => {
+      void (async () => {
+        const res = await sidecarCreateProfile(name, pin);
+        if (res.ok) {
+          state.profileStatusMessage = "";
+          state.profilePromptOpen = false;
+          state.profilePromptDismissed = false;
+        } else {
+          state.profileStatusMessage = `error: ${res.error ?? "failed to create profile (ensure PIN is 6 digits)"}`;
+        }
+        const [kb, mCfg] = await Promise.all([
+          sidecarFetchKnowledge(),
+          sidecarGetModelConfig(),
+        ]);
+        if (kb) state.knowledge = kb;
+        if (mCfg) state.modelConfig = mCfg;
+        if (res.ok) {
+          await refreshMailState();
+          await refreshLists();
+        }
+        renderProfileUnlockOverlay(getProfilePromptActions());
+        renderAllRegions();
+      })();
+    },
+    onDismissProfilePrompt: () => {
+      state.profilePromptOpen = false;
+      state.profilePromptDismissed = true;
+      renderProfileUnlockOverlay(getProfilePromptActions());
+      scheduleWebviewLayoutSync();
+    },
+  };
 }
 
 function getStartScreenActions() {

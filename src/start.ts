@@ -523,3 +523,166 @@ function bindUnifiedCommandBox(
     }
   });
 }
+
+export function renderProfileUnlockOverlay(actions: {
+  onUnlockProfile?: (profileId: string, pin: string) => void;
+  onCreateProfile?: (name: string, pin: string) => void;
+  onDismissProfilePrompt?: () => void;
+}): void {
+  let overlay = document.getElementById("profile-unlock-overlay");
+  const profileInfo = state.knowledge.profile;
+  const isUnlocked = Boolean(
+    profileInfo?.unlocked && profileInfo?.active_profile
+  );
+
+  if (!state.profilePromptOpen || isUnlocked) {
+    if (overlay) {
+      overlay.remove();
+    }
+    return;
+  }
+
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.id = "profile-unlock-overlay";
+    overlay.style.cssText =
+      "position:fixed; inset:0; background:rgba(0,0,0,0.84); z-index:9500; display:flex; align-items:center; justify-content:center;";
+    document.body.appendChild(overlay);
+  }
+
+  const profilesList = profileInfo?.profiles ?? [];
+
+  overlay.innerHTML = `
+    <div id="profile-unlock-modal" class="start-input-box" style="width:560px; max-width:94vw; background:#000000; border:1px solid #e8e8e8; padding:16px;">
+      <div class="rail-row" style="justify-content:space-between; margin-bottom:10px; border-bottom:1px solid #333333; padding-bottom:6px;">
+        <span><strong>unlock satz profile</strong> <span class="muted">(loads brain, mail &amp; vault)</span></span>
+        <button id="profile-modal-dismiss-btn" type="button">[skip · esc]</button>
+      </div>
+      ${
+        state.profileStatusMessage
+          ? `<div class="profile-status-banner" style="margin-bottom:8px;">${escapeHtml(state.profileStatusMessage)}</div>`
+          : ""
+      }
+      ${
+        profilesList.length > 0
+          ? `
+            <div class="muted" style="margin-bottom:6px;">select your profile and enter its 6-digit PIN:</div>
+            <div class="vault-form-row" style="margin-bottom:12px;">
+              <select id="profile-modal-select" class="vault-input">
+                ${profilesList
+                  .map(
+                    (p) =>
+                      `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)} (${escapeHtml(p.id)})</option>`
+                  )
+                  .join("")}
+              </select>
+              <input
+                id="profile-modal-pin"
+                class="vault-input vault-pin-input"
+                type="password"
+                inputmode="numeric"
+                maxlength="6"
+                spellcheck="false"
+                autocorrect="off"
+                autocapitalize="off"
+                placeholder="6-digit PIN_"
+              />
+              <button id="profile-modal-unlock-btn" type="button">[unlock]</button>
+            </div>
+          `
+          : ""
+      }
+      <div class="muted" style="margin-bottom:6px; border-top:1px solid #222222; padding-top:8px;">
+        ${profilesList.length > 0 ? "or create a new profile:" : "no profile found yet — create a profile with a 6-digit PIN:"}
+      </div>
+      <div class="vault-form-row">
+        <input
+          id="profile-modal-create-name"
+          class="vault-input"
+          type="text"
+          spellcheck="false"
+          autocorrect="off"
+          autocapitalize="off"
+          placeholder="profile name (e.g. Nikita)_"
+        />
+        <input
+          id="profile-modal-create-pin"
+          class="vault-input vault-pin-input"
+          type="password"
+          inputmode="numeric"
+          maxlength="6"
+          spellcheck="false"
+          autocorrect="off"
+          autocapitalize="off"
+          placeholder="6-digit PIN_"
+        />
+        <button id="profile-modal-create-btn" type="button">[+ create &amp; unlock]</button>
+      </div>
+    </div>
+  `;
+
+  const pinEl = overlay.querySelector(
+    "#profile-modal-pin"
+  ) as HTMLInputElement | null;
+  const createNameEl = overlay.querySelector(
+    "#profile-modal-create-name"
+  ) as HTMLInputElement | null;
+  if (pinEl) {
+    pinEl.focus();
+  } else {
+    createNameEl?.focus();
+  }
+
+  overlay
+    .querySelector("#profile-modal-dismiss-btn")
+    ?.addEventListener("click", () => {
+      actions.onDismissProfilePrompt?.();
+    });
+
+  const doUnlock = () => {
+    const sel = overlay?.querySelector(
+      "#profile-modal-select"
+    ) as HTMLSelectElement | null;
+    const pid = sel?.value || profilesList[0]?.id || "";
+    const pin = pinEl?.value.trim() ?? "";
+    if (pid && pin && actions.onUnlockProfile) {
+      actions.onUnlockProfile(pid, pin);
+    }
+  };
+
+  overlay
+    .querySelector("#profile-modal-unlock-btn")
+    ?.addEventListener("click", doUnlock);
+  pinEl?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      doUnlock();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      actions.onDismissProfilePrompt?.();
+    }
+  });
+
+  const doCreate = () => {
+    const cPinEl = overlay?.querySelector(
+      "#profile-modal-create-pin"
+    ) as HTMLInputElement | null;
+    const name = createNameEl?.value.trim() ?? "";
+    const pin = cPinEl?.value.trim() ?? "";
+    if (name && pin && actions.onCreateProfile) {
+      actions.onCreateProfile(name, pin);
+    }
+  };
+
+  overlay
+    .querySelector("#profile-modal-create-btn")
+    ?.addEventListener("click", doCreate);
+  overlay
+    .querySelector("#profile-modal-create-pin")
+    ?.addEventListener("keydown", (e) => {
+      if ((e as KeyboardEvent).key === "Enter") {
+        e.preventDefault();
+        doCreate();
+      }
+    });
+}

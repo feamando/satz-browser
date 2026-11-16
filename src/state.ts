@@ -146,6 +146,8 @@ export interface AppState {
   settingsAccordionOpen: Record<string, boolean>;
   modelConfig: ModelManagementConfig | null;
   modelConfigStatusMsg: string;
+  profilePromptOpen: boolean;
+  profilePromptDismissed: boolean;
 }
 
 export const state: AppState = {
@@ -258,6 +260,8 @@ export const state: AppState = {
   },
   modelConfig: null,
   modelConfigStatusMsg: "",
+  profilePromptOpen: false,
+  profilePromptDismissed: false,
 };
 
 export function escapeHtml(str: string): string {
