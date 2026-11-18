@@ -20,8 +20,6 @@ export interface TopBarActions {
 
 export interface TabStripActions {
   onSelectTab: (tabId: string) => void;
-  onSelectMailAccount?: (accountId: string | null) => void;
-  onAddMailAccount?: () => void;
   onToggleCompareCandidate: (tabId: string) => void;
   onNewTab: () => void;
   onCloseTab: (tabId: string) => void;
@@ -345,51 +343,9 @@ export function renderTabStrip(actions: TabStripActions): void {
 
   const isChatActive = state.activeTabId === "chat" && !state.compareMode;
   const counts = state.mailCounts;
-  const totalUnreadAll =
-    state.mailAccounts.length > 0
-      ? state.mailAccounts.reduce((acc, a) => acc + (a.inbox_unread ?? 0), 0) ||
-        counts.inbox_unread
-      : counts.inbox_unread;
-
-  const mailAccountTabsHtml =
-    isMailConv && state.mailAccounts.length > 0
-      ? `
-        <span class="tabs-sep"></span>
-        <button
-          type="button"
-          class="tab ${state.mailActiveAccountId === null ? "active" : ""}"
-          data-mail-acct-tab="all"
-          title="Common unified view across all configured email accounts"
-        >
-          <span>All mail</span>
-          ${totalUnreadAll > 0 ? `<span class="count">${totalUnreadAll}</span>` : ""}
-        </button>
-        ${state.mailAccounts
-          .map((acct) => {
-            const isAcctSelected = state.mailActiveAccountId === acct.id;
-            const acctName = acct.email || acct.label;
-            const acctUnread = acct.inbox_unread ?? 0;
-            return `
-              <button
-                type="button"
-                class="tab ${isAcctSelected ? "active" : ""}"
-                data-mail-acct-tab="${escapeHtml(acct.id)}"
-                title="Filter mail lanes to ${escapeHtml(acctName)}"
-              >
-                <span class="truncate">${escapeHtml(acctName)}</span>
-                ${acctUnread > 0 ? `<span class="count">${acctUnread}</span>` : ""}
-              </button>
-            `;
-          })
-          .join("")}
-        <button id="tab-strip-add-mail-acct-btn" class="icon-btn" type="button" title="Add email account in Settings">${icon("plus", "ico-sm")}</button>
-        <span class="tabs-sep"></span>
-      `
-      : "";
 
   const mailLaneTabsHtml = isMailConv
     ? `
-      ${mailAccountTabsHtml}
       <button type="button" class="tab ${!state.compareMode && state.activeTabId === "lane:inbox" ? "active" : ""}" data-lane-tab="inbox">
         <span>Inbox</span>
         ${counts.inbox_unread > 0 ? `<span class="count">${counts.inbox_unread}</span>` : ""}
@@ -494,21 +450,6 @@ export function renderTabStrip(actions: TabStripActions): void {
       }
     });
   });
-
-  container.querySelectorAll("[data-mail-acct-tab]").forEach((el) => {
-    el.addEventListener("click", () => {
-      const acctVal = (el as HTMLElement).getAttribute("data-mail-acct-tab") ?? "all";
-      if (actions.onSelectMailAccount) {
-        actions.onSelectMailAccount(acctVal === "all" ? null : acctVal);
-      }
-    });
-  });
-
-  container
-    .querySelector("#tab-strip-add-mail-acct-btn")
-    ?.addEventListener("click", () => {
-      actions.onAddMailAccount?.();
-    });
 
   container.querySelectorAll("[data-site-tab-id]").forEach((el) => {
     el.addEventListener("click", (e) => {

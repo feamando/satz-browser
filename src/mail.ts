@@ -27,9 +27,11 @@ import {
   sidecarUnlockProfileKeychain,
   sidecarUpdateMailSettings,
 } from "./api";
+import { icon } from "./design-system/icons";
 import {
   escapeHtml,
   formatRelativeTime,
+  getResolvedTheme,
   IS_MAC,
   MOD_LABEL,
   state,
@@ -128,7 +130,65 @@ export interface MailViewActions {
     reply_to_message_id?: string;
   }) => void;
   onOpenSiteUrl: (url: string, title: string) => void;
+  onSelectMailAccount?: (accountId: string | null) => void;
+  onAddMailAccount?: () => void;
+  onBindEmailReader?: (
+    messageId: string,
+    detailObj: Record<string, unknown> | undefined
+  ) => void;
   onRefreshState: () => Promise<void>;
+}
+
+const pendingPreviewIds = new Set<string>();
+
+/** Build sandboxed HTML srcdoc synced with the resolved UI theme without inline hex tokens. */
+export function buildMailIframeSrcdoc(
+  rawHtml: string | undefined,
+  plainFallback: string,
+  csp: string
+): string {
+  const resolvedTheme = getResolvedTheme();
+  const cs = getComputedStyle(document.documentElement);
+  const panelBg = cs.getPropertyValue("--panel").trim();
+  const inkColor = cs.getPropertyValue("--ink").trim();
+  const mutedColor = cs.getPropertyValue("--muted").trim();
+  const accentColor = cs.getPropertyValue("--accent").trim();
+  const lineColor = cs.getPropertyValue("--line").trim();
+  const themeMeta = `<meta name="color-scheme" content="${resolvedTheme}">`;
+  const themeOverrideCss = `<style>
+    html, body { background: ${panelBg} !important; color: ${inkColor} !important; font-family: 'Inter', system-ui, sans-serif !important; font-size: 14px; line-height: 1.55; margin: 0; padding: 16px; }
+    body *, font, span, div, p, td, th, li, h1, h2, h3, h4, h5, h6, pre { color: ${inkColor} !important; -webkit-text-stroke-color: ${inkColor} !important; background-color: transparent !important; }
+    a, a * { color: ${accentColor} !important; text-decoration: underline !important; }
+    pre { white-space: pre-wrap; word-break: break-word; font-family: inherit !important; margin: 0; }
+    code, kbd { font-family: 'JetBrains Mono', monospace; }
+    blockquote { border-left: 2px solid ${lineColor} !important; margin: 8px 0; padding-left: 12px; color: ${mutedColor} !important; }
+  </style>`;
+
+  if (rawHtml) {
+    return `<meta http-equiv="Content-Security-Policy" content="${escapeHtml(csp)}">${themeMeta}${rawHtml}${themeOverrideCss}`;
+  }
+  if (!plainFallback) return "";
+  const fallbackDoc = `<!DOCTYPE html><html><head><meta charset="utf-8">${themeMeta}${themeOverrideCss}</head><body><pre>${escapeHtml(plainFallback)}</pre></body></html>`;
+  return `<meta http-equiv="Content-Security-Policy" content="${escapeHtml(csp)}">${fallbackDoc}`;
+}
+
+function getInitials(nameOrEmail: string): string {
+  const cleaned = nameOrEmail.trim();
+  if (!cleaned) return "M";
+  const parts = cleaned.split(/[\s.@_-]+/).filter(Boolean);
+  if (parts.length >= 2) {
+    return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+  }
+  return cleaned.slice(0, 2).toUpperCase();
+}
+
+function renderStatusBannerHtml(msg: string): string {
+  const low = msg.toLowerCase();
+  const variant =
+    low.includes("error") || low.includes("failed") || low.includes("rejected")
+      ? "banner danger"
+      : "banner";
+  return `<div class="${variant}">${escapeHtml(msg)}</div>`;
 }
 
 export async function refreshMailState(): Promise<void> {
@@ -192,81 +252,95 @@ export function renderMailAccountsSectionHtml(): string {
 
   if (!unlocked) {
     return `
-      <div class="kb-section">
-        <div class="kb-section-title">mail accounts (vault locked)</div>
-        <div class="muted">unlock your profile with its 6-digit PIN above to view, add, or sync mail accounts.</div>
+      <div class="section">
+        <div class="label"><span>Mail accounts</span><span class="end">Vault locked</span></div>
+        <div class="muted">Unlock your profile with its 6-digit PIN above to view, add, or sync mail accounts.</div>
       </div>
     `;
   }
 
   return `
-    <div class="kb-section" id="mail-accounts-panel">
-      <div class="kb-section-title">
-        <span>mail accounts (${accounts.length})</span>
-        <div>
-          <button id="mail-toggle-eval-btn" class="${state.mailEvalOpen ? "active" : ""}">[eval mode (200 emails)]</button>
-          <button id="mail-sync-all-btn">[sync now]</button>
-        </div>
+    <div class="section" id="mail-accounts-panel">
+      <div class="label">
+        <span>Mail accounts</span>
+        <span class="ct">${accounts.length}</span>
+        <span class="end">
+          <button
+            id="mail-toggle-eval-btn"
+            type="button"
+            class="btn-text ${state.mailEvalOpen ? "pri" : ""}"
+          >Eval mode (200 emails)</button>
+          <button id="mail-sync-all-btn" type="button" class="btn-text">Sync now</button>
+        </span>
       </div>
       ${state.mailEvalOpen ? renderMailEvalPanelHtml() : ""}
       ${
         state.mailStatusMessage
-          ? `<div class="kb-status-banner">${escapeHtml(state.mailStatusMessage)}</div>`
+          ? renderStatusBannerHtml(state.mailStatusMessage)
           : ""
       }
       ${
         accounts.length === 0
-          ? `<div class="muted">no mail accounts configured yet. add an account below (Gmail/Outlook require an app password).</div>`
+          ? `<div class="muted">No mail accounts configured yet. Add an account below (Gmail/Outlook require an app password).</div>`
           : `
-          <table class="kb-table">
-            <thead>
-              <tr>
-                <th>label / email</th>
-                <th>incoming</th>
-                <th>outgoing</th>
-                <th>vault prefix</th>
-                <th>messages</th>
-                <th>status</th>
-                <th>actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${accounts
-                .map(
-                  (a) => `
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
                 <tr>
-                  <td>${escapeHtml(a.label)} · ${escapeHtml(a.email)}</td>
-                  <td>${escapeHtml(a.protocol.toUpperCase())} ${escapeHtml(a.in_host)}:${a.in_port} (${escapeHtml(a.in_security)})</td>
-                  <td>SMTP ${escapeHtml(a.smtp_host)}:${a.smtp_port} (${escapeHtml(a.smtp_security)})</td>
-                  <td class="muted">${escapeHtml(a.vault_prefix)}</td>
-                  <td>${a.message_count ?? 0}</td>
-                  <td>${
-                    a.auth_failed
-                      ? `<span class="citation-flagged">[auth failed]</span>`
-                      : a.last_error
-                        ? `<span class="muted">${escapeHtml(a.last_error.slice(0, 48))}</span>`
-                        : a.last_sync_at > 0
-                          ? `synced ${escapeHtml(formatRelativeTime(String(Math.floor(a.last_sync_at))))}`
-                          : "ready"
-                  }</td>
-                  <td>
-                    <button data-mail-test-acct="${escapeHtml(a.id)}">[test]</button>
-                    <button data-mail-sync-acct="${escapeHtml(a.id)}">[sync]</button>
-                    <button data-mail-remove-acct="${escapeHtml(a.id)}">[remove]</button>
-                  </td>
+                  <th>Account</th>
+                  <th>Incoming</th>
+                  <th>Outgoing</th>
+                  <th>Vault</th>
+                  <th class="num">Messages</th>
+                  <th>Status</th>
+                  <th>Actions</th>
                 </tr>
-              `
-                )
-                .join("")}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                ${accounts
+                  .map((a) => {
+                    const statusDot = a.auth_failed
+                      ? `<span class="dot danger"></span>`
+                      : a.last_error
+                        ? `<span class="dot warn"></span>`
+                        : `<span class="dot"></span>`;
+                    const statusText = a.auth_failed
+                      ? "Auth failed"
+                      : a.last_error
+                        ? escapeHtml(a.last_error.slice(0, 48))
+                        : a.last_sync_at > 0
+                          ? `Synced ${escapeHtml(formatRelativeTime(String(Math.floor(a.last_sync_at))))}`
+                          : "Ready";
+                    return `
+                  <tr>
+                    <td><b>${escapeHtml(a.label)}</b> · ${escapeHtml(a.email)}</td>
+                    <td>${escapeHtml(a.protocol.toUpperCase())} ${escapeHtml(a.in_host)}:${a.in_port} (${escapeHtml(a.in_security)})</td>
+                    <td>SMTP ${escapeHtml(a.smtp_host)}:${a.smtp_port} (${escapeHtml(a.smtp_security)})</td>
+                    <td class="muted">${escapeHtml(a.vault_prefix)}</td>
+                    <td class="num">${a.message_count ?? 0}</td>
+                    <td><span class="status">${statusDot}<span>${statusText}</span></span></td>
+                    <td>
+                      <button type="button" class="btn-text" data-mail-test-acct="${escapeHtml(a.id)}">Test</button>
+                      <button type="button" class="btn-text" data-mail-sync-acct="${escapeHtml(a.id)}">Sync</button>
+                      <button type="button" class="btn-text" data-mail-remove-acct="${escapeHtml(a.id)}">Remove</button>
+                    </td>
+                  </tr>
+                `;
+                  })
+                  .join("")}
+              </tbody>
+            </table>
+          </div>
         `
       }
 
-      <div class="kb-card">
-        <div class="kb-card-header">add mail account (credentials stored in encrypted vault.enc)</div>
-        <div class="kb-form-row">
-          <select id="mail-preset-select" class="kb-input">
+      <div class="card">
+        <div class="card-h">
+          <b>Add mail account</b>
+          <span class="end muted">Credentials are stored in your encrypted vault</span>
+        </div>
+        <div class="form-row">
+          <select id="mail-preset-select" class="select">
             ${presets
               .map(
                 (p) =>
@@ -274,31 +348,31 @@ export function renderMailAccountsSectionHtml(): string {
               )
               .join("")}
           </select>
-          <input id="mail-acct-email" class="kb-input" type="text" placeholder="email (you@gmail.com)_" />
-          <input id="mail-acct-label" class="kb-input" type="text" placeholder="account name (defaults to email address)_" value="" />
-          <input id="mail-acct-password" class="kb-input" type="password" placeholder="app password_" />
+          <input id="mail-acct-email" class="input" type="text" placeholder="Email (you@gmail.com)" />
+          <input id="mail-acct-label" class="input" type="text" placeholder="Account name (optional)" value="" />
+          <input id="mail-acct-password" class="input" type="password" placeholder="App password" />
         </div>
-        <div class="kb-form-row">
-          <select id="mail-acct-protocol" class="kb-input">
+        <div class="form-row">
+          <select id="mail-acct-protocol" class="select">
             <option value="imap">IMAP</option>
             <option value="pop3">POP3 (leave on server)</option>
           </select>
-          <input id="mail-acct-in-host" class="kb-input" type="text" placeholder="incoming host" value="imap.gmail.com" />
-          <input id="mail-acct-in-port" class="kb-input" type="number" placeholder="993" value="993" />
-          <select id="mail-acct-in-sec" class="kb-input">
+          <input id="mail-acct-in-host" class="input" type="text" placeholder="Incoming host" value="imap.gmail.com" />
+          <input id="mail-acct-in-port" class="input" type="number" placeholder="993" value="993" />
+          <select id="mail-acct-in-sec" class="select">
             <option value="ssl">SSL</option>
             <option value="starttls">STARTTLS</option>
           </select>
         </div>
-        <div class="kb-form-row">
-          <input id="mail-acct-smtp-host" class="kb-input" type="text" placeholder="smtp host" value="smtp.gmail.com" />
-          <input id="mail-acct-smtp-port" class="kb-input" type="number" placeholder="587" value="587" />
-          <select id="mail-acct-smtp-sec" class="kb-input">
+        <div class="form-row">
+          <input id="mail-acct-smtp-host" class="input" type="text" placeholder="SMTP host" value="smtp.gmail.com" />
+          <input id="mail-acct-smtp-port" class="input" type="number" placeholder="587" value="587" />
+          <select id="mail-acct-smtp-sec" class="select">
             <option value="starttls">STARTTLS</option>
             <option value="ssl">SSL</option>
           </select>
-          <button id="mail-form-test-btn">[test]</button>
-          <button id="mail-form-add-btn">[+ add account]</button>
+          <button id="mail-form-test-btn" type="button" class="btn">Test</button>
+          <button id="mail-form-add-btn" type="button" class="btn primary">Add account</button>
         </div>
       </div>
     </div>
@@ -379,13 +453,15 @@ export function bindMailAccountsEvents(
   container
     .querySelector("#mail-form-test-btn")
     ?.addEventListener("click", async () => {
-      state.mailStatusMessage = "testing incoming & outgoing (SMTP EHLO + AUTH)...";
+      state.mailStatusMessage =
+        "Testing incoming and outgoing login (SMTP EHLO + AUTH)...";
       await onChanged();
       const res = await sidecarTestMailAccount(collectFormPayload());
       if (res.ok) {
-        state.mailStatusMessage = "test passed: incoming & outgoing login ok.";
+        state.mailStatusMessage =
+          "Test passed: incoming and outgoing login verified.";
       } else {
-        state.mailStatusMessage = `test failed: ${res.error ?? "unknown error"}`;
+        state.mailStatusMessage = `Test failed: ${res.error ?? "unknown error"}`;
       }
       await onChanged();
     });
@@ -394,15 +470,15 @@ export function bindMailAccountsEvents(
     .querySelector("#mail-form-add-btn")
     ?.addEventListener("click", async () => {
       const payload = collectFormPayload();
-      state.mailStatusMessage = "adding account & starting background sync...";
+      state.mailStatusMessage = "Adding account and starting background sync...";
       await onChanged();
       const res = await sidecarAddMailAccount(payload);
       if (res.ok) {
         await apiEnsureMailConversation();
-        state.mailStatusMessage = `added account (${res.vault_prefix ?? "vault"}). syncing last 30 days...`;
+        state.mailStatusMessage = `Added account (${res.vault_prefix ?? "vault"}). Syncing last 30 days...`;
         await refreshMailState();
       } else {
-        state.mailStatusMessage = `error adding account: ${res.error ?? "failed"}`;
+        state.mailStatusMessage = `Error adding account: ${res.error ?? "failed"}`;
       }
       await onChanged();
     });
@@ -410,13 +486,13 @@ export function bindMailAccountsEvents(
   container
     .querySelector("#mail-sync-all-btn")
     ?.addEventListener("click", async () => {
-      state.mailStatusMessage = "syncing all mail accounts...";
+      state.mailStatusMessage = "Syncing all mail accounts...";
       await onChanged();
       const res = await sidecarSyncMail();
       await refreshMailState();
       state.mailStatusMessage = res.ok
-        ? "sync complete."
-        : `sync error: ${res.error ?? "failed"}`;
+        ? "Sync complete."
+        : `Sync error: ${res.error ?? "failed"}`;
       await onChanged();
     });
 
@@ -424,12 +500,12 @@ export function bindMailAccountsEvents(
     btn.addEventListener("click", async () => {
       const id = (btn as HTMLElement).getAttribute("data-mail-test-acct");
       if (!id) return;
-      state.mailStatusMessage = `testing account ${id}...`;
+      state.mailStatusMessage = `Testing account ${id}...`;
       await onChanged();
       const res = await sidecarTestMailAccount({ account_id: id });
       state.mailStatusMessage = res.ok
-        ? `account ${id}: incoming & SMTP test ok.`
-        : `account ${id} test failed: ${res.error ?? "error"}`;
+        ? `Account ${id}: incoming & SMTP test verified.`
+        : `Account ${id} test failed: ${res.error ?? "error"}`;
       await onChanged();
     });
   });
@@ -438,13 +514,13 @@ export function bindMailAccountsEvents(
     btn.addEventListener("click", async () => {
       const id = (btn as HTMLElement).getAttribute("data-mail-sync-acct");
       if (!id) return;
-      state.mailStatusMessage = `syncing account ${id}...`;
+      state.mailStatusMessage = `Syncing account ${id}...`;
       await onChanged();
       const res = await sidecarSyncMail(id);
       await refreshMailState();
       state.mailStatusMessage = res.ok
-        ? `synced ${res.synced_count ?? 0} new messages.`
-        : `sync failed: ${res.error ?? "error"}`;
+        ? `Synced ${res.synced_count ?? 0} new messages.`
+        : `Sync failed: ${res.error ?? "error"}`;
       await onChanged();
     });
   });
@@ -456,8 +532,8 @@ export function bindMailAccountsEvents(
       const res = await sidecarRemoveMailAccount(id);
       await refreshMailState();
       state.mailStatusMessage = res.ok
-        ? `removed account ${id}.`
-        : `remove failed: ${res.error ?? "error"}`;
+        ? `Removed account ${id}.`
+        : `Remove failed: ${res.error ?? "error"}`;
       await onChanged();
     });
   });
@@ -557,9 +633,12 @@ function renderMailEvalPanelHtml(): string {
 
   if (!item) {
     return `
-      <div class="kb-card">
-        <div class="kb-card-header">eval mode (200 stratified emails · excluded from training)</div>
-        <div class="muted">no messages sampled yet. sync a mail account first.</div>
+      <div class="card">
+        <div class="card-h">
+          <b>Eval mode</b>
+          <span class="end muted">200 stratified emails · excluded from training</span>
+        </div>
+        <div class="muted">No messages sampled yet. Sync a mail account first.</div>
       </div>
     `;
   }
@@ -575,79 +654,280 @@ function renderMailEvalPanelHtml(): string {
     predLabel === "promotion";
 
   return `
-    <div class="kb-card" id="mail-eval-card">
-      <div class="kb-card-header">
-        <span>eval mode · message ${idx + 1} / ${items.length} (labelled: ${Number(rep.total_evaluated ?? 0)})</span>
-        <div>
-          <button data-eval-nav="prev">[&lt; prev]</button>
-          <button data-eval-nav="next">[next &gt;]</button>
-        </div>
+    <div class="card" id="mail-eval-card">
+      <div class="card-h">
+        <b>Eval mode</b>
+        <span class="badge soft">${idx + 1} / ${items.length}</span>
+        <span class="muted">Labelled: ${Number(rep.total_evaluated ?? 0)}</span>
+        <span class="end">
+          <button type="button" class="btn" data-eval-nav="prev">Prev</button>
+          <button type="button" class="btn" data-eval-nav="next">Next</button>
+        </span>
       </div>
-      <div class="rail-row">
-        <span><strong>${escapeHtml(String(item.from_name || item.from_addr || ""))}</strong> · ${escapeHtml(String(item.subject || ""))}</span>
-        <span class="muted">pred: ${escapeHtml(predLabel)} (${Number(item.pred_confidence ?? 0).toFixed(2)}) ${humanLabel ? `· human: [${escapeHtml(humanLabel)}]` : ""}</span>
+      <div class="mail-read-actions">
+        <span><b>${escapeHtml(String(item.from_name || item.from_addr || ""))}</b> · ${escapeHtml(String(item.subject || ""))}</span>
+        <span class="end muted">Pred: ${escapeHtml(predLabel)} (${Number(item.pred_confidence ?? 0).toFixed(2)})${humanLabel ? ` · Label: ${escapeHtml(humanLabel)}` : ""}</span>
       </div>
-      <div class="muted">${escapeHtml(String(item.new_text || item.snippet || "").slice(0, 360))}</div>
-      <div class="rail-row">
-        <span class="muted">set human label (1-4):</span>
-        <div>
-          <button data-eval-label="email" class="${humanLabel === "email" ? "active" : ""}">[1 email]</button>
-          <button data-eval-label="ping" class="${humanLabel === "ping" ? "active" : ""}">[2 ping]</button>
-          <button data-eval-label="information" class="${humanLabel === "information" ? "active" : ""}">[3 information]</button>
-          <button data-eval-label="promotion" class="${humanLabel === "promotion" ? "active" : ""}">[4 promotion]</button>
+      <div class="eval-excerpt">${escapeHtml(String(item.new_text || item.snippet || "").slice(0, 360))}</div>
+      <div class="mail-read-actions">
+        <span class="muted">Label (keys 1-4):</span>
+        <div class="seg" role="group" aria-label="Message label">
+          <button type="button" data-eval-label="email" aria-pressed="${humanLabel === "email" ? "true" : "false"}">1 Email</button>
+          <button type="button" data-eval-label="ping" aria-pressed="${humanLabel === "ping" ? "true" : "false"}">2 Ping</button>
+          <button type="button" data-eval-label="information" aria-pressed="${humanLabel === "information" ? "true" : "false"}">3 Information</button>
+          <button type="button" data-eval-label="promotion" aria-pressed="${humanLabel === "promotion" ? "true" : "false"}">4 Promotion</button>
         </div>
       </div>
       ${
         showExtractCheck
-          ? `<div class="rail-row">
-              <span class="muted">extracts: ${
+          ? `<div class="mail-read-actions">
+              <span class="muted">Extracts: ${
                 extEntries.length > 0
                   ? extEntries
                       .map(([k, v]) => `${escapeHtml(k)}=${escapeHtml(v)}`)
                       .join(" · ")
                   : "(none)"
               }</span>
-              <div>
-                <span class="muted">correct?</span>
-                <button data-eval-extract="y" class="${item.human_extract_ok === 1 ? "active" : ""}">[y]</button>
-                <button data-eval-extract="n" class="${item.human_extract_ok === 0 ? "active" : ""}">[n]</button>
-              </div>
+              <span class="end">
+                <span class="muted">Correct?</span>
+                <div class="seg" role="group" aria-label="Extraction check">
+                  <button type="button" data-eval-extract="y" aria-pressed="${item.human_extract_ok === 1 ? "true" : "false"}">Yes (y)</button>
+                  <button type="button" data-eval-extract="n" aria-pressed="${item.human_extract_ok === 0 ? "true" : "false"}">No (n)</button>
+                </div>
+              </span>
             </div>`
           : ""
       }
-      <div class="rail-row">
+      <div class="mail-read-actions">
         <span class="muted">
-          gates: email-&gt;promo ${Number(rep.real_email_misfiled_as_promotion_pct ?? 0).toFixed(2)}% (target &lt;=1%) ·
+          Gates: email to promo ${Number(rep.real_email_misfiled_as_promotion_pct ?? 0).toFixed(2)}% (target &lt;=1%) ·
           promo recall ${Number(rep.promotion_recall_pct ?? 100).toFixed(2)}% (target &gt;=90%) ·
           extract acc ${Number(rep.extraction_accuracy_pct ?? 100).toFixed(2)}% (target &gt;=90%)
         </span>
-        <span>${rep.gates_passed ? "[gates: PASS]" : "[gates: pending]"}</span>
+        <span class="badge ${rep.gates_passed ? "" : "soft"}">${rep.gates_passed ? "Gates pass" : "Pending"}</span>
       </div>
-      <table class="kb-table">
-        <thead>
-          <tr>
-            <th>true \\ pred</th>
-            <th>email</th>
-            <th>ping</th>
-            <th>information</th>
-            <th>promotion</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${labels
-            .map(
-              (t) => `
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
             <tr>
-              <td>${escapeHtml(t)}</td>
-              ${labels
-                .map((p) => `<td>${Number(matrix[t]?.[p] ?? 0)}</td>`)
-                .join("")}
+              <th>True \\ Pred</th>
+              <th class="num">Email</th>
+              <th class="num">Ping</th>
+              <th class="num">Information</th>
+              <th class="num">Promotion</th>
             </tr>
-          `
-            )
-            .join("")}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            ${labels
+              .map(
+                (t) => `
+              <tr>
+                <td>${escapeHtml(t)}</td>
+                ${labels
+                  .map((p) => `<td class="num">${Number(matrix[t]?.[p] ?? 0)}</td>`)
+                  .join("")}
+              </tr>
+            `
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function renderAcctBarHtml(
+  showOnboardingBtn: boolean
+): string {
+  const accounts = state.mailAccounts ?? [];
+  const totalUnreadAll =
+    accounts.length > 0
+      ? accounts.reduce((acc, a) => acc + (a.inbox_unread ?? 0), 0) ||
+        state.mailCounts.inbox_unread
+      : state.mailCounts.inbox_unread;
+
+  const latestSync = accounts.reduce(
+    (maxTs, a) => Math.max(maxTs, Number(a.last_sync_at || 0)),
+    0
+  );
+  const syncLabel =
+    latestSync > 0
+      ? `synced ${formatRelativeTime(String(Math.floor(latestSync)))}`
+      : "ready";
+
+  return `
+    <div class="acct-bar">
+      <button
+        type="button"
+        class="pill round ${state.mailActiveAccountId === null ? "on" : ""}"
+        data-mail-acct-tab="all"
+        aria-pressed="${state.mailActiveAccountId === null ? "true" : "false"}"
+        title="Unified view across all configured email accounts"
+      >
+        <span>All mail</span>
+        ${totalUnreadAll > 0 ? `<span class="count">${totalUnreadAll}</span>` : ""}
+      </button>
+      ${accounts
+        .map((acct) => {
+          const isAcctSelected = state.mailActiveAccountId === acct.id;
+          const acctName = acct.label || acct.email;
+          const acctUnread = acct.inbox_unread ?? 0;
+          return `
+            <button
+              type="button"
+              class="pill round ${isAcctSelected ? "on" : ""}"
+              data-mail-acct-tab="${escapeHtml(acct.id)}"
+              aria-pressed="${isAcctSelected ? "true" : "false"}"
+              title="Filter mail lanes to ${escapeHtml(acct.email || acctName)}"
+            >
+              <span>${escapeHtml(acctName)}</span>
+              ${acctUnread > 0 ? `<span class="count">${acctUnread}</span>` : ""}
+            </button>
+          `;
+        })
+        .join("")}
+      <button
+        id="mail-add-account-btn"
+        class="pill round"
+        type="button"
+        title="Add email account in Settings"
+      >
+        ${icon("plus", "ico-sm")}
+        <span>Add account</span>
+      </button>
+      <div class="end">
+        <span>${escapeHtml(syncLabel)}</span>
+        ${
+          showOnboardingBtn
+            ? `<button id="mail-onboarding-toggle-btn" type="button" class="btn ${state.mailOnboardingOpen ? "primary" : ""}">Sort 10 emails</button>`
+            : ""
+        }
+        <button id="mail-compose-btn" type="button" class="btn" title="Compose email (c)">
+          ${icon("compose", "ico-sm")}
+          <span>Compose</span>
+        </button>
+        <button id="mail-lane-refresh-btn" type="button" class="btn" title="Sync all accounts">
+          ${icon("reload", "ico-sm")}
+          <span>Sync now</span>
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function renderSplitReadingPaneHtml(
+  selectedRow: Record<string, unknown> | undefined
+): string {
+  if (!selectedRow) {
+    return `
+      <div class="mail-read">
+        <div class="mail-empty">Select a message to read.</div>
+      </div>
+    `;
+  }
+
+  const mid = String(
+    selectedRow.id ?? selectedRow.latest_message_id ?? ""
+  );
+  const detailObj = mid ? state.mailMessageDetails[mid] : undefined;
+  const cachedHtml = mid ? state.mailMessageHtml[mid] : undefined;
+  const msg = (detailObj?.message ?? detailObj ?? selectedRow) as Record<
+    string,
+    unknown
+  >;
+
+  const fromName = String(msg.from_name || selectedRow.from_name || "");
+  const fromAddr = String(msg.from_addr || selectedRow.from_addr || "");
+  const fromPrimary = fromName || fromAddr || "Sender";
+  const subj = String(
+    msg.subject || selectedRow.subject || "(no subject)"
+  );
+  const dueDate = String(
+    msg.due_date || selectedRow.due_date || ""
+  );
+  const extracts = ((msg.extracts ?? {}) as Record<string, unknown>);
+  const trackingNo = String(
+    extracts.tracking_number ?? selectedRow.tracking_number ?? ""
+  );
+  const trackingUrl = String(
+    extracts.tracking_url ?? selectedRow.tracking_url ?? ""
+  );
+
+  const partsObj = ((msg.parts ?? {}) as Record<string, string>);
+  const plainText = String(
+    partsObj.new ||
+      msg.body_text ||
+      selectedRow.snippet ||
+      ""
+  );
+  const defaultCsp =
+    "default-src 'none'; img-src data: cid:; style-src 'unsafe-inline'; font-src data:";
+  const effectiveCsp = cachedHtml?.csp || defaultCsp;
+  const iframeSrcdoc = cachedHtml?.html
+    ? buildMailIframeSrcdoc(cachedHtml.html, plainText, effectiveCsp)
+    : "";
+
+  const fakeTab: BrowserTab = {
+    id: `preview-${mid}`,
+    conversation_id: state.activeDetail?.conversation.id ?? "conv-mail",
+    url: `satzmail://message/${mid}`,
+    title: subj,
+    kind: "mail",
+    position: 0,
+    is_open: true,
+    created_at: "",
+  };
+
+  return `
+    <div class="mail-read">
+      ${renderEmailTabHeaderHtml(fakeTab, detailObj ?? selectedRow, true)}
+      ${
+        dueDate
+          ? `<div class="extract">
+              ${icon("cal", "ico-sm")}
+              <div><b>Action date</b> · ${escapeHtml(dueDate)}</div>
+              <button
+                type="button"
+                class="btn primary"
+                data-email-rail-ask="extract dates and action items from this email: ${escapeHtml(subj)}"
+              >Add to calendar</button>
+            </div>`
+          : ""
+      }
+      ${
+        trackingNo || trackingUrl
+          ? `<div class="extract">
+              ${icon("box", "ico-sm")}
+              <div><b>Tracking</b> · ${escapeHtml(trackingNo || "Shipment link")}</div>
+              ${
+                trackingUrl
+                  ? `<button type="button" class="btn primary" data-open-site-url="${escapeHtml(trackingUrl)}">Track</button>`
+                  : ""
+              }
+            </div>`
+          : ""
+      }
+      ${
+        iframeSrcdoc
+          ? `<iframe
+              class="email-frame"
+              sandbox="allow-popups allow-popups-to-escape-sandbox"
+              referrerpolicy="no-referrer"
+              srcdoc="${escapeHtml(iframeSrcdoc)}"
+            ></iframe>`
+          : `<div class="mail-body">
+              ${
+                plainText
+                  ? plainText
+                      .split(/\n{2,}/)
+                      .filter((p) => p.trim())
+                      .map((p) => `<p>${escapeHtml(p.trim())}</p>`)
+                      .join("")
+                  : `<p class="muted">Loading message from ${escapeHtml(fromPrimary)}...</p>`
+              }
+            </div>`
+      }
     </div>
   `;
 }
@@ -664,48 +944,56 @@ export function renderMailLaneView(
   if (!unlocked) {
     const profilesList = state.knowledge.profile?.profiles ?? [];
     container.innerHTML = `
-      <div class="knowledge-view">
-        <div class="kb-header">
-          <span>mail · locked</span>
+      <div class="mail-view">
+        <div class="view-h">
+          <div>
+            <h1>Mail</h1>
+            <p>Unlock your profile to access Inbox, Pings, Orders, and Promos.</p>
+          </div>
+        </div>
+        <div class="banner warn">
+          ${icon("lock", "ico-sm")}
+          <b>Mail is locked</b>
+          <span>Enter your 6-digit PIN to decrypt mail accounts and messages.</span>
         </div>
         ${
           state.profileStatusMessage
-            ? `<div class="profile-status-banner">${escapeHtml(state.profileStatusMessage)}</div>`
+            ? renderStatusBannerHtml(state.profileStatusMessage)
             : ""
         }
-        <div class="knowledge-section">
+        <div class="card">
           ${
             profilesList.length === 0
               ? `
-            <div class="muted">create a profile with a 6-digit PIN to unlock mail in place:</div>
-            <div class="vault-form-row">
+            <div class="muted">Create a profile with a 6-digit PIN to unlock Mail in place.</div>
+            <div class="form-row">
               <input
                 id="mail-inline-new-profile-name"
-                class="vault-input"
+                class="input"
                 type="text"
                 spellcheck="false"
                 autocorrect="off"
                 autocapitalize="off"
-                placeholder="profile name (e.g. Nikita)_"
+                placeholder="Profile name (e.g. Nikita)"
               />
               <input
                 id="mail-inline-new-profile-pin"
-                class="vault-input vault-pin-input"
+                class="input pin"
                 type="password"
                 inputmode="numeric"
                 maxlength="6"
                 spellcheck="false"
                 autocorrect="off"
                 autocapitalize="off"
-                placeholder="6-digit PIN_"
+                placeholder="6-digit PIN"
               />
-              <button id="mail-inline-create-profile-btn">[+ create &amp; unlock]</button>
+              <button id="mail-inline-create-profile-btn" type="button" class="btn primary">Create &amp; unlock</button>
             </div>
           `
               : `
-            <div class="muted">enter your 6-digit PIN to unlock mail in place:</div>
-            <div class="vault-form-row">
-              <select id="mail-inline-profile-select" class="vault-input">
+            <div class="muted">Select profile and enter your 6-digit PIN:</div>
+            <div class="form-row">
+              <select id="mail-inline-profile-select" class="select">
                 ${profilesList
                   .map(
                     (p) =>
@@ -715,19 +1003,19 @@ export function renderMailLaneView(
               </select>
               <input
                 id="mail-inline-pin-input"
-                class="vault-input vault-pin-input"
+                class="input pin"
                 type="password"
                 inputmode="numeric"
                 maxlength="6"
                 spellcheck="false"
                 autocorrect="off"
                 autocapitalize="off"
-                placeholder="6-digit PIN_"
+                placeholder="PIN"
               />
-              <button id="mail-inline-unlock-btn">[unlock]</button>
+              <button id="mail-inline-unlock-btn" type="button" class="btn primary">Unlock</button>
               ${
                 IS_MAC
-                  ? `<button id="mail-inline-touchid-btn">[unlock with Touch ID]</button>`
+                  ? `<button id="mail-inline-touchid-btn" type="button" class="btn">Unlock with Touch ID</button>`
                   : ""
               }
             </div>
@@ -828,176 +1116,212 @@ export function renderMailLaneView(
     return;
   }
 
-  let bodyHtml = "";
+  const isSplitView = state.mailSearchRows !== null || lane === "inbox";
+  if (rows.length > 0 && state.mailSelectedRowIdx >= rows.length) {
+    state.mailSelectedRowIdx = rows.length - 1;
+  } else if (state.mailSelectedRowIdx < 0) {
+    state.mailSelectedRowIdx = 0;
+  }
 
-  if (state.mailSearchRows !== null) {
-    bodyHtml =
+  let bodyHtml = "";
+  const selectedRow = rows[state.mailSelectedRowIdx] ?? rows[0];
+  const selectedMsgId = selectedRow
+    ? String(selectedRow.id ?? selectedRow.latest_message_id ?? "")
+    : "";
+
+  if (isSplitView) {
+    const listContent =
       rows.length === 0
-        ? `<div class="muted">no messages matched "${escapeHtml(state.mailSearchQuery)}".</div>`
+        ? `<div class="mail-empty">${
+            state.mailSearchRows !== null
+              ? `No messages matched "${escapeHtml(state.mailSearchQuery)}".`
+              : "No messages in Inbox lane yet."
+          }</div>`
         : renderInboxRowsHtml(rows);
-  } else if (lane === "inbox") {
-    bodyHtml =
-      rows.length === 0
-        ? `<div class="muted">no messages in inbox lane yet.</div>`
-        : renderInboxRowsHtml(rows);
+    bodyHtml = `
+      <div class="mail-split">
+        <div class="mail-list">${listContent}</div>
+        ${renderSplitReadingPaneHtml(selectedRow)}
+      </div>
+    `;
   } else if (lane === "pings") {
     bodyHtml =
       groups.length === 0
-        ? `<div class="muted">no platform notifications in pings lane yet.</div>`
-        : groups
-            .map((g) => {
-              const plat = String(g.platform ?? "Other");
-              const cnt = Number(g.count ?? 0);
-              const authorsObj = (g.authors ?? {}) as Record<string, number>;
-              const authorSummary = Object.entries(authorsObj)
-                .slice(0, 4)
-                .map(([a, n]) => `${escapeHtml(a)} (${n})`)
-                .join(", ");
-              const items = (g.items ?? []) as Array<Record<string, unknown>>;
-              return `
-                <div class="kb-card">
-                  <div class="kb-card-header">
-                    <span>${escapeHtml(plat)} · ${cnt} ping${cnt === 1 ? "" : "s"}</span>
-                    <span class="muted">${authorSummary}</span>
+        ? `<div class="mail-empty">No platform notifications in Pings lane yet.</div>`
+        : `<div class="mail-cards-stack">
+            ${groups
+              .map((g) => {
+                const plat = String(g.platform ?? "Other");
+                const cnt = Number(g.count ?? 0);
+                const authorsObj = (g.authors ?? {}) as Record<string, number>;
+                const authorSummary = Object.entries(authorsObj)
+                  .slice(0, 4)
+                  .map(([a, n]) => `${escapeHtml(a)} (${n})`)
+                  .join(", ");
+                const items = (g.items ?? []) as Array<Record<string, unknown>>;
+                return `
+                  <div class="card">
+                    <div class="card-h">
+                      <b>${escapeHtml(plat)}</b>
+                      <span class="badge soft">${cnt} ping${cnt === 1 ? "" : "s"}</span>
+                      <span class="end muted">${authorSummary}</span>
+                    </div>
+                    <div class="mail-card-rows">
+                      ${renderInboxRowsHtml(items)}
+                    </div>
                   </div>
-                  <div class="mail-lane-list">
-                    ${renderInboxRowsHtml(items)}
-                  </div>
-                </div>
-              `;
-            })
-            .join("");
+                `;
+              })
+              .join("")}
+          </div>`;
   } else if (lane === "orders") {
     bodyHtml =
       rows.length === 0
-        ? `<div class="muted">no order or shipping updates in orders lane yet.</div>`
-        : rows
-            .map((card, idx) => {
-              const merchant = String(card.merchant ?? "Merchant");
-              const orderNo = String(card.order_number ?? "");
-              const status = String(card.status ?? "ordered");
-              const trackingNo = String(card.tracking_number ?? "");
-              const trackingUrl = String(card.tracking_url ?? "");
-              const total = String(card.total ?? "");
-              const latestId = String(card.latest_message_id ?? "");
-              const emails = (card.emails ?? []) as Array<Record<string, unknown>>;
-              const isSelected = idx === state.mailSelectedRowIdx;
-              return `
-                <div
-                  class="kb-card ${isSelected ? "selected" : ""}"
-                  data-mail-msg-id="${escapeHtml(latestId)}"
-                  data-mail-msg-subject="${escapeHtml(`${merchant} ${orderNo}`)}"
-                >
-                  <div class="kb-card-header">
-                    <span>${escapeHtml(merchant)}${orderNo ? ` · #${escapeHtml(orderNo)}` : ""}</span>
-                    <span>
-                      <span class="source-cut-badge">${escapeHtml(status)}</span>
-                      ${total ? ` <span class="muted">${escapeHtml(total)}</span>` : ""}
-                    </span>
+        ? `<div class="mail-empty">No order or shipping updates in Orders lane yet.</div>`
+        : `<div class="mail-cards-stack">
+            ${rows
+              .map((card, idx) => {
+                const merchant = String(card.merchant ?? "Merchant");
+                const orderNo = String(card.order_number ?? "");
+                const status = String(card.status ?? "ordered");
+                const trackingNo = String(card.tracking_number ?? "");
+                const trackingUrl = String(card.tracking_url ?? "");
+                const total = String(card.total ?? "");
+                const latestId = String(card.latest_message_id ?? "");
+                const emails = (card.emails ?? []) as Array<
+                  Record<string, unknown>
+                >;
+                const isSelected = idx === state.mailSelectedRowIdx;
+                return `
+                  <div
+                    class="card ${isSelected ? "selected" : ""}"
+                    data-mail-msg-id="${escapeHtml(latestId)}"
+                    data-mail-msg-subject="${escapeHtml(`${merchant} ${orderNo}`)}"
+                  >
+                    <div class="card-h">
+                      <b>${escapeHtml(merchant)}${orderNo ? ` · #${escapeHtml(orderNo)}` : ""}</b>
+                      <span class="status"><span class="dot"></span><span>${escapeHtml(status)}</span></span>
+                      ${total ? `<span class="end">${escapeHtml(total)}</span>` : ""}
+                    </div>
+                    ${
+                      trackingNo || trackingUrl
+                        ? `<div class="extract">
+                            ${icon("box", "ico-sm")}
+                            <div><b>Tracking</b> · ${escapeHtml(trackingNo || "Shipment link")}</div>
+                            ${
+                              trackingUrl
+                                ? `<button type="button" class="btn primary" data-open-site-url="${escapeHtml(trackingUrl)}">Track</button>`
+                                : ""
+                            }
+                          </div>`
+                        : ""
+                    }
+                    <div class="mail-card-rows">
+                      ${emails
+                        .map((em) => {
+                          const eid = String(em.id ?? "");
+                          const esubj = String(em.subject ?? "");
+                          const ets = Number(em.date ?? 0);
+                          return `
+                            <div
+                              class="mail-row"
+                              data-mail-msg-id="${escapeHtml(eid)}"
+                              data-mail-msg-subject="${escapeHtml(esubj)}"
+                            >
+                              <div class="h">
+                                <b>${escapeHtml(String(em.status || status))}</b>
+                                <span class="time">${ets > 0 ? escapeHtml(formatRelativeTime(String(Math.floor(ets)))) : ""}</span>
+                              </div>
+                              <div class="s">${escapeHtml(esubj)}</div>
+                            </div>
+                          `;
+                        })
+                        .join("")}
+                    </div>
                   </div>
-                  ${
-                    trackingNo || trackingUrl
-                      ? `<div class="rail-row">
-                          <span class="muted">tracking: ${escapeHtml(trackingNo || "link")}</span>
-                          ${
-                            trackingUrl
-                              ? `<button data-open-site-url="${escapeHtml(trackingUrl)}">[track]</button>`
-                              : ""
-                          }
-                        </div>`
-                      : ""
-                  }
-                  <div class="mail-lane-list">
-                    ${emails
-                      .map((em) => {
-                        const eid = String(em.id ?? "");
-                        const esubj = String(em.subject ?? "");
-                        const ets = Number(em.date ?? 0);
-                        return `
-                          <div
-                            class="mail-lane-row"
-                            data-mail-msg-id="${escapeHtml(eid)}"
-                            data-mail-msg-subject="${escapeHtml(esubj)}"
-                          >
-                            <span class="mail-col-from muted">${escapeHtml(String(em.status || status))}</span>
-                            <span class="mail-col-subject truncate">${escapeHtml(esubj)}</span>
-                            <span class="mail-col-time muted">${ets > 0 ? escapeHtml(formatRelativeTime(String(Math.floor(ets)))) : ""}</span>
-                          </div>
-                        `;
-                      })
-                      .join("")}
-                  </div>
-                </div>
-              `;
-            })
-            .join("");
+                `;
+              })
+              .join("")}
+          </div>`;
   } else if (lane === "promos") {
     bodyHtml =
       rows.length === 0
-        ? `<div class="muted">no promotions or discount codes in promos lane yet.</div>`
-        : rows
-            .map((comp) => {
-              const company = String(comp.company ?? "Company");
-              const domain = String(comp.domain ?? "");
-              const activeCodes = (comp.active_codes ?? []) as Array<Record<string, unknown>>;
-              const expiredCodes = (comp.expired_codes ?? []) as Array<Record<string, unknown>>;
-              const emails = (comp.emails ?? []) as Array<Record<string, unknown>>;
-              return `
-                <div class="kb-card">
-                  <div class="kb-card-header">
-                    <span>${escapeHtml(company)} <span class="muted">(${escapeHtml(domain)})</span></span>
-                    <span class="muted">${activeCodes.length} active code${activeCodes.length === 1 ? "" : "s"}</span>
+        ? `<div class="mail-empty">No promotions or discount codes in Promos lane yet.</div>`
+        : `<div class="mail-cards-stack">
+            ${rows
+              .map((comp) => {
+                const company = String(comp.company ?? "Company");
+                const domain = String(comp.domain ?? "");
+                const activeCodes = (comp.active_codes ?? []) as Array<
+                  Record<string, unknown>
+                >;
+                const expiredCodes = (comp.expired_codes ?? []) as Array<
+                  Record<string, unknown>
+                >;
+                const emails = (comp.emails ?? []) as Array<
+                  Record<string, unknown>
+                >;
+                return `
+                  <div class="card">
+                    <div class="card-h">
+                      <b>${escapeHtml(company)}</b>
+                      <span class="muted">${escapeHtml(domain)}</span>
+                      <span class="end muted">${activeCodes.length} active code${activeCodes.length === 1 ? "" : "s"}</span>
+                    </div>
+                    ${
+                      activeCodes.length > 0
+                        ? `<div class="mail-chip-row">
+                            ${activeCodes
+                              .map((c) => {
+                                const codeStr = String(c.code ?? "");
+                                const valStr = String(c.discount_value ?? "");
+                                const expStr = String(c.expiry ?? "");
+                                return `
+                                  <button type="button" class="pill" data-copy-promo-code="${escapeHtml(codeStr)}" title="Click to copy code">
+                                    <strong>${escapeHtml(codeStr)}</strong>
+                                    ${valStr ? `<span>${escapeHtml(valStr)}</span>` : ""}
+                                    ${expStr ? `<span class="muted">exp ${escapeHtml(expStr)}</span>` : ""}
+                                  </button>
+                                `;
+                              })
+                              .join("")}
+                          </div>`
+                        : ""
+                    }
+                    ${
+                      expiredCodes.length > 0
+                        ? `<div class="muted">Expired: ${expiredCodes
+                            .map((c) => escapeHtml(String(c.code ?? "")))
+                            .join(", ")}</div>`
+                        : ""
+                    }
+                    <div class="mail-card-rows">
+                      ${emails
+                        .map((em) => {
+                          const eid = String(em.id ?? "");
+                          const esubj = String(em.subject ?? "");
+                          const ets = Number(em.date ?? 0);
+                          return `
+                            <div
+                              class="mail-row"
+                              data-mail-msg-id="${escapeHtml(eid)}"
+                              data-mail-msg-subject="${escapeHtml(esubj)}"
+                            >
+                              <div class="h">
+                                <b>${escapeHtml(company)}</b>
+                                <span class="time">${ets > 0 ? escapeHtml(formatRelativeTime(String(Math.floor(ets)))) : ""}</span>
+                              </div>
+                              <div class="s">${escapeHtml(esubj)}</div>
+                            </div>
+                          `;
+                        })
+                        .join("")}
+                    </div>
                   </div>
-                  ${
-                    activeCodes.length > 0
-                      ? `<div class="kb-form-row">
-                          ${activeCodes
-                            .map((c) => {
-                              const codeStr = String(c.code ?? "");
-                              const valStr = String(c.discount_value ?? "");
-                              const expStr = String(c.expiry ?? "");
-                              return `
-                                <span class="rail-row">
-                                  <span><strong>${escapeHtml(codeStr)}</strong>${valStr ? ` (${escapeHtml(valStr)})` : ""}${expStr ? ` · exp ${escapeHtml(expStr)}` : ""}</span>
-                                  <button data-copy-promo-code="${escapeHtml(codeStr)}">[copy]</button>
-                                </span>
-                              `;
-                            })
-                            .join("")}
-                        </div>`
-                      : ""
-                  }
-                  ${
-                    expiredCodes.length > 0
-                      ? `<div class="muted">expired: ${expiredCodes
-                          .map((c) => escapeHtml(String(c.code ?? "")))
-                          .join(", ")}</div>`
-                      : ""
-                  }
-                  <div class="mail-lane-list">
-                    ${emails
-                      .map((em) => {
-                        const eid = String(em.id ?? "");
-                        const esubj = String(em.subject ?? "");
-                        const ets = Number(em.date ?? 0);
-                        return `
-                          <div
-                            class="mail-lane-row"
-                            data-mail-msg-id="${escapeHtml(eid)}"
-                            data-mail-msg-subject="${escapeHtml(esubj)}"
-                          >
-                            <span class="mail-col-from muted">${escapeHtml(company)}</span>
-                            <span class="mail-col-subject truncate">${escapeHtml(esubj)}</span>
-                            <span class="mail-col-time muted">${ets > 0 ? escapeHtml(formatRelativeTime(String(Math.floor(ets)))) : ""}</span>
-                          </div>
-                        `;
-                      })
-                      .join("")}
-                  </div>
-                </div>
-              `;
-            })
-            .join("");
+                `;
+              })
+              .join("")}
+          </div>`;
   }
 
   const clf = state.mailClassifierInfo;
@@ -1007,36 +1331,38 @@ export function renderMailLaneView(
   const onboardingHtml =
     state.mailOnboardingOpen && onboardingCands.length > 0
       ? `
-      <div class="kb-card" id="mail-onboarding-panel">
-        <div class="kb-card-header">
-          <span>help sort ${onboardingCands.length} email${onboardingCands.length === 1 ? "" : "s"} · ${escapeHtml(clf.status_text)}</span>
-          <button id="mail-onboarding-close-btn">[close]</button>
+      <div class="card" id="mail-onboarding-panel">
+        <div class="card-h">
+          <b>Help sort ${onboardingCands.length} email${onboardingCands.length === 1 ? "" : "s"}</b>
+          <span class="muted">${escapeHtml(clf.status_text)}</span>
+          <span class="end">
+            <button id="mail-onboarding-close-btn" type="button" class="btn-text">Close</button>
+          </span>
         </div>
-        <div class="mail-lane-list">
+        <div class="mail-cards-stack">
           ${onboardingCands
             .map((cand) => {
               const cid = String(cand.id ?? "");
-              const cfrom = String(cand.from_name || cand.from_addr || "unknown");
+              const cfrom = String(cand.from_name || cand.from_addr || "Unknown");
               const csubj = String(cand.subject || "(no subject)");
               const csnip = String(cand.snippet || "").slice(0, 140);
               const cpred = String(cand.pred_label || "email");
-              const yesLabel = cpred === "promotion" ? "promotion" : "promotion";
-              const noLabel = cpred === "promotion" ? "email" : "email";
               return `
-                <div class="kb-card" data-onboarding-card="${escapeHtml(cid)}">
-                  <div class="rail-row">
-                    <span><strong>${escapeHtml(cfrom)}</strong> · ${escapeHtml(csubj)}</span>
-                    <span class="muted">predicted: [${escapeHtml(cpred)}]</span>
+                <div class="card inset" data-onboarding-card="${escapeHtml(cid)}">
+                  <div class="card-h">
+                    <b>${escapeHtml(cfrom)}</b>
+                    <span class="muted truncate">${escapeHtml(csubj)}</span>
+                    <span class="end badge soft">${escapeHtml(cpred)}</span>
                   </div>
                   <div class="muted">${escapeHtml(csnip)}</div>
-                  <div class="rail-row">
-                    <span class="muted">is this a promotion?</span>
-                    <div>
-                      <button data-onboard-msg="${escapeHtml(cid)}" data-onboard-label="${yesLabel}">[y · promos]</button>
-                      <button data-onboard-msg="${escapeHtml(cid)}" data-onboard-label="${noLabel}">[n · inbox]</button>
-                      <button data-onboard-msg="${escapeHtml(cid)}" data-onboard-label="ping">[pings]</button>
-                      <button data-onboard-msg="${escapeHtml(cid)}" data-onboard-label="information">[orders]</button>
-                    </div>
+                  <div class="mail-read-actions">
+                    <span class="muted">Is this a promotion?</span>
+                    <span class="end">
+                      <button type="button" class="btn" data-onboard-msg="${escapeHtml(cid)}" data-onboard-label="promotion">Yes, promo</button>
+                      <button type="button" class="btn" data-onboard-msg="${escapeHtml(cid)}" data-onboard-label="email">No, inbox</button>
+                      <button type="button" class="btn" data-onboard-msg="${escapeHtml(cid)}" data-onboard-label="ping">Ping</button>
+                      <button type="button" class="btn" data-onboard-msg="${escapeHtml(cid)}" data-onboard-label="information">Order</button>
+                    </span>
                   </div>
                 </div>
               `;
@@ -1051,45 +1377,92 @@ export function renderMailLaneView(
     (a) => a.id === state.mailActiveAccountId
   );
   const activeScopeLabel = activeAccountObj
-    ? activeAccountObj.email || activeAccountObj.label
-    : "all accounts (common view)";
+    ? activeAccountObj.label || activeAccountObj.email
+    : "All mail";
 
   container.innerHTML = `
-    <div class="knowledge-view">
-      <div class="kb-header">
-        <span>mail · <strong>${escapeHtml(activeScopeLabel)}</strong> · ${escapeHtml(lane)} (${rows.length}) · ${escapeHtml(clf.status_text)} · keys: j/k move, Enter open, r reply, c compose, e hide, 1-4 move, / search</span>
-        <div>
-          ${
-            showOnboardingBtn
-              ? `<button id="mail-onboarding-toggle-btn" class="${state.mailOnboardingOpen ? "active" : ""}">[help sort 10 emails]</button>`
-              : ""
-          }
+    <div class="mail-view ${isSplitView ? "mail-view-split" : ""}">
+      ${renderAcctBarHtml(showOnboardingBtn)}
+      <div class="mail-toolbar">
+        <div class="input-wrap mail-search-wrap">
+          ${icon("search", "ico-sm")}
           <input
             id="mail-search-input"
-            class="kb-input"
+            class="input"
             type="text"
             spellcheck="false"
             autocorrect="off"
             autocapitalize="off"
-            placeholder="search mail [/]..."
+            placeholder="Search mail (press /)"
             value="${escapeHtml(state.mailSearchQuery)}"
           />
-          ${
-            state.mailSearchRows !== null
-              ? `<button id="mail-search-clear-btn">[clear]</button>`
-              : ""
-          }
-          <button id="mail-compose-btn">[compose (c)]</button>
-          <button id="mail-lane-refresh-btn">[sync &amp; refresh]</button>
         </div>
+        ${
+          state.mailSearchRows !== null
+            ? `<button id="mail-search-clear-btn" type="button" class="btn">Clear</button>`
+            : ""
+        }
+        <span class="mail-toolbar-meta">${escapeHtml(activeScopeLabel)} · ${escapeHtml(lane)} (${rows.length}) · ${escapeHtml(clf.status_text)}</span>
       </div>
       ${onboardingHtml}
-      <div class="mail-lane-list">
-        ${bodyHtml}
-      </div>
+      ${bodyHtml}
       ${state.mailAccounts.length === 0 ? renderMailAccountsSectionHtml() : ""}
     </div>
   `;
+
+  if (
+    isSplitView &&
+    selectedMsgId &&
+    !state.mailMessageDetails[selectedMsgId] &&
+    !pendingPreviewIds.has(selectedMsgId)
+  ) {
+    pendingPreviewIds.add(selectedMsgId);
+    void (async () => {
+      try {
+        const [detailRes, htmlRes] = await Promise.all([
+          sidecarGetMailMessage(selectedMsgId),
+          sidecarGetMailMessageHtml(selectedMsgId),
+        ]);
+        if (detailRes.ok) {
+          state.mailMessageDetails[selectedMsgId] = detailRes;
+        }
+        if (htmlRes.ok && htmlRes.html) {
+          state.mailMessageHtml[selectedMsgId] = {
+            html: htmlRes.html,
+            csp:
+              htmlRes.csp ||
+              "default-src 'none'; img-src data: cid:; style-src 'unsafe-inline'; font-src data:",
+          };
+        }
+      } finally {
+        pendingPreviewIds.delete(selectedMsgId);
+      }
+      if (!container.isConnected || !state.activeTabId.startsWith("lane:")) {
+        return;
+      }
+      const curRows = state.mailSearchRows ?? state.mailLaneRows;
+      const curSelected = curRows[state.mailSelectedRowIdx] ?? curRows[0];
+      const curId = curSelected
+        ? String(curSelected.id ?? curSelected.latest_message_id ?? "")
+        : "";
+      if (curId === selectedMsgId) {
+        renderMailLaneView(container, actions);
+      }
+    })();
+  }
+
+  container.querySelectorAll("[data-mail-acct-tab]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const acctVal = (el as HTMLElement).getAttribute("data-mail-acct-tab") ?? "all";
+      actions.onSelectMailAccount?.(acctVal === "all" ? null : acctVal);
+    });
+  });
+
+  container
+    .querySelector("#mail-add-account-btn")
+    ?.addEventListener("click", () => {
+      actions.onAddMailAccount?.();
+    });
 
   container
     .querySelector("#mail-onboarding-toggle-btn")
@@ -1134,6 +1507,7 @@ export function renderMailLaneView(
     searchDebounceTimer = window.setTimeout(async () => {
       const q = searchInput.value.trim();
       state.mailSearchQuery = q;
+      state.mailSelectedRowIdx = 0;
       if (!q) {
         state.mailSearchRows = null;
       } else {
@@ -1158,6 +1532,7 @@ export function renderMailLaneView(
       }
       const q = searchInput.value.trim();
       state.mailSearchQuery = q;
+      state.mailSelectedRowIdx = 0;
       if (!q) {
         state.mailSearchRows = null;
       } else {
@@ -1180,6 +1555,7 @@ export function renderMailLaneView(
     ?.addEventListener("click", async () => {
       state.mailSearchQuery = "";
       state.mailSearchRows = null;
+      state.mailSelectedRowIdx = 0;
       await actions.onRefreshState();
     });
 
@@ -1197,17 +1573,67 @@ export function renderMailLaneView(
       await actions.onRefreshState();
     });
 
-  container.querySelectorAll("[data-mail-msg-id]").forEach((el) => {
-    el.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const mid = (el as HTMLElement).getAttribute("data-mail-msg-id");
-      const subj =
-        (el as HTMLElement).getAttribute("data-mail-msg-subject") || "mail";
-      if (mid) {
-        actions.onOpenEmailMessage(mid, subj);
-      }
+  if (isSplitView) {
+    container.querySelectorAll(".mail-list [data-mail-msg-id]").forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const idxAttr = (el as HTMLElement).getAttribute("data-mail-row-idx");
+        const nextIdx = idxAttr !== null ? Number(idxAttr) : -1;
+        if (nextIdx >= 0 && nextIdx !== state.mailSelectedRowIdx) {
+          state.mailSelectedRowIdx = nextIdx;
+          renderMailLaneView(container, actions);
+        }
+      });
+      el.addEventListener("dblclick", (e) => {
+        e.stopPropagation();
+        const mid = (el as HTMLElement).getAttribute("data-mail-msg-id");
+        const subj =
+          (el as HTMLElement).getAttribute("data-mail-msg-subject") || "Mail";
+        if (mid) {
+          actions.onOpenEmailMessage(mid, subj);
+        }
+      });
     });
-  });
+
+    container
+      .querySelector(".mail-list .mail-row.on")
+      ?.scrollIntoView({ block: "nearest" });
+
+    container
+      .querySelector("[data-mail-open-tab]")
+      ?.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const mid = (e.currentTarget as HTMLElement).getAttribute(
+          "data-mail-open-tab"
+        );
+        const subj =
+          (e.currentTarget as HTMLElement).getAttribute(
+            "data-mail-open-subject"
+          ) || "Mail";
+        if (mid) {
+          actions.onOpenEmailMessage(mid, subj);
+        }
+      });
+
+    if (selectedMsgId) {
+      actions.onBindEmailReader?.(
+        selectedMsgId,
+        state.mailMessageDetails[selectedMsgId] ?? selectedRow
+      );
+    }
+  } else {
+    container.querySelectorAll("[data-mail-msg-id]").forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const mid = (el as HTMLElement).getAttribute("data-mail-msg-id");
+        const subj =
+          (el as HTMLElement).getAttribute("data-mail-msg-subject") || "Mail";
+        if (mid) {
+          actions.onOpenEmailMessage(mid, subj);
+        }
+      });
+    });
+  }
 
   container.querySelectorAll("[data-open-site-url]").forEach((btn) => {
     btn.addEventListener("click", (e) => {
@@ -1225,7 +1651,7 @@ export function renderMailLaneView(
       const code = (btn as HTMLElement).getAttribute("data-copy-promo-code");
       if (code && navigator.clipboard) {
         void navigator.clipboard.writeText(code);
-        (btn as HTMLElement).textContent = "[copied]";
+        (btn as HTMLElement).innerHTML = "<strong>Copied</strong>";
       }
     });
   });
@@ -1242,7 +1668,7 @@ function renderInboxRowsHtml(rows: Array<Record<string, unknown>>): string {
     .map((r, idx) => {
       const id = String(r.id ?? r.latest_message_id ?? "");
       const fromStr = String(
-        r.from_name || r.from_addr || r.merchant || r.company || "unknown"
+        r.from_name || r.from_addr || r.merchant || r.company || "Unknown"
       );
       const acctEmail = String(r.account_email ?? "");
       const subj = String(
@@ -1259,19 +1685,21 @@ function renderInboxRowsHtml(rows: Array<Record<string, unknown>>): string {
 
       return `
         <div
-          class="mail-lane-row ${unseen ? "mail-unseen" : ""} ${isSelected ? "selected" : ""}"
+          class="mail-row ${unseen ? "unread" : "read"} ${isSelected ? "on selected" : ""}"
           data-mail-msg-id="${escapeHtml(id)}"
+          data-mail-row-idx="${idx}"
           data-mail-msg-subject="${escapeHtml(subj)}"
         >
-          <span class="mail-col-from truncate">${unseen ? "* " : "  "}${escapeHtml(fromStr)}</span>
-          <span class="mail-col-subject truncate">
-            ${showAccountBadge && acctEmail ? `<span class="source-cut-badge" title="Email account: ${escapeHtml(acctEmail)}">${escapeHtml(acctEmail)}</span> ` : ""}
-            ${needsReply ? `<span class="source-cut-badge">reply</span> ` : ""}
-            ${dueDate ? `<span class="source-cut-badge">due ${escapeHtml(dueDate.slice(5))}</span> ` : ""}
-            ${escapeHtml(subj)}
-            <span class="muted"> · ${escapeHtml(snip)}</span>
-          </span>
-          <span class="mail-col-time muted">${escapeHtml(timeLabel)}</span>
+          <div class="h">
+            ${unseen ? `<span class="dot accent" title="Unread"></span>` : ""}
+            <b>${escapeHtml(fromStr)}</b>
+            ${showAccountBadge && acctEmail ? `<span class="badge soft" title="Email account: ${escapeHtml(acctEmail)}">${escapeHtml(acctEmail.split("@")[0] || acctEmail)}</span>` : ""}
+            ${needsReply ? `<span class="badge">Reply</span>` : ""}
+            ${dueDate ? `<span class="badge soft">Due ${escapeHtml(dueDate.slice(5))}</span>` : ""}
+            <span class="time">${escapeHtml(timeLabel)}</span>
+          </div>
+          <div class="s">${escapeHtml(subj)}</div>
+          <div class="p">${escapeHtml(snip)}</div>
         </div>
       `;
     })
@@ -1280,7 +1708,8 @@ function renderInboxRowsHtml(rows: Array<Record<string, unknown>>): string {
 
 export function renderEmailTabHeaderHtml(
   tab: BrowserTab,
-  detailObj: Record<string, unknown> | undefined
+  detailObj: Record<string, unknown> | undefined,
+  includeOpenTabBtn = false
 ): string {
   const msg = (detailObj?.message ?? detailObj ?? {}) as Record<string, unknown>;
   const mid = String(
@@ -1288,7 +1717,7 @@ export function renderEmailTabHeaderHtml(
   );
   const fromName = String(msg.from_name || "");
   const fromAddr = String(msg.from_addr || "");
-  const fromDisp = fromName ? `${fromName} <${fromAddr}>` : fromAddr || "loading...";
+  const fromDisp = fromName ? `${fromName} <${fromAddr}>` : fromAddr || "Loading...";
   const toList = ((msg.to ?? []) as Array<Record<string, string>>)
     .map((x) => x.email || x.name)
     .join(", ");
@@ -1297,51 +1726,68 @@ export function renderEmailTabHeaderHtml(
     .join(", ");
   const subj = String(msg.subject || tab.title || "(no subject)");
   const label = String(msg.label || "email");
+  const ts = Number(msg.date ?? 0);
+  const whenLabel = ts > 0 ? formatRelativeTime(String(Math.floor(ts))) : "";
   const allowRemote = Boolean(msg.allow_remote_images);
-  const attachments = ((msg.attachments ?? []) as Array<Record<string, unknown>>);
+  const attachments = (msg.attachments ?? []) as Array<Record<string, unknown>>;
 
   return `
-    <div class="kb-card email-tab-header" id="email-tab-header-${escapeHtml(tab.id)}">
-      <div class="kb-card-header">
-        <span><strong>${escapeHtml(subj)}</strong> · <span class="source-cut-badge">${escapeHtml(label)}</span></span>
-        <div>
-          <button data-email-reply="${escapeHtml(mid)}">[reply (r)]</button>
-          <button data-email-reply-all="${escapeHtml(mid)}">[reply all]</button>
-          <button data-email-forward="${escapeHtml(mid)}">[forward]</button>
-          <button data-email-hide="${escapeHtml(mid)}">[hide (e)]</button>
+    <div class="section" id="email-tab-header-${escapeHtml(tab.id)}">
+      <h2 class="mail-subject">${escapeHtml(subj)}</h2>
+      <div class="mail-from">
+        <span class="mail-avatar">${escapeHtml(getInitials(fromName || fromAddr))}</span>
+        <div class="mail-from-meta">
+          <b>${escapeHtml(fromDisp)}</b>
+          ${toList || ccList ? `<small>${toList ? `To ${escapeHtml(toList)}` : ""}${toList && ccList ? " · " : ""}${ccList ? `Cc ${escapeHtml(ccList)}` : ""}</small>` : ""}
         </div>
+        ${whenLabel ? `<span class="when">${escapeHtml(whenLabel)}</span>` : ""}
       </div>
-      <div class="rail-row">
-        <span>from: ${escapeHtml(fromDisp)}${toList ? ` · to: ${escapeHtml(toList)}` : ""}${ccList ? ` · cc: ${escapeHtml(ccList)}` : ""}</span>
-        <div>
-          <span class="muted">move to:</span>
-          <button data-email-move="${escapeHtml(mid)}" data-target-label="email" class="${label === "email" ? "active" : ""}">[1 inbox]</button>
-          <button data-email-move="${escapeHtml(mid)}" data-target-label="ping" class="${label === "ping" ? "active" : ""}">[2 pings]</button>
-          <button data-email-move="${escapeHtml(mid)}" data-target-label="information" class="${label === "information" ? "active" : ""}">[3 orders]</button>
-          <button data-email-move="${escapeHtml(mid)}" data-target-label="promotion" class="${label === "promotion" ? "active" : ""}">[4 promos]</button>
+      <div class="mail-read-actions">
+        <button type="button" class="btn primary" data-email-reply="${escapeHtml(mid)}">${icon("reply", "ico-sm")}<span>Reply</span></button>
+        <button type="button" class="btn" data-email-reply-all="${escapeHtml(mid)}">Reply all</button>
+        <button type="button" class="btn" data-email-forward="${escapeHtml(mid)}">Forward</button>
+        <button type="button" class="btn" data-email-hide="${escapeHtml(mid)}">${icon("archive", "ico-sm")}<span>Archive</span></button>
+        ${
+          includeOpenTabBtn
+            ? `<button type="button" class="btn-text" data-mail-open-tab="${escapeHtml(mid)}" data-mail-open-subject="${escapeHtml(subj)}">${icon("external", "ico-sm")}<span>Open tab</span></button>`
+            : ""
+        }
+        <div class="end">
+          <div class="seg" role="group" aria-label="Move message to lane">
+            <button type="button" data-email-move="${escapeHtml(mid)}" data-target-label="email" aria-pressed="${label === "email" ? "true" : "false"}">Inbox</button>
+            <button type="button" data-email-move="${escapeHtml(mid)}" data-target-label="ping" aria-pressed="${label === "ping" ? "true" : "false"}">Pings</button>
+            <button type="button" data-email-move="${escapeHtml(mid)}" data-target-label="information" aria-pressed="${label === "information" ? "true" : "false"}">Orders</button>
+            <button type="button" data-email-move="${escapeHtml(mid)}" data-target-label="promotion" aria-pressed="${label === "promotion" ? "true" : "false"}">Promos</button>
+          </div>
           ${
             !allowRemote && fromAddr
-              ? `<button data-email-allow-remote="${escapeHtml(fromAddr)}">[load remote images]</button>`
+              ? `<button type="button" class="btn" data-email-allow-remote="${escapeHtml(fromAddr)}">Load images</button>`
               : ""
           }
         </div>
       </div>
       ${
         attachments.length > 0
-          ? `<div class="rail-row">
-              <span class="muted">attachments (${attachments.length}):</span>
-              <div>
-                ${attachments
-                  .map((a) => {
-                    const partId = String(a.part_id ?? "");
-                    const fname = String(a.filename ?? "file");
-                    const sizeKb = Math.max(1, Math.round(Number(a.size ?? 0) / 1024));
-                    const attKey = `${mid}:${partId}`;
-                    const isPrev = Boolean(state.previewedAttachments[attKey]);
-                    return `<button data-email-preview-att="${escapeHtml(mid)}" data-part-id="${escapeHtml(partId)}">[${isPrev ? "hide" : "preview"} ${escapeHtml(fname)} (${sizeKb} KB)]</button> <button data-email-save-att="${escapeHtml(mid)}" data-part-id="${escapeHtml(partId)}">[save ${escapeHtml(fname)}]</button>`;
-                  })
-                  .join(" ")}
-              </div>
+          ? `<div class="mail-atts-row">
+              <span class="muted">Attachments (${attachments.length}):</span>
+              ${attachments
+                .map((a) => {
+                  const partId = String(a.part_id ?? "");
+                  const fname = String(a.filename ?? "file");
+                  const sizeKb = Math.max(1, Math.round(Number(a.size ?? 0) / 1024));
+                  const attKey = `${mid}:${partId}`;
+                  const isPrev = Boolean(state.previewedAttachments[attKey]);
+                  return `
+                    <span class="mail-att-group">
+                      <button type="button" class="pill" data-email-preview-att="${escapeHtml(mid)}" data-part-id="${escapeHtml(partId)}">
+                        ${icon("doc", "ico-sm")}
+                        <span>${isPrev ? "Hide" : escapeHtml(fname)} (${sizeKb} KB)</span>
+                      </button>
+                      <button type="button" class="btn-text" data-email-save-att="${escapeHtml(mid)}" data-part-id="${escapeHtml(partId)}">Save</button>
+                    </span>
+                  `;
+                })
+                .join("")}
             </div>
             ${attachments
               .map((a) => {
@@ -1350,9 +1796,9 @@ export function renderEmailTabHeaderHtml(
                 const prev = state.previewedAttachments[attKey];
                 if (!prev || !prev.data_url) return "";
                 if (prev.mime.startsWith("image/")) {
-                  return `<div class="kb-card"><img class="chat-attachment-img" src="${escapeHtml(prev.data_url)}" alt="${escapeHtml(prev.filename)}" /></div>`;
+                  return `<img class="attach-img" src="${escapeHtml(prev.data_url)}" alt="${escapeHtml(prev.filename)}" />`;
                 }
-                return `<div class="kb-card"><embed class="chat-attachment-embed" type="${escapeHtml(prev.mime)}" src="${escapeHtml(prev.data_url)}" /></div>`;
+                return `<embed class="attach-embed" type="${escapeHtml(prev.mime)}" src="${escapeHtml(prev.data_url)}" />`;
               })
               .join("")}`
           : ""
@@ -1367,8 +1813,8 @@ export function renderEmailAgentRailCardsHtml(
   const msg = (detailObj?.message ?? detailObj ?? {}) as Record<string, unknown>;
   if (!msg || !msg.id) {
     return `
-      <div class="knowledge-section">
-        <div class="muted">loading email context...</div>
+      <div class="section">
+        <div class="muted">Loading email context...</div>
       </div>
     `;
   }
@@ -1383,39 +1829,42 @@ export function renderEmailAgentRailCardsHtml(
   );
 
   return `
-    <div class="knowledge-section" id="email-focused-rail-cards">
-      <div class="kb-card">
-        <div class="kb-card-header">
-          <span>sender · ${escapeHtml(String(senderCard?.name ?? fromDisp))}</span>
-          <span class="muted">${escapeHtml(String(senderCard?.type ?? "contact"))}</span>
+    <div class="section" id="email-focused-rail-cards">
+      <div class="card">
+        <div class="card-h">
+          <b>${escapeHtml(String(senderCard?.name ?? fromDisp))}</b>
+          <span class="end badge soft">${escapeHtml(String(senderCard?.type ?? "contact"))}</span>
         </div>
         <div class="muted">${escapeHtml(String(senderCard?.summary ?? msg.from_addr ?? ""))}</div>
       </div>
-      <div class="kb-card">
-        <div class="kb-card-header">
-          <span>extracted items</span>
-          <span class="muted">${extractPairs.length}</span>
+      <div class="card">
+        <div class="card-h">
+          <b>Extracted items</b>
+          <span class="end muted">${extractPairs.length}</span>
         </div>
         ${
           extractPairs.length === 0
-            ? `<div class="muted">no structured codes, dates, or order numbers extracted.</div>`
+            ? `<div class="muted">No structured codes, dates, or order numbers extracted.</div>`
             : extractPairs
                 .map(
                   ([k, v]) =>
-                    `<div class="rail-row"><span class="muted">${escapeHtml(k)}</span><span>${escapeHtml(String(v))}</span></div>`
+                    `<div class="rail-kv"><span>${escapeHtml(k)}</span><span>${escapeHtml(String(v))}</span></div>`
                 )
                 .join("")
         }
       </div>
-      <div class="vault-form-row">
-        <button class="citation-link" data-email-rail-save-brain="${escapeHtml(mid)}" data-email-rail-subj="${escapeHtml(subj)}">[save to brain]</button>
-        <button class="citation-link" data-email-rail-ask="ask about this email: ${escapeHtml(subj)}">[ask about this email]</button>
-      </div>
-      <div class="vault-form-row">
-        <span class="muted">focused:</span>
-        <button class="citation-link" data-email-rail-ask="summarize this email">[summarize]</button>
-        <button class="citation-link" data-email-rail-ask="draft a reply to this email">[draft reply]</button>
-        <button class="citation-link" data-email-rail-ask="extract dates and action items from this email">[extract dates]</button>
+      <div class="mail-chip-row">
+        <button type="button" class="chip" data-email-rail-save-brain="${escapeHtml(mid)}" data-email-rail-subj="${escapeHtml(subj)}">
+          ${icon("brain", "ico-sm")}
+          <span>Save to Brain</span>
+        </button>
+        <button type="button" class="chip" data-email-rail-ask="ask about this email: ${escapeHtml(subj)}">
+          ${icon("chat", "ico-sm")}
+          <span>Ask about email</span>
+        </button>
+        <button type="button" class="chip" data-email-rail-ask="summarize this email">Summarize</button>
+        <button type="button" class="chip" data-email-rail-ask="draft a reply to this email">Draft reply</button>
+        <button type="button" class="chip" data-email-rail-ask="extract dates and action items from this email">Extract dates</button>
       </div>
     </div>
   `;
@@ -1441,30 +1890,30 @@ export function renderComposeTabView(
   });
 
   container.innerHTML = `
-    <div class="knowledge-view" id="compose-view-${escapeHtml(tab.id)}">
-      <div class="kb-header">
-        <span>compose mail (plain text · Gemma never sends without [confirm])</span>
-        <div>
-          <button id="compose-draft-btn">[draft with gemma]</button>
-          <button id="compose-prepare-send-btn">[send (${MOD_LABEL}+Enter)]</button>
-        </div>
+    <div class="compose-view" id="compose-view-${escapeHtml(tab.id)}">
+      <div class="card-h">
+        <b>Compose message</b>
+        <span class="muted">Plain text · requires confirmation to send</span>
+        <span class="end">
+          <button id="compose-draft-btn" type="button" class="btn">${icon("spark", "ico-sm")}<span>Draft with Gemma</span></button>
+          <button id="compose-prepare-send-btn" type="button" class="btn primary">${icon("send", "ico-sm")}<span>Send (${escapeHtml(MOD_LABEL)}+Enter)</span></button>
+        </span>
       </div>
 
       ${
         draft.status_msg
-          ? `<div class="kb-status-banner">${escapeHtml(draft.status_msg)}</div>`
+          ? renderStatusBannerHtml(draft.status_msg)
           : ""
       }
 
       ${
         draft.confirm_token && draft.confirm_line
-          ? `<div class="kb-card" id="compose-confirm-bar">
-              <div class="rail-row">
-                <span>${escapeHtml(draft.confirm_line).replace(/\[new\]/g, '<span class="source-cut-badge">[new]</span>')}</span>
-                <div>
-                  <button id="compose-confirm-send-btn">[confirm]</button>
-                  <button id="compose-cancel-send-btn">[cancel]</button>
-                </div>
+          ? `<div class="draft" id="compose-confirm-bar">
+              <div class="gate">Send gate · sends only after you press Confirm</div>
+              <div>${escapeHtml(draft.confirm_line).replace(/\[new\]/g, '<span class="badge soft">New</span>')}</div>
+              <div class="acts">
+                <button id="compose-confirm-send-btn" type="button" class="btn primary">Confirm send</button>
+                <button id="compose-cancel-send-btn" type="button" class="btn">Cancel</button>
               </div>
             </div>`
           : ""
@@ -1472,19 +1921,17 @@ export function renderComposeTabView(
 
       ${
         draft.queued_outbox_id
-          ? `<div class="kb-card" id="compose-undo-bar">
-              <div class="rail-row">
-                <span>queued for delivery (10s window)...</span>
-                <button id="compose-undo-send-btn">[undo]</button>
-              </div>
+          ? `<div class="banner" id="compose-undo-bar">
+              <span>Queued for delivery (10s undo window)...</span>
+              <button id="compose-undo-send-btn" type="button" class="btn">Undo</button>
             </div>`
           : ""
       }
 
-      <div class="kb-card">
-        <div class="kb-form-row">
-          <label class="muted">from:</label>
-          <select id="compose-from-select" class="kb-input">
+      <div class="card">
+        <div class="form-row">
+          <label class="muted">From</label>
+          <select id="compose-from-select" class="select">
             ${accounts
               .map(
                 (a) =>
@@ -1493,19 +1940,19 @@ export function renderComposeTabView(
               .join("")}
           </select>
         </div>
-        <div class="kb-form-row">
-          <input id="compose-to-input" class="kb-input" type="text" placeholder="to: alice@example.com" value="${escapeHtml(draft.to)}" />
-          <input id="compose-cc-input" class="kb-input" type="text" placeholder="cc:" value="${escapeHtml(draft.cc)}" />
-          <input id="compose-bcc-input" class="kb-input" type="text" placeholder="bcc:" value="${escapeHtml(draft.bcc)}" />
+        <div class="form-row">
+          <input id="compose-to-input" class="input" type="text" placeholder="To: alice@example.com" value="${escapeHtml(draft.to)}" />
+          <input id="compose-cc-input" class="input" type="text" placeholder="Cc" value="${escapeHtml(draft.cc)}" />
+          <input id="compose-bcc-input" class="input" type="text" placeholder="Bcc" value="${escapeHtml(draft.bcc)}" />
         </div>
-        <div class="kb-form-row">
-          <input id="compose-subject-input" class="kb-input" type="text" placeholder="subject" value="${escapeHtml(draft.subject)}" />
+        <div class="form-row">
+          <input id="compose-subject-input" class="input" type="text" placeholder="Subject" value="${escapeHtml(draft.subject)}" />
         </div>
         <textarea
           id="compose-body-textarea"
-          class="kb-textarea"
+          class="textarea compose-textarea"
           rows="16"
-          placeholder="write plain-text message..."
+          placeholder="Write plain-text message..."
         >${escapeHtml(draft.body)}</textarea>
       </div>
     </div>
@@ -1552,7 +1999,7 @@ export function renderComposeTabView(
     .querySelector("#compose-draft-btn")
     ?.addEventListener("click", async () => {
       syncFields();
-      draft.status_msg = "drafting reply with Gemma...";
+      draft.status_msg = "Drafting reply with Gemma...";
       onChanged();
       const res = await sidecarDraftMailReply({
         message_id: draft.reply_to_message_id,
@@ -1564,9 +2011,10 @@ export function renderComposeTabView(
         if (res.to && !draft.to) draft.to = res.to;
         if (res.subject && !draft.subject) draft.subject = res.subject;
         if (res.body) draft.body = res.body;
-        draft.status_msg = "draft ready (review and click [send] to prepare confirmation).";
+        draft.status_msg =
+          "Draft ready. Review and press Send to prepare confirmation.";
       } else {
-        draft.status_msg = `draft error: ${res.error ?? "failed"}`;
+        draft.status_msg = `Draft error: ${res.error ?? "failed"}`;
       }
       onChanged();
     });
@@ -1590,7 +2038,7 @@ export function renderComposeTabView(
       draft.confirm_line = res.confirm_line;
       draft.status_msg = "";
     } else {
-      draft.status_msg = `send prepare error: ${res.error ?? "failed"}`;
+      draft.status_msg = `Send prepare error: ${res.error ?? "failed"}`;
     }
     onChanged();
   };
@@ -1623,9 +2071,9 @@ export function renderComposeTabView(
       const res = await sidecarConfirmMailSend(outboxId, tok);
       if (res.ok) {
         draft.queued_outbox_id = outboxId;
-        draft.status_msg = "sending in 10s (click [undo] to cancel)...";
+        draft.status_msg = "Sending in 10s (press Undo to cancel)...";
       } else {
-        draft.status_msg = `send rejected: ${res.error ?? "failed"}`;
+        draft.status_msg = `Send rejected: ${res.error ?? "failed"}`;
       }
       onChanged();
     });
@@ -1636,7 +2084,7 @@ export function renderComposeTabView(
       draft.confirm_outbox_id = undefined;
       draft.confirm_token = undefined;
       draft.confirm_line = undefined;
-      draft.status_msg = "send cancelled.";
+      draft.status_msg = "Send cancelled.";
       onChanged();
     });
 
@@ -1647,9 +2095,9 @@ export function renderComposeTabView(
       const res = await sidecarUndoMailSend(draft.queued_outbox_id);
       if (res.ok) {
         draft.queued_outbox_id = undefined;
-        draft.status_msg = "send undone. message returned to draft.";
+        draft.status_msg = "Send undone. Message returned to draft.";
       } else {
-        draft.status_msg = `undo failed: ${res.error ?? "already sent"}`;
+        draft.status_msg = `Undo failed: ${res.error ?? "already sent"}`;
       }
       onChanged();
     });

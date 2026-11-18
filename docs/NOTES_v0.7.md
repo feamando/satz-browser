@@ -61,3 +61,14 @@ Plan: `docs/PLAN_v0.7_design_system.md` · Spec: `docs/design/DESIGN_SYSTEM.md` 
   - Refactored `renderProfileUnlockOverlay` (`#profile-unlock-overlay`) and `#start-profile-unlock-card` to v1 `.modal-backdrop > .card` / `.card` using `.card-h`, `.banner`, `.form-row`, `.input.pin`, `.select`, `.btn.primary`, and `.sep`.
   - Added `state.commandModelMenuOpen` (`"start" | "overlay" | null`) in `src/state.ts` with `Escape` and outside-click dismissal in `src/main.ts`, plus `.input`/`.select`/`.bigbar-input` `:where(...)` exclusions and `.chip.on` active styles in `src/style.css`.
 - **Checks:** `npm run build` passed; `cargo check --manifest-path src-tauri/Cargo.toml` passed; `python -m pytest sidecar -q` (`42 passed`); Besley 700 + Inter 400 loaded with `0` console errors; 12 screenshots verified (and `01`, `02`, `11` visually checked) under `docs/smoke/v0.7/d5/windows/`.
+
+### D6 · Mail split view, account bar & theme-aware reader
+- **Files:** `src/mail.ts`, `src/tabs.ts`, `src/main.ts`, `src/style.css`
+- **What changed:**
+  - Moved mail account filtering out of `src/tabs.ts` (`renderTabStrip`) into `.acct-bar` (`.pill.round` `All mail`, per-account unread counts, `Add account`, `Sync now`, `Compose`, and `Sort 10 emails`) inside `renderMailLaneView` (`src/mail.ts`).
+  - Migrated Inbox and search results to two-pane `.mail-split` (`.mail-list` with `.mail-row.unread` / `.read` / `.on` + inline `.mail-read` reading pane using `renderEmailTabHeaderHtml`, `.extract` action cards, and `.email-frame`), preserving `j`/`k`/`Enter`/`r`/`c`/`e`/`1-4`/`/` shortcuts and double-click/`Open tab` navigation.
+  - Migrated Pings, Orders, Promos grouped `.card`s (`.extract` tracking bar, `.pill` promo copy chips), Accounts `.table-wrap > .table` and `.form-row` add-account card, Eval Mode `.seg` controls, `.banner.warn` locked-mail inline PIN unlock card, `#email-focused-rail-cards`, and Compose `.draft` two-step send-gate & undo banners.
+  - Added `buildMailIframeSrcdoc` (`src/mail.ts`) reading computed CSS theme tokens (`--panel`, `--ink`, `--accent`, `--muted`, `--line`) with `<meta name="color-scheme">` and runtime stylesheet overrides over sidecar HTML, plus `MutationObserver` on `data-theme` in `src/main.ts` so `.email-frame` tracks light/dark transitions immediately; removed bracket labels in `src/main.ts` & `src/mail.ts`.
+- **Deviations / Notes:**
+  - Because `sidecar/satz_mail.py` injects a legacy terminal `<style>` block (`#000000` / `#e8e8e8`), `buildMailIframeSrcdoc` appends a computed theme override `<style>` block inside `srcdoc` rather than altering sidecar HTML sanitization tests.
+- **Checks:** `npm run build` passed; `cargo check --manifest-path src-tauri/Cargo.toml` passed; `python -m pytest sidecar -q` (`42 passed`); Besley 700 + Inter 400 loaded with `0` console errors; 12 screenshots verified (`05`, `06` visually checked) under `docs/smoke/v0.7/d6/windows/`.

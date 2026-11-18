@@ -80,6 +80,7 @@ import { fontsReady } from "./design-system/brand";
 import { icon } from "./design-system/icons";
 import { renderBrainView, renderKnowledgeView } from "./knowledge";
 import {
+  buildMailIframeSrcdoc,
   refreshMailState,
   renderComposeTabView,
   renderEmailAgentRailCardsHtml,
@@ -586,8 +587,23 @@ async function initApp(): Promise<void> {
   window.matchMedia?.("(prefers-color-scheme: dark)")?.addEventListener("change", () => {
     if (getUiThemePref() === "system") {
       renderRailRegion();
+      if (document.querySelector(".email-frame")) {
+        renderViewportRegion();
+      }
     }
   });
+
+  if (typeof MutationObserver !== "undefined") {
+    const themeObserver = new MutationObserver(() => {
+      if (document.querySelector(".email-frame")) {
+        renderViewportRegion();
+      }
+    });
+    themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
+  }
 
   window.addEventListener("keydown", (e: KeyboardEvent) => {
     void handleMailSingleKeyShortcuts(e);
@@ -1123,6 +1139,35 @@ function renderTopBarRegion(): void {
   });
 }
 
+function selectMailAccountFilter(accountId: string | null): void {
+  state.mailActiveAccountId = accountId;
+  state.mailSearchRows = null;
+  state.mailSelectedRowIdx = 0;
+  if (!state.activeTabId.startsWith("lane:") && state.activeTabId !== "chat") {
+    state.activeTabId = `lane:${state.mailActiveLane || "inbox"}`;
+  }
+  void (async () => {
+    await refreshMailState();
+    renderAllRegions();
+  })();
+}
+
+async function openAddMailAccountSettings(): Promise<void> {
+  state.showBrainView = false;
+  state.showKnowledgeView = true;
+  state.settingsAccordionOpen.mail = true;
+  const [kb, docRoles, mCfg] = await Promise.all([
+    sidecarFetchKnowledge(),
+    sidecarFetchDoctor(),
+    sidecarGetModelConfig(),
+  ]);
+  if (kb) state.knowledge = kb;
+  state.doctorRoles = docRoles;
+  if (mCfg) syncConfiguredChatModel(mCfg, false);
+  await refreshMailState();
+  renderAllRegions();
+}
+
 function renderTabStripRegion(): void {
   renderTabStrip({
     onSelectTab: (tabId) => {
@@ -1151,32 +1196,6 @@ function renderTabStripRegion(): void {
         return;
       }
       renderWorkspaceRegions();
-    },
-    onSelectMailAccount: (accountId) => {
-      state.mailActiveAccountId = accountId;
-      state.mailSearchRows = null;
-      if (!state.activeTabId.startsWith("lane:") && state.activeTabId !== "chat") {
-        state.activeTabId = `lane:${state.mailActiveLane || "inbox"}`;
-      }
-      void (async () => {
-        await refreshMailState();
-        renderAllRegions();
-      })();
-    },
-    onAddMailAccount: async () => {
-      state.showBrainView = false;
-      state.showKnowledgeView = true;
-      state.settingsAccordionOpen.mail = true;
-      const [kb, docRoles, mCfg] = await Promise.all([
-        sidecarFetchKnowledge(),
-        sidecarFetchDoctor(),
-        sidecarGetModelConfig(),
-      ]);
-      if (kb) state.knowledge = kb;
-      state.doctorRoles = docRoles;
-      if (mCfg) syncConfiguredChatModel(mCfg, false);
-      await refreshMailState();
-      renderAllRegions();
     },
     onToggleCompareCandidate: (tabId) => {
       const idx = state.compareTabIds.indexOf(tabId);
@@ -1487,6 +1506,15 @@ function renderViewportRegion(): void {
       onOpenSiteUrl: (url, title) => {
         void handleOpenUrlAsTab(url, title);
       },
+      onSelectMailAccount: (accountId) => {
+        selectMailAccountFilter(accountId);
+      },
+      onAddMailAccount: () => {
+        void openAddMailAccountSettings();
+      },
+      onBindEmailReader: (msgId, detailObj) => {
+        bindEmailTabHeaderEvents(viewport, msgId, detailObj);
+      },
       onRefreshState: async () => {
         await refreshLists();
         renderAllRegions();
@@ -1643,32 +1671,27 @@ function renderSiteTabViewport(viewport: HTMLElement): void {
     const defaultCsp =
       "default-src 'none'; img-src data: cid:; style-src 'unsafe-inline'; font-src data:";
     const effectiveCsp = cachedHtml?.csp || defaultCsp;
-    const rawBodyHtml =
-      cachedHtml?.html ||
-      (plainFallback
-        ? `<!DOCTYPE html><html><head><meta charset="utf-8"><style>html,body{background:#000000;color:#e8e8e8;font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.5;margin:0;padding:14px;}pre{white-space:pre-wrap;word-wrap:break-word;font-family:inherit;margin:0;}</style></head><body><pre>${escapeHtml(plainFallback)}</pre></body></html>`
-        : "");
-    const srcdocWithCsp = rawBodyHtml
-      ? `<meta http-equiv="Content-Security-Policy" content="${escapeHtml(effectiveCsp)}">${rawBodyHtml}`
-      : "";
+    const srcdocWithCsp = buildMailIframeSrcdoc(
+      cachedHtml?.html,
+      plainFallback,
+      effectiveCsp
+    );
 
     viewport.innerHTML = `
-      <div class="chat-view">
-        <div class="viewport-primary">
-          ${renderEmailTabHeaderHtml(tab, cachedDetail)}
-          <div id="webview-slot-${escapeHtml(tab.id)}" class="webview-slot">
-            ${
-              srcdocWithCsp
-                ? `<iframe
-                    id="email-iframe-${escapeHtml(tab.id)}"
-                    class="email-body-iframe"
-                    sandbox="allow-popups allow-popups-to-escape-sandbox"
-                    referrerpolicy="no-referrer"
-                    srcdoc="${escapeHtml(srcdocWithCsp)}"
-                  ></iframe>`
-                : `loading ${escapeHtml(tab.url)}...`
-            }
-          </div>
+      <div class="mail-email-tab">
+        ${renderEmailTabHeaderHtml(tab, cachedDetail)}
+        <div id="webview-slot-${escapeHtml(tab.id)}" class="webview-slot mail-email-slot">
+          ${
+            srcdocWithCsp
+              ? `<iframe
+                  id="email-iframe-${escapeHtml(tab.id)}"
+                  class="email-frame"
+                  sandbox="allow-popups allow-popups-to-escape-sandbox"
+                  referrerpolicy="no-referrer"
+                  srcdoc="${escapeHtml(srcdocWithCsp)}"
+                ></iframe>`
+              : `loading ${escapeHtml(tab.url)}...`
+          }
         </div>
       </div>
     `;
@@ -3455,7 +3478,7 @@ function bindEmailTabHeaderEvents(
       const partId = el.getAttribute("data-part-id") || "";
       const res = await sidecarSaveMailAttachment(messageId, partId);
       if (res.ok) {
-        el.textContent = "[saved to Downloads]";
+        el.textContent = "Saved to Downloads";
       }
     });
   });
@@ -3475,7 +3498,7 @@ function bindEmailTabHeaderEvents(
         content: bodyTxt.slice(0, 1200),
         source_url: `satzmail://message/${messageId}`,
       });
-      el.textContent = res.ok ? "[saved to brain]" : "[unlock profile first]";
+      el.textContent = res.ok ? "Saved to Brain" : "Unlock profile first";
     });
   });
 
