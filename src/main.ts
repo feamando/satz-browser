@@ -77,6 +77,7 @@ import {
 } from "./chat";
 import { bindKeyboardShortcuts } from "./keys";
 import { fontsReady } from "./design-system/brand";
+import { icon } from "./design-system/icons";
 import { renderBrainView, renderKnowledgeView } from "./knowledge";
 import {
   refreshMailState,
@@ -108,11 +109,13 @@ import {
   escapeHtml,
   extractDomain,
   getActiveTabSources,
+  getUiThemePref,
   hasAnyActiveStream,
   isConvStreaming,
   MOD_LABEL,
   normalizeUrl,
   resolveLiveNavigationTarget,
+  setUiAgentFoldedPref,
   state,
   syncConfiguredChatModel,
 } from "./state";
@@ -428,8 +431,7 @@ async function initApp(): Promise<void> {
       }
     },
     onToggleAgentRail: () => {
-      state.agentRailOpen = !state.agentRailOpen;
-      renderViewportRegion();
+      toggleAgentRail();
     },
     onToggleCompare: () => {
       handleToggleCompareMode();
@@ -464,6 +466,12 @@ async function initApp(): Promise<void> {
         renderAllRegions();
         return;
       }
+      if (state.telemetryOpen || state.profileMenuOpen) {
+        state.telemetryOpen = false;
+        state.profileMenuOpen = false;
+        renderRailRegion();
+        return;
+      }
       if (state.showErrorLog) {
         state.showErrorLog = false;
         renderStatusLine();
@@ -491,13 +499,39 @@ async function initApp(): Promise<void> {
     const target = e.target as HTMLElement | null;
     if (!target) return;
     let changed = false;
+    let railChanged = false;
     if (
       state.openMenuConvId !== null &&
-      !target.closest(".rail-popover-menu") &&
+      !target.closest(".row-menu-pop") &&
       !target.closest("[data-menu-conv-id]")
     ) {
       state.openMenuConvId = null;
-      changed = true;
+      railChanged = true;
+    }
+    if (
+      state.telemetryOpen &&
+      !target.closest("#telemetry-popover") &&
+      !target.closest("#rail-telemetry-btn") &&
+      !target.closest("#region-error-log-overlay")
+    ) {
+      state.telemetryOpen = false;
+      railChanged = true;
+    }
+    if (
+      state.profileMenuOpen &&
+      !target.closest("#rail-profile-menu") &&
+      !target.closest("#rail-profile-btn")
+    ) {
+      state.profileMenuOpen = false;
+      railChanged = true;
+    }
+    if (
+      state.showErrorLog &&
+      !target.closest("#region-error-log-overlay") &&
+      !target.closest("#status-error-log-btn")
+    ) {
+      state.showErrorLog = false;
+      renderStatusLine();
     }
     if (
       state.openCodesPopoverTabId !== null &&
@@ -509,6 +543,14 @@ async function initApp(): Promise<void> {
     }
     if (changed) {
       renderAllRegions();
+    } else if (railChanged) {
+      renderRailRegion();
+    }
+  });
+
+  window.matchMedia?.("(prefers-color-scheme: dark)")?.addEventListener("change", () => {
+    if (getUiThemePref() === "system") {
+      renderRailRegion();
     }
   });
 
@@ -582,8 +624,7 @@ function handleMenuShortcut(cmd: string): void {
     input?.focus();
     input?.select();
   } else if (cmd === "toggle_agent_rail") {
-    state.agentRailOpen = !state.agentRailOpen;
-    renderViewportRegion();
+    toggleAgentRail();
   } else if (cmd === "toggle_compare") {
     handleToggleCompareMode();
   } else if (cmd === "bookmark_current") {
@@ -715,21 +756,76 @@ async function pollSidecarState(): Promise<void> {
   }
 }
 
+function setShellAgentFolded(folded: boolean): void {
+  const shell = document.getElementById("region-shell");
+  if (shell) {
+    shell.classList.toggle("agent-folded", folded);
+  }
+}
+
+function toggleAgentRail(): void {
+  state.agentRailOpen = !state.agentRailOpen;
+  setUiAgentFoldedPref(!state.agentRailOpen);
+  setShellAgentFolded(!state.agentRailOpen);
+  renderViewportRegion();
+}
+
+function mountAgentPanel(
+  title: string,
+  bodyId: string,
+  isChatBody: boolean
+): HTMLElement | null {
+  const agent = document.getElementById("region-agent");
+  if (!agent) return null;
+  agent.innerHTML = `
+    <div class="ag-h">
+      <span class="label">${escapeHtml(title)}</span>
+      <button
+        id="agent-fold-btn"
+        class="icon-btn"
+        type="button"
+        title="Fold assistant panel (${MOD_LABEL}+J)"
+      >
+        ${icon("panel")}
+      </button>
+    </div>
+    <div class="ag-body ${isChatBody ? "ag-chat" : ""}" id="${escapeHtml(bodyId)}"></div>
+  `;
+  agent.querySelector("#agent-fold-btn")?.addEventListener("click", () => {
+    toggleAgentRail();
+  });
+  setShellAgentFolded(!state.agentRailOpen);
+  return document.getElementById(bodyId);
+}
+
+function clearAgentPanel(): void {
+  const agent = document.getElementById("region-agent");
+  if (agent) {
+    agent.innerHTML = "";
+  }
+  setShellAgentFolded(true);
+}
+
 function mountShellSkeleton(): void {
   const app = document.getElementById("app");
   if (!app) return;
   app.innerHTML = `
-    <div class="shell-root">
-      <div class="shell-main-row">
-        <aside class="left-rail" id="region-rail"></aside>
-        <main class="workspace-column">
-          <header class="tab-strip" id="region-tab-strip"></header>
-          <div class="workspace-body" id="region-viewport"></div>
-        </main>
-      </div>
-      <footer class="status-line" id="region-status-bar"></footer>
+    <div class="shell agent-folded" id="region-shell">
+      <aside class="side" id="region-rail"></aside>
+      <main class="main">
+        <div id="region-top"></div>
+        <header class="tab-strip" id="region-tab-strip"></header>
+        <div class="workspace-body" id="region-viewport"></div>
+      </main>
+      <aside class="agent" id="region-agent"></aside>
     </div>
   `;
+  const shell = document.getElementById("region-shell");
+  shell?.addEventListener("transitionend", (e) => {
+    if ((e as TransitionEvent).propertyName === "grid-template-columns") {
+      scheduleWebviewLayoutSync();
+    }
+  });
 }
 
 async function refreshLists(): Promise<void> {
@@ -911,6 +1007,20 @@ function renderRailRegion(): void {
       }
       renderAllRegions();
     },
+    onOpenProfileUnlock: () => {
+      state.profilePromptDismissed = false;
+      state.profilePromptOpen = true;
+      renderProfileUnlockOverlay(getProfilePromptActions());
+      scheduleWebviewLayoutSync();
+      renderRailRegion();
+    },
+    onLockProfile: async () => {
+      state.revealedPasswords = {};
+      await sidecarLockProfile();
+      state.profileStatusMessage = "profile locked. encrypted vault unloaded.";
+      await syncAfterProfileAuthChange(false);
+      renderAllRegions();
+    },
   });
 }
 
@@ -999,6 +1109,7 @@ function renderViewportRegion(): void {
   }
 
   if (state.showBrainView) {
+    clearAgentPanel();
     renderBrainView(viewport, {
       onTogglePauseLearning: async (paused) => {
         const updated = await sidecarSetPauseLearning(paused);
@@ -1093,6 +1204,7 @@ function renderViewportRegion(): void {
   }
 
   if (state.showKnowledgeView) {
+    clearAgentPanel();
     renderKnowledgeView(viewport, {
       onTogglePauseLearning: async (paused) => {
         const updated = await sidecarSetPauseLearning(paused);
@@ -1242,6 +1354,7 @@ function renderViewportRegion(): void {
         renderAllRegions();
       },
       onChangeAppearance: () => {
+        renderRailRegion();
         scheduleWebviewLayoutSync();
         renderStatusLine();
       },
@@ -1251,6 +1364,7 @@ function renderViewportRegion(): void {
   }
 
   if (!state.activeDetail) {
+    clearAgentPanel();
     renderStartScreen(viewport, getStartScreenActions());
     scheduleWebviewLayoutSync();
     return;
@@ -1263,6 +1377,7 @@ function renderViewportRegion(): void {
   }
 
   if (state.activeTabId.startsWith("lane:")) {
+    clearAgentPanel();
     renderMailLaneView(viewport, {
       onOpenEmailMessage: (messageId, subject) => {
         void openEmailMessageTab(messageId, subject);
@@ -1283,6 +1398,7 @@ function renderViewportRegion(): void {
   }
 
   if (state.activeTabId.startsWith("news-lane:")) {
+    clearAgentPanel();
     renderNewsLaneView(viewport, {
       onOpenSiteUrl: (url, title) => {
         void handleOpenUrlAsTab(url, title);
@@ -1327,18 +1443,17 @@ function renderViewportRegion(): void {
     viewport.innerHTML = `
       <div class="chat-view">
         <div class="viewport-primary" id="chat-main-container"></div>
-        ${
-          state.agentRailOpen
-            ? `<aside class="right-panel" id="chat-sources-rail"></aside>`
-            : ""
-        }
       </div>
     `;
     const chatEl = document.getElementById("chat-main-container");
     if (chatEl) {
       renderChatPanel(chatEl, getChatActions());
     }
-    const sourcesEl = document.getElementById("chat-sources-rail");
+    const sourcesEl = mountAgentPanel(
+      `Sources (${state.activeDetail.sources.length})`,
+      "chat-sources-rail",
+      false
+    );
     if (sourcesEl) {
       renderSourcesPanel(sourcesEl, {
         onToggleSourceInContext: async (sourceId, inContext) => {
@@ -1377,6 +1492,7 @@ function renderSiteTabViewport(viewport: HTMLElement): void {
   }
 
   if (tab.kind === "compose") {
+    clearAgentPanel();
     renderComposeTabView(viewport, tab, () => {
       renderViewportRegion();
     });
@@ -1455,17 +1571,19 @@ function renderSiteTabViewport(viewport: HTMLElement): void {
             }
           </div>
         </div>
-        ${
-          state.agentRailOpen
-            ? `<aside class="right-panel" id="site-tab-agent-rail">
-                ${renderEmailAgentRailCardsHtml(cachedDetail)}
-              </aside>`
-            : ""
-        }
       </div>
     `;
 
-    bindEmailTabHeaderEvents(viewport, mid, cachedDetail);
+    const mailRailEl = mountAgentPanel("Email context", "site-tab-agent-rail", false);
+    if (mailRailEl) {
+      mailRailEl.innerHTML = renderEmailAgentRailCardsHtml(cachedDetail);
+    }
+
+    bindEmailTabHeaderEvents(
+      document.getElementById("region-shell") ?? viewport,
+      mid,
+      cachedDetail
+    );
     bindToolbarEvents(viewport);
     return;
   }
@@ -1571,15 +1689,10 @@ function renderSiteTabViewport(viewport: HTMLElement): void {
           loading ${escapeHtml(tab.url)}...
         </div>
       </div>
-      ${
-        state.agentRailOpen
-          ? `<aside class="right-panel" id="site-tab-agent-rail"></aside>`
-          : ""
-      }
     </div>
   `;
 
-  const railEl = document.getElementById("site-tab-agent-rail");
+  const railEl = mountAgentPanel("Assistant", "site-tab-agent-rail", true);
   if (railEl) {
     renderChatPanel(railEl, getChatActions());
   }
@@ -1635,15 +1748,10 @@ function renderCompareViewport(viewport: HTMLElement): void {
             .join("")}
         </div>
       </div>
-      ${
-        state.agentRailOpen
-          ? `<aside class="right-panel" id="compare-agent-rail"></aside>`
-          : ""
-      }
     </div>
   `;
 
-  const railEl = document.getElementById("compare-agent-rail");
+  const railEl = mountAgentPanel("Assistant", "compare-agent-rail", true);
   if (railEl) {
     renderChatPanel(railEl, getChatActions());
   }
@@ -1689,8 +1797,7 @@ function bindToolbarEvents(viewport: HTMLElement): void {
   viewport
     .querySelector("#toggle-agent-rail-btn")
     ?.addEventListener("click", () => {
-      state.agentRailOpen = !state.agentRailOpen;
-      renderViewportRegion();
+      toggleAgentRail();
     });
 
   viewport.querySelectorAll("[data-autofill-tab]").forEach((btn) => {

@@ -77,6 +77,60 @@ export function setUiLayoutPref(pref: UiLayoutPref): void {
   applyUiPreferences();
 }
 
+export type RailAccordionKey = "pinned" | "conversations" | "sources" | "archived";
+
+const RAIL_ACCORDION_KEY = "satz.ui.railAccordion";
+const AGENT_FOLDED_KEY = "satz.ui.agentFolded";
+
+const DEFAULT_RAIL_ACCORDION: Record<RailAccordionKey, boolean> = {
+  pinned: true,
+  conversations: true,
+  sources: true,
+  archived: false,
+};
+
+export function getRailAccordionPref(): Record<RailAccordionKey, boolean> {
+  try {
+    const raw = window.localStorage.getItem(RAIL_ACCORDION_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<Record<RailAccordionKey, boolean>>;
+      return {
+        pinned: parsed.pinned ?? DEFAULT_RAIL_ACCORDION.pinned,
+        conversations: parsed.conversations ?? DEFAULT_RAIL_ACCORDION.conversations,
+        sources: parsed.sources ?? DEFAULT_RAIL_ACCORDION.sources,
+        archived: parsed.archived ?? DEFAULT_RAIL_ACCORDION.archived,
+      };
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+  return { ...DEFAULT_RAIL_ACCORDION };
+}
+
+export function setRailAccordionPref(acc: Record<RailAccordionKey, boolean>): void {
+  try {
+    window.localStorage.setItem(RAIL_ACCORDION_KEY, JSON.stringify(acc));
+  } catch {
+    // Ignore storage access errors
+  }
+}
+
+export function getUiAgentFoldedPref(): boolean {
+  try {
+    return window.localStorage.getItem(AGENT_FOLDED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function setUiAgentFoldedPref(folded: boolean): void {
+  try {
+    window.localStorage.setItem(AGENT_FOLDED_KEY, folded ? "1" : "0");
+  } catch {
+    // Ignore storage access errors
+  }
+}
+
 export function getResolvedTheme(): "light" | "dark" {
   const pref = getUiThemePref();
   if (pref === "light" || pref === "dark") return pref;
@@ -118,6 +172,9 @@ export interface AppState {
   compareMode: boolean;
   agentRailOpen: boolean;
   showArchived: boolean;
+  railAccordion: Record<RailAccordionKey, boolean>;
+  telemetryOpen: boolean;
+  profileMenuOpen: boolean;
   showKnowledgeView: boolean;
   showBrainView: boolean;
   commandBarOpen: boolean;
@@ -265,8 +322,11 @@ export const state: AppState = {
   activeTabId: "chat",
   compareTabIds: [],
   compareMode: false,
-  agentRailOpen: true,
-  showArchived: false,
+  agentRailOpen: !getUiAgentFoldedPref(),
+  showArchived: getRailAccordionPref().archived,
+  railAccordion: getRailAccordionPref(),
+  telemetryOpen: false,
+  profileMenuOpen: false,
   showKnowledgeView: false,
   showBrainView: false,
   commandBarOpen: false,
