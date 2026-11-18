@@ -1,0 +1,170 @@
+/*
+  Satz design system: tokens (v1, 2026-11-18)
+  Spec and usage rules: docs/design/DESIGN_SYSTEM.md
+  Visual reference:     docs/design/satz-directions.html
+
+  Theme:  <html data-theme="light|dark">  (no attribute = follow the OS)
+  Layout: <html data-layout="floating|flush"> (default floating)
+
+  Rule: components read ONLY semantic tokens (--canvas, --panel, --ink ...).
+  Brand ramp tokens (--violet-*, --dither-*) are for the logo and charts.
+*/
+
+/* ---------- Fonts (bundled, offline) ---------- */
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/Inter-Variable-latin.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/Inter-Variable-latin-ext.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Besley";
+  src: url("/fonts/Besley-Variable-latin.woff2") format("woff2");
+  font-weight: 400 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Besley";
+  src: url("/fonts/Besley-Variable-latin-ext.woff2") format("woff2");
+  font-weight: 400 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* JetBrains Mono @font-face stays in src/style.css (already bundled). */
+
+:root {
+  /* ---------- Brand ramp (logo, charts, illustrations only) ---------- */
+  --violet-900: #3f2775;
+  --violet-700: #5b3f99;
+  --violet-500: #8466c2;
+  --violet-400: #ad95de;
+  --violet-300: #cdbdec;
+  --dither-200: #ddd6e8;
+  --dither-100: #e7e5eb;
+
+  /* ---------- Type ---------- */
+  --font-ui: "Inter", -apple-system, "Segoe UI", system-ui, sans-serif;
+  --font-display: "Besley", "Clarendon", Georgia, serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+
+  --fs-micro: 10.5px; /* mono uppercase labels, kbd hints */
+  --fs-xs: 11.5px;    /* meta, timestamps, secondary lines */
+  --fs-sm: 12.5px;    /* list rows, pills, agent panel body */
+  --fs-base: 13px;    /* default UI text */
+  --fs-md: 13.5px;    /* reading text, composer input */
+  --fs-lg: 15px;      /* card titles, home command bar */
+  --fs-xl: 20px;      /* display: email subject, view titles */
+  --fs-2xl: 30px;     /* display: home greeting */
+
+  --lh-tight: 1.25;
+  --lh-ui: 1.45;
+  --lh-read: 1.6;
+  --tracking-label: 0.08em;
+
+  /* ---------- Space (4px base) ---------- */
+  --sp-1: 4px;
+  --sp-2: 6px;
+  --sp-3: 8px;
+  --sp-4: 10px;
+  --sp-5: 12px;
+  --sp-6: 14px;
+  --sp-7: 18px;
+  --sp-8: 22px;
+  --sp-9: 28px;
+
+  /* ---------- Radius ("mildly rounded") ---------- */
+  --r-xs: 4px;    /* citation chips [1] */
+  --r-sm: 7px;    /* pills, chips, small buttons, segmented items */
+  --r-md: 9px;    /* rows, inputs, icon buttons, address bar, send */
+  --r-lg: 12px;   /* composer, cards, floating panels, popovers */
+  --r-xl: 16px;   /* home command bar */
+  --r-pill: 999px;/* count badges, account pills */
+
+  /* ---------- Shell dimensions ---------- */
+  --rail-w: 232px;
+  --agent-w: 318px;
+  --agent-folded-w: 44px;
+  --row-h: 30px;
+  --icon-btn: 28px;
+  --icon: 16px;
+  --icon-sm: 14px;
+  --shell-gap: 8px; /* floating layout gutter */
+
+  /* ---------- Motion ---------- */
+  --ease: cubic-bezier(.2, .7, .2, 1);
+  --dur-fast: 120ms;
+  --dur: 220ms;
+
+  /* ---------- Semantic: LIGHT (paper) ---------- */
+  --canvas: #e9e4da;      /* app background behind floating panels */
+  --panel: #fbf8f2;       /* main surface: content, agent, composer */
+  --sunk: #f3efe7;        /* recessed: address bar, pills, quoted blocks */
+  --hover: #ede8de;
+  --line: #e2dbce;        /* hairlines and borders */
+  --ink: #1f1b22;         /* primary text */
+  --muted: #756d72;       /* secondary text */
+  --faint: #a8a09f;       /* labels, meta, placeholders (>= 10.5px, never body) */
+  --accent: #5b3f99;
+  --accent-ink: #ffffff;  /* text on --accent */
+  --accent-soft: #ebe3f3; /* selected row, active nav, cite chip bg */
+  --good: #2f8a5b;
+  --warn: #b07a1f;
+  --danger: #b23a3a;
+  --glass: rgba(251, 248, 242, .74);
+  --focus: #5b3f99;
+  --shadow-bar: 0 10px 30px -20px rgba(40, 20, 80, .35);
+  --shadow-pop: 0 18px 40px -18px rgba(20, 10, 40, .45);
+  --img-filter: none;     /* news thumbnails */
+
+  /* ---------- Compatibility aliases for src/style.css (remove after migration) ---------- */
+  --bg: var(--canvas);
+  --surface: var(--panel);
+  --border: var(--line);
+  --fg: var(--ink);
+}
+
+/* ---------- Semantic: DARK ---------- */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --canvas: #0b0a0e; --panel: #16141b; --sunk: #1b1821; --hover: #221f29; --line: #2a2631;
+    --ink: #e9e6ef; --muted: #8e8899; --faint: #5f5a69;
+    --accent: #b79ef0; --accent-ink: #17121f; --accent-soft: #2a2238;
+    --good: #5fc28d; --warn: #e0a94a; --danger: #ef7d7d;
+    --glass: rgba(24, 21, 30, .66); --focus: #b79ef0;
+    --shadow-bar: 0 10px 30px -18px rgba(0, 0, 0, .7);
+    --shadow-pop: 0 18px 40px -16px rgba(0, 0, 0, .75);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --canvas: #0b0a0e; --panel: #16141b; --sunk: #1b1821; --hover: #221f29; --line: #2a2631;
+  --ink: #e9e6ef; --muted: #8e8899; --faint: #5f5a69;
+  --accent: #b79ef0; --accent-ink: #17121f; --accent-soft: #2a2238;
+  --good: #5fc28d; --warn: #e0a94a; --danger: #ef7d7d;
+  --glass: rgba(24, 21, 30, .66); --focus: #b79ef0;
+  --shadow-bar: 0 10px 30px -18px rgba(0, 0, 0, .7);
+  --shadow-pop: 0 18px 40px -16px rgba(0, 0, 0, .75);
+  color-scheme: dark;
+}
+
+/* ---------- Layout B: flush ---------- */
+:root[data-layout="flush"] {
+  --shell-gap: 0px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur-fast: 0ms; --dur: 0ms; }
+}

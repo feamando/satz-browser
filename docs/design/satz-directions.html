@@ -1,0 +1,596 @@
+<title>Satz Interface Studies</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Besley:wght@400;600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a working sheet. Mark studies up top, then one full-size browser frame you flip between screens, layouts and modes. */
+:root{
+  --page:#f2eee6; --page-ink:#1f1b22; --page-muted:#6f6870; --page-line:#e1dacd; --page-card:#faf7f1;
+  --violet:#5b3f99; --lilac:#c4b0e8;
+  --display:"Besley", "Clarendon", Georgia, serif;
+  --ui:"Inter", -apple-system, "Segoe UI", system-ui, sans-serif;
+  --mono:"JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){ --page:#101014; --page-ink:#ebe8f0; --page-muted:#8f8a9a; --page-line:#2a2732; --page-card:#16141b; --violet:#b79ef0; color-scheme:dark; }
+}
+:root[data-theme="dark"]{ --page:#101014; --page-ink:#ebe8f0; --page-muted:#8f8a9a; --page-line:#2a2732; --page-card:#16141b; --violet:#b79ef0; color-scheme:dark; }
+
+body{background:var(--page);color:var(--page-ink);font:15px/1.55 var(--ui);padding-block:28px 64px;padding-left:max(16px, env(safe-area-inset-left,0px));padding-right:max(16px, env(safe-area-inset-right,0px));}
+.wrap{max-width:1296px;margin:0 auto;display:flex;flex-direction:column;gap:40px}
+header.sheet{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:16px;border-bottom:1px solid var(--page-line);padding-bottom:20px}
+.sheet h1{font:700 15px/1.3 var(--ui);letter-spacing:.02em;margin-top:10px}
+.sheet p{color:var(--page-muted);max-width:62ch;font-size:14px}
+.eyebrow{font:500 11px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--page-muted)}
+h2{font:700 26px/1.2 var(--display);text-wrap:balance}
+section{display:flex;flex-direction:column;gap:18px}
+.sec-head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:12px}
+
+canvas[data-word],canvas[data-icon]{display:block}
+
+/* mark grid */
+.marks{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:14px}
+.mark-card{background:var(--page-card);border:1px solid var(--page-line);border-radius:14px;overflow:hidden;display:flex;flex-direction:column}
+.mark-tiles{display:grid;grid-template-columns:1fr 1fr}
+.tile{display:flex;align-items:center;justify-content:center;padding:16px 10px;height:112px}
+.tile.l{background:#f6f2ea}
+.tile.d{background:#141218}
+.icon-card{grid-column:1/-1}
+.icon-row{display:flex;flex-wrap:wrap;align-items:center;gap:22px;padding:22px}
+.icon-row.l{background:#f6f2ea}.icon-row.d{background:#141218}
+.icon-row .lab{font:11px var(--mono);color:#8f8a9a;margin-left:auto}
+.icon-rows{display:grid;grid-template-columns:1fr 1fr}
+@media (max-width:760px){.icon-rows{grid-template-columns:1fr}}
+.mark-meta{padding:12px 14px;display:flex;flex-direction:column;gap:4px;border-top:1px solid var(--page-line)}
+.mark-meta b{font-weight:600;font-size:14px}
+.mark-meta span{color:var(--page-muted);font-size:13px}
+.favs{display:flex;gap:10px;align-items:center;margin-top:6px}
+
+/* controls */
+.controls{display:flex;flex-wrap:wrap;gap:10px}
+.seg{display:inline-flex;background:var(--page-card);border:1px solid var(--page-line);border-radius:10px;padding:3px;gap:2px}
+.seg button{font:500 13px/1 var(--ui);color:var(--page-muted);background:none;border:0;border-radius:7px;padding:8px 12px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--page-ink);color:var(--page)}
+.seg button:focus-visible,.m button:focus-visible{outline:2px solid var(--violet);outline-offset:2px}
+
+.stage{position:relative;overflow-x:auto;border-radius:16px}
+.stage-inner{position:relative}
+.notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px 28px;color:var(--page-muted);font-size:14px}
+.notes div{display:flex;flex-direction:column;gap:2px}
+.notes b{color:var(--page-ink);font-weight:600}
+
+/* ============ MOCK ============ */
+.m{position:absolute;left:0;top:0;width:1280px;height:800px;transform-origin:0 0;display:grid;grid-template-columns:232px minmax(0,1fr) var(--agent-w,318px);font:13px/1.45 var(--ui);color:var(--ink);background:var(--canvas);overflow:hidden;border-radius:14px;border:1px solid var(--line);transition:grid-template-columns .22s ease}
+.m.light{--canvas:#e9e4da;--panel:#fbf8f2;--sunk:#f3efe7;--hover:#ede8de;--line:#e2dbce;--ink:#1f1b22;--muted:#756d72;--faint:#a8a09f;--accent:#5b3f99;--accent-ink:#fff;--accent-soft:#ece5f8;--good:#2f8a5b;--warn:#b07a1f;--glass:rgba(252,251,253,.72)}
+.m.dark{--canvas:#0b0a0e;--panel:#16141b;--sunk:#1b1821;--hover:#221f29;--line:#2a2631;--ink:#e9e6ef;--muted:#8e8899;--faint:#5f5a69;--accent:#b79ef0;--accent-ink:#17121f;--accent-soft:#2a2238;--good:#5fc28d;--warn:#e0a94a;--glass:rgba(24,21,30,.66)}
+.m.flush{--canvas:var(--panel)}
+.m.agent-off{--agent-w:44px}
+.m .ico{width:16px;height:16px;flex:none;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.m button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.m .mu{color:var(--muted)}
+
+/* layout skins */
+.m.floating{gap:8px;padding:8px 8px 8px 0}
+.m.floating .main,.m.floating .agent{background:var(--panel);border:1px solid var(--line);border-radius:12px}
+.m.floating .side{padding-left:8px}
+.m.flush .side{background:var(--sunk);border-right:1px solid var(--line)}
+.m.flush .main{background:var(--panel)}
+.m.flush .agent{background:var(--panel);border-left:1px solid var(--line)}
+
+/* sidebar */
+.side{display:flex;flex-direction:column;min-height:0;padding:12px 10px 10px}
+.brand{display:flex;align-items:center;padding:2px 4px 10px}
+.brand .ver{margin-left:auto;font-size:10px;color:var(--faint)}
+.quick{display:flex;gap:4px;padding:0 2px 12px}
+.qb{flex:1;height:32px;border-radius:9px;display:flex;align-items:center;justify-content:center;color:var(--muted);border:1px solid var(--line)!important;background:var(--panel)!important}
+.m.flush .qb{background:var(--panel)!important}
+.qb:hover{color:var(--ink)}
+.qb.on{color:var(--accent);background:var(--accent-soft)!important;border-color:transparent!important}
+.acc-wrap{flex:1;overflow:hidden;display:flex;flex-direction:column;gap:6px}
+.acc-h{display:flex;align-items:center;width:100%;gap:6px;padding:6px 8px;font:500 11px/1 var(--mono)!important;letter-spacing:.08em;text-transform:uppercase;color:var(--faint)!important;border-radius:7px}
+.acc-h:hover{color:var(--muted)!important}
+.acc-h .ico{width:12px;height:12px;margin-left:auto;transition:transform .2s}
+.acc:not(.open) .acc-h .ico{transform:rotate(-90deg)}
+.acc:not(.open) .acc-b{display:none}
+.acc-h .ct{margin-left:4px;color:var(--faint);letter-spacing:0}
+.acc-b{display:flex;flex-direction:column;gap:1px}
+.row{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;color:var(--ink);min-width:0}
+.row:hover{background:var(--hover)}
+.row.on{background:var(--accent-soft);color:var(--ink)}
+.row .ico{width:14px;height:14px;color:var(--muted)}
+.row.on .ico{color:var(--accent)}
+.row .t{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .meta{font:11px/1 var(--mono);color:var(--faint)}
+.badge{font:500 10.5px/1 var(--mono);padding:3px 6px;border-radius:99px;background:var(--accent);color:var(--accent-ink)}
+.badge.soft{background:var(--hover);color:var(--muted)}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--good);flex:none}
+.sep{height:1px;background:var(--line);margin:4px 8px}
+.foot{display:flex;gap:4px;padding-top:8px;border-top:1px solid var(--line)}
+.fb{width:34px;height:32px;border-radius:9px;display:flex;align-items:center;justify-content:center;color:var(--muted);position:relative}
+.fb:hover{background:var(--hover);color:var(--ink)}
+.fb.on{background:var(--accent-soft);color:var(--accent)}
+.fb .dot{position:absolute;top:7px;right:7px;width:5px;height:5px}
+.prof{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);padding:0 6px}
+.av{width:22px;height:22px;border-radius:50%;background:var(--accent-soft);color:var(--accent);font:600 11px/22px var(--ui);text-align:center}
+
+/* telemetry popover */
+.pop{position:absolute;left:14px;bottom:52px;width:276px;background:var(--glass);backdrop-filter:blur(16px) saturate(1.3);-webkit-backdrop-filter:blur(16px) saturate(1.3);border:1px solid var(--line);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:10px;box-shadow:0 18px 40px -18px rgba(20,10,40,.45);z-index:5}
+.pop[hidden]{display:none}
+.pop h4{font:500 10.5px/1 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--faint)}
+.kv{display:grid;grid-template-columns:1fr auto;gap:5px 10px;font-size:12px}
+.kv span:nth-child(even){font-family:var(--mono);font-size:11.5px;text-align:right;color:var(--muted)}
+.st{display:inline-flex;align-items:center;gap:5px}
+.st i{width:6px;height:6px;border-radius:50%;background:var(--good)}
+.st.w i{background:var(--warn)}
+.meter{height:4px;border-radius:4px;background:var(--hover);overflow:hidden}
+.meter b{display:block;height:100%;width:91%;background:var(--accent);border-radius:4px}
+
+/* main */
+.main{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
+.top{display:flex;align-items:center;gap:6px;padding:8px 10px;border-bottom:1px solid var(--line)}
+.nb{width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--muted)}
+.nb:hover{background:var(--hover);color:var(--ink)}
+.addr{flex:1;display:flex;align-items:center;gap:8px;height:30px;padding:0 10px;border-radius:9px;background:var(--sunk);color:var(--muted);font:12px var(--mono);border:1px solid transparent}
+.m.flush .addr{border-color:var(--line)}
+.addr b{color:var(--ink);font-weight:400}
+.addr .k{margin-left:auto;font-size:10.5px;color:var(--faint)}
+.tabs{display:flex;gap:2px;padding:6px 10px 0;border-bottom:1px solid var(--line)}
+.tab{padding:7px 11px 9px;font-size:12.5px;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px;display:flex;align-items:center;gap:6px}
+.tab.on{color:var(--ink);border-color:var(--accent)}
+.tab .n{font:10.5px var(--mono);color:var(--faint)}
+.body{flex:1;overflow:hidden;padding:18px 22px;display:flex;flex-direction:column;gap:14px;min-height:0}
+
+/* composer */
+.composer{padding:8px 14px 12px;display:flex;flex-direction:column;gap:6px}
+.cbox{display:flex;align-items:center;gap:6px;padding:5px 5px 5px 12px;border-radius:12px;border:1px solid var(--line);background:var(--panel);box-shadow:0 1px 0 rgba(0,0,0,.02)}
+.cbox .ph{flex:1;color:var(--faint);font-size:13.5px;padding:6px 0}
+.chip{display:inline-flex;align-items:center;gap:4px;font:11px var(--mono);color:var(--muted);padding:5px 7px;border-radius:7px}
+.chip:hover{background:var(--hover)}
+.chip .ico{width:11px;height:11px}
+.send{width:30px;height:30px;border-radius:9px;background:var(--accent)!important;color:var(--accent-ink)!important;display:flex;align-items:center;justify-content:center}
+.sugg{display:flex;gap:12px;padding:0 4px;font-size:11.5px;color:var(--faint)}
+.sugg button:hover{color:var(--muted)}
+
+/* home */
+.hello{display:flex;flex-direction:column;gap:6px;align-items:center;margin-top:46px}
+.hello h3{font:700 30px/1.15 var(--display)}
+.hello .date{font:11px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--faint)}
+.bigbar{width:640px;align-self:center;border-radius:16px;border:1px solid var(--line);background:var(--panel);padding:14px 14px 8px 16px;display:flex;flex-direction:column;gap:8px;box-shadow:0 10px 30px -20px rgba(40,20,80,.35)}
+.bigbar .ph{color:var(--faint);font-size:15px;display:flex;align-items:center;gap:10px}
+.bigbar .ph .k{margin-left:auto;font:10.5px var(--mono);border:1px solid var(--line);border-radius:6px;padding:3px 6px;color:var(--muted)}
+.bigbar .ctl{display:flex;align-items:center;gap:4px;margin-left:-6px}
+.bigbar .ctl .send{margin-left:auto;width:28px;height:28px}
+.cols{display:grid;grid-template-columns:1.35fr 1fr;gap:18px;width:760px;align-self:center;margin-top:8px}
+.colh{display:flex;align-items:center;gap:8px;font:500 10.5px/1 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--faint);padding:0 2px 8px}
+.colh a{margin-left:auto;letter-spacing:0;text-transform:none;color:var(--muted)}
+.dg{display:flex;gap:10px;padding:10px;border-radius:10px;align-items:flex-start}
+.dg:hover{background:var(--hover)}
+.dg .src{width:26px;height:26px;border-radius:8px;background:var(--sunk);display:flex;align-items:center;justify-content:center;color:var(--muted);flex:none;border:1px solid var(--line)}
+.dg .src .ico{width:13px;height:13px}
+.dg b{font-weight:500;display:block;font-size:13px}
+.dg small{font-size:11.5px;color:var(--muted)}
+.rs{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:9px}
+.rs:hover{background:var(--hover)}
+.rs .t{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rs .meta{font:11px var(--mono);color:var(--faint)}
+
+/* news */
+.story{display:grid;grid-template-columns:112px minmax(0,1fr);gap:16px;align-items:start;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+.thumb{height:86px;border-radius:9px;background-color:var(--accent-soft);background-image:radial-gradient(circle,var(--accent) 1.05px,transparent 1.5px);background-size:5px 5px;-webkit-mask-image:linear-gradient(135deg,#000 30%,rgba(0,0,0,.25));mask-image:linear-gradient(135deg,#000 30%,rgba(0,0,0,.25))}
+.thumb.b{background-size:6px 6px;-webkit-mask-image:radial-gradient(circle at 70% 40%,#000 20%,rgba(0,0,0,.2) 75%);mask-image:radial-gradient(circle at 70% 40%,#000 20%,rgba(0,0,0,.2) 75%)}
+.thumb.c{background-size:4px 4px;-webkit-mask-image:linear-gradient(180deg,#000,rgba(0,0,0,.15));mask-image:linear-gradient(180deg,#000,rgba(0,0,0,.15))}
+.story-c{display:flex;flex-direction:column;gap:6px;min-width:0}
+.story h5{margin:0;font:600 15px/1.3 var(--ui);text-wrap:balance}
+.story .line{display:flex;align-items:center;gap:8px;font:11px var(--mono);color:var(--faint)}
+.story .line .live{color:var(--warn)}
+.story .line .conf{margin-left:auto}
+.story ul{margin:0;padding-left:16px;color:var(--muted);font-size:12.5px;display:flex;flex-direction:column;gap:2px}
+.story-foot{display:flex;align-items:center;gap:10px;margin-top:4px;padding-top:10px;border-top:1px solid var(--line);min-width:0}
+.pills{display:flex;flex-wrap:nowrap;overflow:hidden;gap:5px;align-items:center;min-width:0;flex:1}
+.pill{font:11px/1 var(--mono);padding:5px 7px;border-radius:7px;background:var(--sunk);border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+.pill b{color:var(--ink);font-weight:500}
+.acts{display:flex;gap:2px;margin-left:auto;flex:none;font-size:12px;color:var(--muted)}
+.acts button{padding:5px 8px;border-radius:7px;white-space:nowrap}
+.acts button:hover{color:var(--accent);background:var(--hover)}
+.acts button.pri{color:var(--accent);font-weight:500}
+.conf{display:inline-flex;align-items:center;gap:6px}
+.conf i{display:inline-block;width:38px;height:4px;border-radius:4px;background:linear-gradient(90deg,var(--accent) var(--c),var(--hover) var(--c))}
+
+/* mail */
+.acct{display:flex;gap:6px;align-items:center}
+.acct .pill{border-radius:99px;padding:5px 10px;font-family:var(--ui);font-size:12px}
+.acct .pill.on{background:var(--ink);color:var(--panel);border-color:var(--ink)}
+.split{flex:1;display:grid;grid-template-columns:330px 1fr;min-height:0;border-top:1px solid var(--line);margin:0 -22px -18px}
+.list{border-right:1px solid var(--line);overflow:hidden;display:flex;flex-direction:column}
+.msg{padding:10px 14px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:2px}
+.msg.on{background:var(--accent-soft)}
+.msg .h{display:flex;gap:8px;align-items:center}
+.msg .h b{font-weight:600;font-size:12.5px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.msg .h .meta{font:10.5px var(--mono);color:var(--faint)}
+.msg .s{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.msg .p{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.msg.read b,.msg.read .s{font-weight:400;color:var(--muted)}
+.unr{width:6px;height:6px;border-radius:50%;background:var(--accent)}
+.read-pane{padding:18px 24px;display:flex;flex-direction:column;gap:12px;overflow:hidden}
+.read-pane h5{font:700 20px/1.25 var(--display)}
+.from{display:flex;align-items:center;gap:10px;font-size:12.5px}
+.from .av{width:30px;height:30px;line-height:30px;font-size:12px}
+.from .meta{margin-left:auto;font:11px var(--mono);color:var(--faint)}
+.mailbody{font-size:13.5px;line-height:1.6;max-width:62ch;display:flex;flex-direction:column;gap:10px}
+.extract{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:10px;background:var(--sunk);border:1px solid var(--line);font-size:12.5px;max-width:520px}
+.extract .ico{color:var(--accent)}
+.btn{font-size:12px!important;padding:6px 10px!important;border-radius:8px!important;border:1px solid var(--line)!important;background:var(--panel)!important}
+.btn.p{background:var(--accent)!important;color:var(--accent-ink)!important;border-color:transparent!important}
+.att{display:flex;gap:8px}
+.att .pill{display:flex;gap:6px;align-items:center;font-family:var(--ui);font-size:12px;padding:7px 10px}
+
+/* agent */
+.agent{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
+.ag-h{display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--line)}
+.ag-h .spark{width:28px;height:28px;border-radius:8px;background:var(--accent-soft);color:var(--accent);display:flex;align-items:center;justify-content:center;flex:none}
+.ag-h div{display:flex;flex-direction:column;min-width:0}
+.ag-h b{font-weight:600;font-size:13px}
+.ag-h small{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ag-h .nb{margin-left:auto}
+.ag-body{flex:1;padding:14px;display:flex;flex-direction:column;gap:12px;overflow:hidden;font-size:12.5px}
+.you{align-self:flex-end;background:var(--sunk);border:1px solid var(--line);padding:8px 11px;border-radius:12px 12px 4px 12px;max-width:88%}
+.bot{display:flex;flex-direction:column;gap:6px;line-height:1.55}
+.cite{font:10.5px var(--mono);color:var(--accent);background:var(--accent-soft);padding:1px 4px;border-radius:4px}
+.bot .srcs{display:flex;flex-direction:column;gap:3px;font-size:11.5px;color:var(--muted)}
+.draft{border:1px solid var(--line);border-radius:10px;padding:10px;background:var(--sunk);display:flex;flex-direction:column;gap:8px}
+.draft .acts2{display:flex;gap:6px}
+.ag-c{padding:10px}
+.ag-c .cbox{padding-left:10px}
+.ag-c .ph{font-size:12.5px}
+.ag-c .send{width:26px;height:26px}
+.agent .strip{display:none}
+.m.agent-off .agent>*:not(.strip){display:none}
+.m.agent-off .agent .strip{display:flex;flex-direction:column;align-items:center;gap:10px;padding:10px 0}
+.strip .spark{width:28px;height:28px;border-radius:8px;background:var(--accent-soft);color:var(--accent);display:flex;align-items:center;justify-content:center}
+.strip .vt{writing-mode:vertical-rl;font:500 10.5px var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--faint)}
+@media (prefers-reduced-motion: reduce){.m,.acc-h .ico{transition:none}}
+</style>
+
+<div class="wrap">
+  <header class="sheet">
+    <div>
+      <canvas data-word="back" data-h="46" data-theme="page"></canvas>
+      <h1>Interface studies · v0.6 direction · 18 Nov 2026</h1>
+      <p>V1 mark iterations plus two layout directions for Home, News and Mail, in light and dark. Telemetry moves out of the status bar and into a popover; the composer puts the prompt first; the agent panel folds to a strip.</p>
+    </div>
+    <div class="eyebrow">Satz browser · design working sheet</div>
+  </header>
+
+  <section>
+    <div class="sec-head"><div><div class="eyebrow">01 · Mark</div><h2>(S)atz: one word, the dither sits behind the S</h2></div></div>
+    <div class="marks" id="marks"></div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <div><div class="eyebrow">02 · Screens</div><h2 id="screen-title">Home</h2></div>
+      <div class="controls">
+        <div class="seg" role="group" aria-label="Screen">
+          <button id="sc-home" data-screen="home" aria-pressed="true">Home</button>
+          <button id="sc-news" data-screen="news" aria-pressed="false">News</button>
+          <button id="sc-mail" data-screen="mail" aria-pressed="false">Mail</button>
+        </div>
+        <div class="seg" role="group" aria-label="Layout">
+          <button id="ly-floating" data-layout="floating" aria-pressed="true">A · Floating</button>
+          <button id="ly-flush" data-layout="flush" aria-pressed="false">B · Flush</button>
+        </div>
+        <div class="seg" role="group" aria-label="Mode">
+          <button id="md-light" data-mode="light" aria-pressed="true">Light</button>
+          <button id="md-dark" data-mode="dark" aria-pressed="false">Dark</button>
+        </div>
+        <div class="seg" role="group" aria-label="Logo in sidebar">
+          <button id="lg-back" data-logo="back" aria-pressed="true">Backdrop</button>
+          <button id="lg-offset" data-logo="offset" aria-pressed="false">Offset</button>
+          <button id="lg-grain" data-logo="grain" aria-pressed="false">Fine grain</button>
+        </div>
+      </div>
+    </div>
+    <div class="stage" id="stage"><div class="stage-inner" id="stage-inner"></div></div>
+    <div class="notes">
+      <div><b>Status bar removed</b>Model, Gemma state, model roster, sources in context, KB queue and mail processing now live behind the pulse icon. A green dot on the icon stays visible when everything is healthy; it turns amber on errors.</div>
+      <div><b>Sidebar as accordion</b>Home, command bar and new conversation become three icons under the mark. Pinned (Mail, News, user pins), Conversations, Sources and Archived each collapse. Brain, settings and telemetry sit at the bottom.</div>
+      <div><b>Prompt first</b>The composer is one line: attach, prompt, model chip, send. Suggestions drop to a faint row below it and never wrap.</div>
+      <div><b>Agent on the side</b>The on-tab agent folds to a 44px strip. Click its header button or the strip to toggle. Home opens with it folded, News and Mail with it open.</div>
+      <div><b>A · Floating vs B · Flush</b>A floats main and agent as 12px-radius cards on a tinted canvas with the sidebar on the canvas. B runs edge to edge with hairlines, and keeps radius only on bars, inputs and chips.</div>
+      <div><b>Terminal heritage kept</b>Mono stays for data: timestamps, trust scores, counts, the address bar and shortcut hints. Labels like [open reader] become plain text actions.</div>
+    </div>
+  </section>
+</div>
+
+<script>
+(()=>{
+const ICONS={
+home:'<path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/>',
+cmd:'<path d="M9 6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3z"/>',
+compose:'<path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
+mail:'<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3.5 7 8.5 6 8.5-6"/>',
+news:'<path d="M4 5h13v14H6a2 2 0 0 1-2-2zM17 9h3v8a2 2 0 0 1-2 2M8 9h5M8 13h5"/>',
+pin:'<path d="M12 17v5M9 3h6l-1 7 4 3H6l4-3z"/>',
+chat:'<path d="M4 5h16v11H9l-5 4z"/>',
+brain:'<path d="M9 4a3 3 0 0 0-3 3 3 3 0 0 0-2 5 3 3 0 0 0 2 5 3 3 0 0 0 6 0V4zM15 4a3 3 0 0 1 3 3 3 3 0 0 1 2 5 3 3 0 0 1-2 5 3 3 0 0 1-6 0"/>',
+settings:'<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
+pulse:'<path d="M3 12h4l3-7 4 14 3-7h4"/>',
+chev:'<path d="m6 9 6 6 6-6"/>',
+back:'<path d="m15 6-6 6 6 6"/>',fwd:'<path d="m9 6 6 6-6 6"/>',
+reload:'<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/>',
+panel:'<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M15 5v14"/>',
+send:'<path d="M5 12h14M13 6l6 6-6 6"/>',
+globe:'<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+lock:'<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+spark:'<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/>',
+attach:'<path d="m21 11-8.5 8.5a5 5 0 0 1-7-7L14 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 7"/>',
+reply:'<path d="M9 14 4 9l5-5M4 9h10a6 6 0 0 1 6 6v4"/>',
+cal:'<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',
+doc:'<path d="M6 3h8l4 4v14H6zM14 3v4h4"/>',
+star:'<path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/>',
+box:'<path d="M3 7l9-4 9 4v10l-9 4-9-4zM3 7l9 4 9-4M12 11v10"/>',
+archive:'<rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10h14V9M10 13h4"/>'
+};
+const I=(n,c='')=>`<svg class="ico ${c}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n]}</svg>`;
+
+/* ---------- dithered mark ---------- */
+const B4=[0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5];
+const STOPS=['#3f2775','#5b3f99','#8466c2','#ad95de','#cdbdec','#ddd6e8','#e7e5eb'];
+const FONT=px=>`700 ${px}px Besley, Georgia, serif`;
+function dpr(){return Math.max(2,window.devicePixelRatio||1)}
+function dots(g,cx,cy,R,step){
+  const n=Math.ceil(2*R/step), x0=cx-R, y0=cy-R;
+  for(let gy=0;gy<n;gy++)for(let gx=0;gx<n;gx++){
+    const x=x0+(gx+.5)*step,y=y0+(gy+.5)*step,d=Math.hypot(x-cx,y-cy)/R;
+    if(d>.98)continue;
+    const u=((x-x0)+(y-y0))/(4*R);
+    const t=Math.min(1,Math.max(0,u*1.3-.28));
+    const v=t*(STOPS.length-1),i=Math.floor(v),f=v-i,th=(B4[(gy%4)*4+gx%4]+.5)/16;
+    let rad=step*.42; if(d>.9) rad*=1-(d-.9)*5;
+    g.fillStyle=STOPS[Math.min(STOPS.length-1,f>th?i+1:i)];
+    g.beginPath(); g.arc(x,y,Math.max(.35,rad),0,Math.PI*2); g.fill();
+  }
+}
+/* V1 iterations: disc geometry in cap-height units, relative to the S centre */
+const WORD={
+  back:  {R:1.02, ox:0,    oy:0,    grain:25, name:'Backdrop', desc:'Disc centred behind the S, about twice the cap height, so the S sits inside it. The word is set as one piece at normal spacing.'},
+  offset:{R:.92, ox:-.26, oy:-.24, grain:23, name:'Offset',   desc:'Disc rises up and left, so the S overhangs it like type set over a printed sun. Least overlap with the a.'},
+  grain: {R:1.12, ox:.02,  oy:0,    grain:36, name:'Fine grain',desc:'Larger disc with finer dots, so the dither reads as texture rather than pattern at sidebar size.'}
+};
+function drawWord(cv){
+  const v=WORD[cv.dataset.word], fs=+cv.dataset.h;
+  let theme=cv.dataset.theme;
+  if(theme==='page') theme=document.documentElement.dataset.theme==='dark'||(!document.documentElement.dataset.theme&&matchMedia('(prefers-color-scheme: dark)').matches)?'d':'l';
+  const sc=document.createElement('canvas').getContext('2d'); sc.font=FONT(fs);
+  const mS=sc.measureText('S'), W=sc.measureText('Satz').width, wA=sc.measureText('atz').width;
+  const capH=mS.actualBoundingBoxAscent, desc=sc.measureText('Satz').actualBoundingBoxDescent;
+  const R=v.R*capH, sw=mS.width;
+  const discDx=sw/2+v.ox*capH, discDy=-capH/2+v.oy*capH; // from (x0, baseline)
+  const x0=Math.max(2,R-discDx+2), base=Math.max(capH+2,R-discDy+2);
+  const w=Math.ceil(x0+W+3), h=Math.ceil(Math.max(base+desc, base+discDy+R)+2);
+  const k=dpr(); cv.width=w*k; cv.height=h*k; cv.style.width=w+'px'; cv.style.height=h+'px';
+  const g=cv.getContext('2d'); g.setTransform(k,0,0,k,0,0); g.clearRect(0,0,w,h);
+  dots(g,x0+discDx,base+discDy,R,Math.max(1.3,2*R/v.grain));
+  g.font=FONT(fs); g.textBaseline='alphabetic'; g.lineJoin='round';
+  g.globalCompositeOperation='destination-out'; g.lineWidth=Math.max(1.4,fs*.08);
+  const ax=x0+W-wA; g.strokeText('atz',ax,base);
+  if(theme==='l'){ g.strokeText('S',x0,base); }
+  g.globalCompositeOperation='source-over';
+  g.fillStyle=theme==='l'?'#1f1b22':'#f4f1f8';
+  g.fillText('Satz',x0,base);
+}
+function drawIcon(cv){
+  const px=+cv.dataset.px, tile=cv.dataset.icon==='tile', k=dpr();
+  cv.width=px*k; cv.height=px*k; cv.style.width=px+'px'; cv.style.height=px+'px';
+  const g=cv.getContext('2d'); g.setTransform(k,0,0,k,0,0); g.clearRect(0,0,px,px);
+  const c=px/2; let R=c;
+  if(tile){ g.fillStyle='#141218'; g.beginPath(); g.roundRect(0,0,px,px,px*.23); g.fill(); R=px*.39; }
+  dots(g,c,c,R,Math.max(1.2,2*R/(px<24?11:21)));
+  const fs=R*1.42; g.font=FONT(fs); g.textAlign='center'; g.textBaseline='alphabetic';
+  const m=g.measureText('S'); g.fillStyle='#ffffff';
+  g.fillText('S',c,c+(m.actualBoundingBoxAscent-m.actualBoundingBoxDescent)/2);
+}
+document.getElementById('marks').innerHTML=Object.entries(WORD).map(([k,v])=>`
+ <div class="mark-card">
+  <div class="mark-tiles"><div class="tile l"><canvas data-word="${k}" data-h="42" data-theme="l"></canvas></div><div class="tile d"><canvas data-word="${k}" data-h="42" data-theme="d"></canvas></div></div>
+  <div class="mark-meta"><b>${v.name}</b><span>${v.desc}</span>
+   <div class="favs"><canvas data-word="${k}" data-h="20" data-theme="page"></canvas><span class="mono" style="font-size:11px;color:var(--page-muted)">sidebar size · 20px</span></div></div>
+ </div>`).join('')+`
+ <div class="mark-card icon-card">
+  <div class="icon-rows">
+   <div class="icon-row l">${[16,24,32,48,64].map(p=>`<canvas data-icon="round" data-px="${p}"></canvas>`).join('')}<canvas data-icon="tile" data-px="64"></canvas><span class="lab">16 · 24 · 32 · 48 · 64 · app tile</span></div>
+   <div class="icon-row d">${[16,24,32,48,64].map(p=>`<canvas data-icon="round" data-px="${p}"></canvas>`).join('')}<canvas data-icon="tile" data-px="64"></canvas><span class="lab">on dark</span></div>
+  </div>
+  <div class="mark-meta"><b>Icon</b><span>The disc on its own with a solid white S, no outline. Favicon, dock and the collapsed sidebar use this. Below 24px the dots get coarser so the gradient still reads.</span></div>
+ </div>`;
+function renderMarks(root=document){
+  root.querySelectorAll('canvas[data-word]').forEach(drawWord);
+  root.querySelectorAll('canvas[data-icon]').forEach(drawIcon);
+}
+
+/* ---------- mock ---------- */
+const S={screen:'home',layout:'floating',mode:'light',logo:'back',agent:{home:false,news:true,mail:true},pop:true,acc:{pinned:true,convs:true,sources:false,archived:false}};
+
+function side(){
+ const a=S.screen;
+ const acc=(id,label,ct,body)=>`<div class="acc ${S.acc[id]?'open':''}" data-acc="${id}"><button class="acc-h" data-acc-toggle="${id}">${label}<span class="ct">${ct}</span>${I('chev')}</button><div class="acc-b">${body}</div></div>`;
+ return `<aside class="side">
+  <div class="brand"><canvas data-word="${S.logo}" data-h="22" data-theme="${S.mode==='dark'?'d':'l'}"></canvas><span class="ver mono">0.6</span></div>
+  <div class="quick">
+   <button class="qb ${a==='home'?'on':''}" title="Home ⇧⌘H">${I('home')}</button>
+   <button class="qb" title="Command bar ⌘K">${I('cmd')}</button>
+   <button class="qb" title="New conversation ⌘N">${I('compose')}</button>
+  </div>
+  <div class="acc-wrap">
+   ${acc('pinned','Pinned','4',`
+    <div class="row ${a==='mail'?'on':''}">${I('mail')}<span class="t">Mail</span><span class="badge">12</span></div>
+    <div class="row ${a==='news'?'on':''}">${I('news')}<span class="t">News</span><span class="badge soft">4 new</span></div>
+    <div class="sep"></div>
+    <div class="row">${I('pin')}<span class="t">Berlin flat search</span><span class="meta">6 src</span></div>
+    <div class="row">${I('pin')}<span class="t">Planck 3 reading list</span><span class="meta">11 src</span></div>`)}
+   ${acc('convs','Conversations','5',`
+    <div class="row">${I('chat')}<span class="t">Compare induction hobs</span><span class="meta">2h</span></div>
+    <div class="row">${I('chat')}<span class="t">Steuererklärung Q&amp;A</span><span class="meta">5h</span></div>
+    <div class="row">${I('chat')}<span class="t">EU AI Act, what changes in 2027</span><span class="meta">1d</span></div>
+    <div class="row">${I('chat')}<span class="t">Lisbon trip, December</span><span class="meta">2d</span></div>
+    <div class="row">${I('chat')}<span class="t">Rust lifetimes in the sidecar</span><span class="meta">3d</span></div>`)}
+   ${acc('sources','Sources','3',`
+    <div class="row">${I('star')}<span class="t">arxiv.org/list/cs.CL</span><span class="meta">synced</span></div>
+    <div class="row">${I('star')}<span class="t">dw.com/en</span><span class="meta">synced</span></div>
+    <div class="row">${I('star')}<span class="t">news.ycombinator.com</span><span class="meta">2h</span></div>`)}
+   ${acc('archived','Archived','14',`<div class="row">${I('archive')}<span class="t">Show 14 archived</span></div>`)}
+  </div>
+  <div class="foot">
+   <button class="fb" title="Brain ⌘B">${I('brain')}</button>
+   <button class="fb" title="Settings">${I('settings')}</button>
+   <button class="fb ${S.pop?'on':''}" data-pop title="Telemetry">${I('pulse')}<i class="dot"></i></button>
+   <span class="prof"><span class="av">N</span>Nikita</span>
+  </div>
+ </aside>`;
+}
+function pop(){return `<div class="pop" ${S.pop?'':'hidden'}>
+  <div><h4>Model</h4></div>
+  <div class="kv"><span>Active</span><span>gemma-4-e4b</span><span>Gemma</span><span class="st"><i></i>warm · gpu</span><span>Privacy</span><span>on-device</span></div>
+  <h4>Models</h4>
+  <div class="kv"><span>x-hertz</span><span class="st"><i></i>ready</span><span>x-planck</span><span class="st"><i></i>ready</span><span>gemini · anthropic</span><span class="st"><i></i>keys ok</span><span>mistral</span><span class="st w"><i></i>no key</span></div>
+  <h4>Context</h4>
+  <div class="kv"><span>Sources in context</span><span>14</span><span>KB queue</span><span>3</span><span>Mail processing</span><span>182 / 200</span></div>
+  <div class="meter"><b></b></div>
+  <div class="kv"><span>Sidecar log</span><span>0 errors</span></div>
+ </div>`}
+function top(addr,icon='globe'){return `<div class="top">
+  <button class="nb">${I('back')}</button><button class="nb">${I('fwd')}</button><button class="nb">${I('reload')}</button>
+  <div class="addr">${I(icon)}<b>${addr}</b><span class="k">⌘L</span></div>
+ </div>`}
+function composer(ph,sugg){return `<div class="composer">
+  <div class="cbox"><span class="ph">${ph}</span><button class="chip">${I('attach')}</button><button class="chip">gemma-4 · local ${I('chev')}</button><button class="send">${I('send')}</button></div>
+  <div class="sugg">${sugg.map(s=>`<button>${s}</button>`).join('')}</div>
+ </div>`}
+function agent(title,sub,body,ph){return `<aside class="agent">
+  <div class="ag-h"><span class="spark">${I('spark')}</span><div><b>${title}</b><small>${sub}</small></div><button class="nb" data-agent title="Fold agent">${I('panel')}</button></div>
+  <div class="ag-body">${body}</div>
+  <div class="ag-c"><div class="cbox"><span class="ph">${ph}</span><button class="send">${I('send')}</button></div></div>
+  <div class="strip"><button class="spark" data-agent title="Open agent">${I('spark')}</button><span class="vt">On-tab agent</span></div>
+ </aside>`}
+
+const SCREENS={
+home:()=>`<section class="main">${top('satz://home','home')}
+  <div class="body">
+   <div class="hello"><span class="date">Wednesday · 18 Nov</span><h3>Where do you want to start?</h3></div>
+   <div class="bigbar">
+    <div class="ph">${I('cmd')}url, question, mail: term, brain: term, or a command<span class="k">⌘K</span></div>
+    <div class="ctl"><button class="chip">${I('attach')} tab</button><button class="chip">gemma-4 · local ${I('chev')}</button><span class="sugg" style="padding:0 6px"><button>today's top stories</button><button>summarize unread</button></span><button class="send">${I('send')}</button></div>
+   </div>
+   <div class="cols">
+    <div><div class="colh">For you<a>refresh</a></div>
+     <div class="dg"><span class="src">${I('mail')}</span><div><b>DB refund of €38.90 approved</b><small>orders lane · Deutsche Bahn · 2h</small></div></div>
+     <div class="dg"><span class="src">${I('news')}</span><div><b>EU grid operators agree on shared winter reserve</b><small>3 source families · conf 7.8 · matches "energy policy"</small></div></div>
+     <div class="dg"><span class="src">${I('star')}</span><div><b>cs.CL listing updated, 4 papers match your Brain</b><small>arxiv.org · bookmarked source · 40m</small></div></div>
+     <div class="dg"><span class="src">${I('mail')}</span><div><b>Heating maintenance on 24 Nov, be home 08:00 to 12:00</b><small>inbox · Hausverwaltung · action needed</small></div></div>
+    </div>
+    <div><div class="colh">Resume<a>all</a></div>
+     <div class="rs">${I('chat')}<span class="t">Compare induction hobs</span><span class="meta">4 tabs</span></div>
+     <div class="rs">${I('pin')}<span class="t">Berlin flat search</span><span class="meta">6 src</span></div>
+     <div class="rs">${I('chat')}<span class="t">Steuererklärung Q&amp;A</span><span class="meta">5h</span></div>
+     <div class="rs">${I('chat')}<span class="t">EU AI Act, what changes in 2027</span><span class="meta">1d</span></div>
+    </div>
+   </div>
+  </div></section>
+  ${agent('On this tab','Home · nothing open yet','<div class="mu">Open a page and the agent reads it here.</div>','Ask about this tab')}`,
+
+news:()=>`<section class="main">${top('satz://news','news')}
+  <div class="tabs"><span class="tab">Chat</span><span class="tab on">Top stories <span class="n">12</span></span><span class="tab">For you <span class="n">4</span></span><span class="tab">Perspectives</span><span class="tab">Topics</span><span class="tab">Sources <span class="n">86</span></span></div>
+  <div class="body">
+   <div class="story"><div class="thumb"></div><div class="story-c">
+     <div class="line"><span class="live">developing · 40m</span><span>energy · EU</span><span class="conf">conf 7.8 <i style="--c:78%"></i></span></div>
+     <h5>EU grid operators agree on a shared winter reserve for cross-border shortfalls</h5>
+     <ul><li>ENTSO-E members pool 4.2 GW of standby capacity through March.</li><li>Germany and France disagree on who pays for idle reserve.</li></ul>
+     <div class="story-foot"><div class="pills"><span class="pill"><b>dw.com</b> 8.4</span><span class="pill"><b>reuters.com</b> 8.9</span><span class="pill" title="lemonde.fr 8.1 · fr">+1</span></div>
+      <span class="acts"><button class="pri">Open reader</button><button>Perspectives (3)</button><button>Save</button><button aria-label="More actions">···</button></span></div>
+   </div></div>
+   <div class="story"><div class="thumb b"></div><div class="story-c">
+     <div class="line"><span>2h</span><span>transport · Berlin</span><span class="conf">conf 8.6 <i style="--c:86%"></i></span></div>
+     <h5>BVG confirms U8 night service returns from 1 December</h5>
+     <ul><li>Weekend 24h service resumes after track works between Hermannplatz and Leinestraße.</li></ul>
+     <div class="story-foot"><div class="pills"><span class="pill"><b>rbb24.de</b> 8.2 · de</span><span class="pill" title="tagesspiegel.de 7.9 · de">+1</span></div>
+      <span class="acts"><button class="pri">Open reader</button><button>Translate de→en</button><button>Save</button><button aria-label="More actions">···</button></span></div>
+   </div></div>
+   <div class="story"><div class="thumb c"></div><div class="story-c">
+     <div class="line"><span>5h</span><span>AI · policy</span><span class="conf">conf 6.9 <i style="--c:69%"></i></span></div>
+     <h5>Commission publishes draft code of practice for general-purpose models</h5>
+     <ul><li>Single source family so far; system-only confidence shown alongside yours.</li></ul>
+     <div class="story-foot"><div class="pills"><span class="pill"><b>euractiv.com</b> 7.4</span></div>
+      <span class="acts"><button class="pri">Open reader</button><button>Ask in chat</button><button aria-label="More actions">···</button></span></div>
+   </div></div>
+  </div>
+  ${composer('Ask about today\'s news',['compare perspectives','what changed since this morning?','only Berlin'])}</section>
+  ${agent('On this tab','Top stories · 3 families read',`
+   <div class="you">Where do Germany and France actually disagree on the reserve?</div>
+   <div class="bot"><span>The split is over cost allocation. Germany wants idle capacity paid pro rata by peak demand <span class="cite">1</span>; France argues exporters should carry more of it because they draw it most in cold snaps <span class="cite">3</span>. Both accept the 4.2 GW size <span class="cite">1</span><span class="cite">2</span>.</span>
+    <div class="srcs"><span>1 · dw.com · 8.4</span><span>2 · reuters.com · 8.9</span><span>3 · lemonde.fr · 8.1 · translated</span></div></div>`,'Ask about these stories')}`,
+
+mail:()=>`<section class="main">${top('satz://mail/inbox','lock')}
+  <div class="tabs"><span class="tab">Chat</span><span class="tab on">Inbox <span class="n">12</span></span><span class="tab">Pings <span class="n">31</span></span><span class="tab">Orders <span class="n">3</span></span><span class="tab">Promos <span class="n">58</span></span></div>
+  <div class="body">
+   <div class="acct"><span class="pill on">All mail</span><span class="pill">Personal</span><span class="pill">Studio</span><span class="mu mono" style="margin-left:auto;font-size:11px">synced 3m ago</span></div>
+   <div class="split">
+    <div class="list">
+     <div class="msg on"><div class="h"><i class="unr"></i><b>Hausverwaltung Kranz</b><span class="meta">09:12</span></div><div class="s">Heating maintenance on 24 Nov</div><div class="p">Dear tenants, our technician will service the boilers in all units…</div></div>
+     <div class="msg"><div class="h"><i class="unr"></i><b>Deutsche Bahn</b><span class="meta">08:40</span></div><div class="s">Your refund request was approved</div><div class="p">We have approved €38.90 for ICE 597 on 12 Nov…</div></div>
+     <div class="msg"><div class="h"><i class="unr"></i><b>Lena Vogt</b><span class="meta">Tue</span></div><div class="s">Lisbon: flights for 12 Dec?</div><div class="p">Found a direct one from BER at 07:05, want me to hold seats…</div></div>
+     <div class="msg read"><div class="h"><b>Finanzamt Berlin</b><span class="meta">Mon</span></div><div class="s">Eingangsbestätigung Ihrer Erklärung</div><div class="p">Ihre Einkommensteuererklärung 2025 ist eingegangen…</div></div>
+     <div class="msg read"><div class="h"><b>Studio calendar</b><span class="meta">Mon</span></div><div class="s">Moved: design review to Thu 14:00</div><div class="p">The design review was moved by the organiser…</div></div>
+     <div class="msg read"><div class="h"><b>Kiezgarten e.V.</b><span class="meta">Sun</span></div><div class="s">Winter planting day, volunteers wanted</div><div class="p">We need six people on Saturday morning to cover the beds…</div></div>
+    </div>
+    <div class="read-pane">
+     <h5>Heating maintenance on 24 Nov</h5>
+     <div class="from"><span class="av">HK</span><div><b>Hausverwaltung Kranz</b><div class="mu" style="font-size:11.5px">to all tenants · Personal</div></div><span class="meta">Wed 18 Nov · 09:12</span></div>
+     <div class="extract">${I('cal')}<span><b>Action:</b> be home Tue 24 Nov, 08:00 to 12:00</span><button class="btn p" style="margin-left:auto">Add to calendar</button></div>
+     <div class="mailbody"><p>Dear tenants,</p><p>our technician will service the gas boilers in all units on Tuesday, 24 November, between 08:00 and 12:00. Please make sure the boiler cupboard is reachable. If you cannot be home, leave a key with a neighbour and reply with their flat number.</p><p>Kind regards,<br>Hausverwaltung Kranz</p></div>
+     <div class="att"><span class="pill">${I('doc')} Wartungsplan_2026.pdf · 84 KB</span></div>
+     <div style="display:flex;gap:6px"><button class="btn">${''}Reply</button><button class="btn">Forward</button><button class="btn">Archive</button></div>
+    </div>
+   </div>
+  </div></section>
+  ${agent('On this tab','Inbox · message 1 of 12',`
+   <div class="you">Draft a reply to <span class="cite">1</span>, I'll be at work, key with Frau Weber in 2B.</div>
+   <div class="bot"><span class="mu">Draft · sends only after you press Send</span>
+    <div class="draft"><span>Hallo,<br>ich bin am 24.11. leider nicht zu Hause. Der Schlüssel liegt bei Frau Weber, Wohnung 2B.<br>Viele Grüße</span>
+     <div class="acts2"><button class="btn p">Send</button><button class="btn">Edit</button><button class="btn">In English</button></div></div></div>`,'Ask about this email')}`
+};
+
+const inner=document.getElementById('stage-inner'), stage=document.getElementById('stage');
+function render(){
+ const off=!S.agent[S.screen];
+ inner.innerHTML=`<div class="m ${S.mode} ${S.layout} ${off?'agent-off':''}" id="mock">${side()}${SCREENS[S.screen]()}${pop()}</div>`;
+ document.getElementById('screen-title').textContent={home:'Home',news:'News',mail:'Mail'}[S.screen];
+ renderMarks(inner); fit();
+}
+function fit(){
+ const m=document.getElementById('mock'); if(!m)return;
+ const s=Math.max(.5,Math.min(1,stage.clientWidth/1280));
+ m.style.transform=`scale(${s})`; inner.style.width=(1280*s)+'px'; inner.style.height=(800*s)+'px';
+}
+document.querySelectorAll('.seg button').forEach(b=>b.addEventListener('click',()=>{
+ const k=['screen','layout','mode','logo'].find(k=>b.dataset[k]); S[k]=b.dataset[k];
+ b.parentElement.querySelectorAll('button').forEach(x=>x.setAttribute('aria-pressed',x===b));
+ render();
+}));
+inner.addEventListener('click',e=>{
+ const t=e.target.closest('[data-acc-toggle],[data-pop],[data-agent]'); if(!t)return;
+ if(t.dataset.accToggle){S.acc[t.dataset.accToggle]=!S.acc[t.dataset.accToggle];}
+ else if(t.hasAttribute('data-pop')){S.pop=!S.pop;}
+ else {S.agent[S.screen]=!S.agent[S.screen];}
+ render();
+});
+window.addEventListener('resize',fit);
+
+/* default mode follows the page theme */
+const dark=document.documentElement.dataset.theme==='dark'||(!document.documentElement.dataset.theme&&matchMedia('(prefers-color-scheme: dark)').matches);
+if(dark){S.mode='dark';document.getElementById('md-dark').setAttribute('aria-pressed','true');document.getElementById('md-light').setAttribute('aria-pressed','false');}
+Promise.all([document.fonts.load('700 40px Besley'),document.fonts.load('400 13px Inter')]).finally(()=>{renderMarks();render();});
+render(); renderMarks();
+new MutationObserver(()=>document.querySelectorAll('canvas[data-theme="page"]').forEach(drawWord)).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+})();
+</script>
