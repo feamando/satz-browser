@@ -1,3 +1,4 @@
+import { icon } from "./design-system/icons";
 import {
   escapeHtml,
   extractDomain,
@@ -77,7 +78,7 @@ export function renderChatPanel(
 
   const existingInput = container.querySelector(
     "#chat-composer-input"
-  ) as HTMLInputElement | null;
+  ) as HTMLTextAreaElement | HTMLInputElement | null;
   const wasFocused =
     Boolean(existingInput) && document.activeElement === existingInput;
   const preservedValue = existingInput?.value ?? "";
@@ -95,12 +96,12 @@ export function renderChatPanel(
     convStream?.status || "request in progress...";
 
   const offlineNotice = !state.sidecar.online
-    ? "models [offline] - browser tabs work normally; start sidecar for local chat"
+    ? "Sidecar offline — start runtime to ask"
     : isStreamingHere
-      ? `[in progress: ${statusLineText}]`
+      ? statusLineText
       : activeTabSources.length > 0
-        ? `ask over ${activeTabSources.length} open tab${activeTabSources.length === 1 ? "" : "s"} in context or type a question_`
-        : "ask a question or open a tab [+] to add context_";
+        ? `Ask about ${activeTabSources.length} open tab${activeTabSources.length === 1 ? "" : "s"} or type a question...`
+        : "Ask anything, or open a tab to include it in context...";
 
   const readableTabSources = activeTabSources.filter((s) => s.textChars > 0);
   const allOpenTabsEmpty =
@@ -109,88 +110,79 @@ export function renderChatPanel(
   const emptyContextBannerHtml =
     allOpenTabsEmpty && !state.webSearchEnabled && !isStreamingHere
       ? `
-        <div class="composer-context-row">
-          <span class="muted">no readable page in context ·</span>
-          <button id="chat-recapture-all-btn" class="citation-link">[recapture]</button>
-          <button id="chat-enable-web-banner-btn" class="citation-link">[turn on + web]</button>
-          <span class="muted">[ask without pages]</span>
+        <div class="composer-ctx-warn">
+          <span>No readable page text captured yet.</span>
+          <button id="chat-recapture-all-btn" class="btn-text" type="button">Recapture</button>
+          <button id="chat-enable-web-banner-btn" class="btn-text" type="button">Enable web search</button>
         </div>
       `
       : "";
 
+  const visibleContextSources =
+    state.composerContextExpanded || activeTabSources.length <= 2
+      ? activeTabSources
+      : activeTabSources.slice(0, 2);
+  const collapsedExtraCount =
+    !state.composerContextExpanded && activeTabSources.length > 2
+      ? activeTabSources.length - 2
+      : 0;
+
+  const renderContextPillHtml = (item: (typeof activeTabSources)[number]) => {
+    const stat = state.sourceStats[item.sourceId];
+    const charsCaptured = stat?.chars_captured ?? item.textChars;
+    const captureMode = stat?.capture_mode ?? item.captureMode;
+    const isEmpty = charsCaptured === 0;
+    const isActive = state.activeTabId === item.tab.id;
+    const modeLabel = captureMode === "fetch" ? " · public fetch" : "";
+    const cutLabel = stat?.was_cut ? " · cut" : "";
+    const tooltipText = isEmpty
+      ? `${item.title} (${item.url}) — empty capture`
+      : captureMode === "fetch"
+        ? `Captured from public URL (${charsCaptured.toLocaleString()} chars)${modeLabel}${cutLabel}`
+        : `${item.title} (${item.url}) — ${charsCaptured.toLocaleString()} chars${modeLabel}${cutLabel}`;
+
+    return `
+      <div
+        class="pill ${isActive ? "accent" : ""} ${isEmpty ? "muted" : ""}"
+        data-pill-tab-id="${escapeHtml(item.tab.id)}"
+        title="${escapeHtml(tooltipText)}"
+      >
+        <span>${isEmpty ? "—" : `[${item.citeIndex ?? item.index}]`}</span>
+        <span class="truncate">${escapeHtml(item.domain)}${isEmpty ? " · empty" : ""}</span>
+        ${
+          isEmpty
+            ? `<button class="btn-text" type="button" data-pill-recapture-tab-id="${escapeHtml(item.tab.id)}" title="Recapture page">Retry</button>`
+            : ""
+        }
+        <button
+          class="composer-pill-close"
+          type="button"
+          data-pill-close-tab-id="${escapeHtml(item.tab.id)}"
+          title="Close tab and remove from context"
+        >${icon("x", "ico-sm")}</button>
+      </div>
+    `;
+  };
+
   const contextPillsHtml =
     activeTabSources.length === 0
-      ? `
-        <div class="composer-context-row">
-          <span class="muted">context (0 tabs):</span>
-          <div class="composer-context-pills">
-            <span class="muted">open tabs are automatically added to chat context</span>
-            <button id="chat-context-add-tab-btn" class="context-add-btn">[+ open tab]</button>
-          </div>
-        </div>
-      `
+      ? ""
       : `
-        <div class="composer-context-row">
-          <span class="muted">context (${readableTabSources.length}/${activeTabSources.length}):</span>
-          <div class="composer-context-pills">
-            ${activeTabSources
-              .map((item) => {
-                const stat = state.sourceStats[item.sourceId];
-                const charsCaptured = stat?.chars_captured ?? item.textChars;
-                const captureMode = stat?.capture_mode ?? item.captureMode;
-                if (charsCaptured === 0) {
-                  return `
-              <div
-                class="context-pill muted ${state.activeTabId === item.tab.id ? "active" : ""}"
-                data-pill-tab-id="${escapeHtml(item.tab.id)}"
-                title="${escapeHtml(item.title)} (${escapeHtml(item.url)}) - empty capture (excluded from prompt)"
-              >
-                <span class="truncate">${escapeHtml(item.domain)} · ${escapeHtml(item.title.slice(0, 18))} · empty</span>
-                <button
-                  class="citation-link"
-                  data-pill-recapture-tab-id="${escapeHtml(item.tab.id)}"
-                  title="recapture live DOM from this tab"
-                >[recapture]</button>
-                <button
-                  class="tab-close-btn"
-                  data-pill-close-tab-id="${escapeHtml(item.tab.id)}"
-                  title="close tab and remove from context"
-                >x</button>
-              </div>
-            `;
-                }
-                const modeLabel =
-                  captureMode === "fetch" ? " · public fetch" : "";
-                const cutLabel = stat?.was_cut ? " [cut]" : "";
-                const charsLabel = ` · ${charsCaptured.toLocaleString()}c${cutLabel}`;
-                const tooltipText =
-                  captureMode === "fetch"
-                    ? `captured from public URL, not your logged-in tab (${charsCaptured.toLocaleString()} chars)`
-                    : `${item.title} (${item.url}) - ${charsCaptured.toLocaleString()} chars${cutLabel}`;
-                return `
-              <div
-                class="context-pill ${state.activeTabId === item.tab.id ? "active" : ""}"
-                data-pill-tab-id="${escapeHtml(item.tab.id)}"
-                title="${escapeHtml(tooltipText)}"
-              >
-                <span class="muted">[${item.citeIndex ?? item.index}]</span>
-                <span class="truncate">${escapeHtml(item.domain)} · ${escapeHtml(item.title.slice(0, 20))}${escapeHtml(modeLabel)}${escapeHtml(charsLabel)}</span>
-                <button
-                  class="tab-close-btn"
-                  data-pill-close-tab-id="${escapeHtml(item.tab.id)}"
-                  title="close tab and remove from context"
-                >x</button>
-              </div>
-            `;
-              })
-              .join("")}
-            <button id="chat-context-add-tab-btn" class="context-add-btn" title="open a new tab to add to context">[+ tab]</button>
-            ${
-              activeTabSources.length >= 2
-                ? `<button id="chat-compare-these-btn" class="context-add-btn" title="run Comparer agent across open tabs">[compare these]</button>`
+        <div class="composer-ctx">
+          ${visibleContextSources.map(renderContextPillHtml).join("")}
+          ${
+            collapsedExtraCount > 0
+              ? `<button id="chat-context-expand-btn" class="pill" type="button">+${collapsedExtraCount} more</button>`
+              : activeTabSources.length > 2
+                ? `<button id="chat-context-expand-btn" class="pill" type="button">Show fewer</button>`
                 : ""
-            }
-          </div>
+          }
+          <button id="chat-context-add-tab-btn" class="pill" type="button" title="Open a new tab to add context">${icon("plus", "ico-sm")}<span>Tab</span></button>
+          ${
+            activeTabSources.length >= 2
+              ? `<button id="chat-compare-these-btn" class="pill" type="button" title="Run Comparer agent across open tabs">${icon("compare", "ico-sm")}<span>Compare</span></button>`
+              : ""
+          }
         </div>
         ${emptyContextBannerHtml}
       `;
@@ -209,21 +201,19 @@ export function renderChatPanel(
   const mailSuggestionsHtml =
     isMailConv && !isStreamingHere
       ? `
-        <div class="composer-controls">
-          <span class="muted">suggestions:</span>
-          <button class="citation-link" data-chat-suggest="what do I need to deal with today?">[what do I need to deal with today?]</button>
-          <button class="citation-link" data-chat-suggest="summarize unread">[summarize unread]</button>
-          <button class="citation-link" data-chat-suggest="draft a reply to [1]">[draft a reply to [1]]</button>
+        <div class="sugg">
+          <button class="pill" type="button" data-chat-suggest="what do I need to deal with today?">What needs attention today?</button>
+          <button class="pill" type="button" data-chat-suggest="summarize unread">Summarize unread</button>
+          <button class="pill" type="button" data-chat-suggest="draft a reply to [1]">Draft reply to [1]</button>
         </div>
       `
       : isNewsConv && !isStreamingHere
         ? `
-        <div class="composer-controls">
-          <span class="muted">news suggestions:</span>
-          <button class="citation-link" data-chat-suggest="What are today's top corroborated European news stories?">[today's top stories]</button>
-          <button class="citation-link" data-chat-suggest="Compare perspectives on current global energy & grid policy news">[compare perspectives]</button>
-          <button class="citation-link" data-news-jump-lane="stories">[open top stories lane]</button>
-          <button class="citation-link" data-news-jump-lane="foryou">[open for you]</button>
+        <div class="sugg">
+          <button class="pill" type="button" data-chat-suggest="What are today's top corroborated European news stories?">Top European stories</button>
+          <button class="pill" type="button" data-chat-suggest="Compare perspectives on current global energy &amp; grid policy news">Compare perspectives</button>
+          <button class="pill" type="button" data-news-jump-lane="stories">Top stories lane</button>
+          <button class="pill" type="button" data-news-jump-lane="foryou">For you</button>
         </div>
       `
         : "";
@@ -295,45 +285,98 @@ export function renderChatPanel(
         }
       </div>
 
-      <div class="chat-composer">
-        ${contextPillsHtml}
+      <div class="composer">
         ${mailSuggestionsHtml}
-        <div class="composer-input-row">
-          <span class="muted">&gt;</span>
-          <input
+        <div class="cbox">
+          ${contextPillsHtml}
+          <textarea
             id="chat-composer-input"
-            class="composer-input"
-            type="text"
+            class="cbox-input"
+            rows="1"
             spellcheck="false"
             autocorrect="off"
             autocapitalize="off"
             placeholder="${escapeHtml(offlineNotice)}"
             ${isStreamingHere ? "disabled" : ""}
-          />
-          <span class="caret-blink">▌</span>
-          <button id="chat-send-btn" ${isStreamingHere ? "disabled" : ""}>${isStreamingHere ? "[in progress...]" : "[send]"}</button>
-        </div>
-
-        <div class="composer-meta-row">
-          <span class="composer-status-label" title="${escapeHtml(getModelPrivacySummary(state.selectedModel))}">${state.sidecar.online ? "models [ok]" : "models [offline]"} · ${escapeHtml(getModelPrivacySummary(state.selectedModel))}</span>
-          <div class="composer-controls">
-            <label class="muted">model:</label>
-            <select id="chat-model-select">
-              ${getAvailableModelsForPicker()
-                .map(
-                  (m) => `
-                <option value="${escapeHtml(m.id)}" ${state.selectedModel === m.id ? "selected" : ""}>
-                  ${escapeHtml(m.label)}
-                </option>
-              `
-                )
-                .join("")}
-            </select>
-            <button id="chat-web-toggle" class="${state.webSearchEnabled ? "active" : ""}" title="enable live web_search &amp; fetch_webpage tools for cloud and local models">
-              web: ${state.webSearchEnabled ? "on" : "off"}
-            </button>
-            <button id="chat-mail-toggle" class="${mailEffectiveOn ? "active" : ""}" title="include top 5 FTS matches from mail.sqlite as sources">
-              mail: ${mailEffectiveOn ? "on" : "off"}
+          ></textarea>
+          <div class="cbox-foot">
+            <div class="chips">
+              <div class="model-chip-anchor">
+                ${(() => {
+                  const models = getAvailableModelsForPicker();
+                  const cur = models.find((m) => m.id === state.selectedModel);
+                  const curLabel = cur?.label || state.selectedModel;
+                  const privacyNote = getModelPrivacySummary(state.selectedModel);
+                  return `
+                    <button
+                      id="chat-model-chip"
+                      class="chip"
+                      type="button"
+                      title="${escapeHtml(privacyNote)}"
+                      aria-expanded="${state.composerModelMenuOpen ? "true" : "false"}"
+                    >
+                      ${icon("spark", "ico-sm")}
+                      <span class="truncate">${escapeHtml(curLabel)}</span>
+                      ${icon("chev", "ico-sm")}
+                    </button>
+                    ${
+                      state.composerModelMenuOpen
+                        ? `
+                          <div class="menu" id="chat-model-menu" role="menu">
+                            <div class="model-menu-note">${escapeHtml(privacyNote)}</div>
+                            ${models
+                              .map(
+                                (m) => `
+                              <button
+                                type="button"
+                                class="menu-item ${state.selectedModel === m.id ? "active" : ""}"
+                                data-select-model="${escapeHtml(m.id)}"
+                              >
+                                <span class="truncate">${escapeHtml(m.label)}</span>
+                                ${state.selectedModel === m.id ? icon("check", "ico-sm") : ""}
+                              </button>
+                            `
+                              )
+                              .join("")}
+                          </div>
+                        `
+                        : ""
+                    }
+                  `;
+                })()}
+              </div>
+              <button
+                id="chat-web-toggle"
+                type="button"
+                class="chip ${state.webSearchEnabled ? "on" : ""}"
+                title="Enable live web_search and fetch_webpage tools"
+              >
+                ${icon("globe", "ico-sm")}
+                <span>Web</span>
+              </button>
+              <button
+                id="chat-mail-toggle"
+                type="button"
+                class="chip ${mailEffectiveOn ? "on" : ""}"
+                title="Include Mail matches in context"
+              >
+                ${icon("mail", "ico-sm")}
+                <span>Mail</span>
+              </button>
+              ${
+                activeTabSources.length === 0
+                  ? `<button id="chat-context-add-tab-btn" type="button" class="chip" title="Open a new tab to add to context">${icon("plus", "ico-sm")}<span>Tab</span></button>`
+                  : ""
+              }
+            </div>
+            <button
+              id="chat-send-btn"
+              type="button"
+              class="send ${isStreamingHere ? "stop" : ""}"
+              ${isStreamingHere ? "disabled" : ""}
+              title="${isStreamingHere ? "Generation in progress" : "Send message (Enter)"}"
+            >
+              ${isStreamingHere ? `<span class="stop-sq"></span>` : icon("send", "ico-sm")}
             </button>
           </div>
         </div>
@@ -365,7 +408,7 @@ export function renderChatPanel(
   if (preservedValue || wasFocused) {
     const nextInput = container.querySelector(
       "#chat-composer-input"
-    ) as HTMLInputElement | null;
+    ) as HTMLTextAreaElement | HTMLInputElement | null;
     if (nextInput) {
       nextInput.value = preservedValue;
       if (wasFocused) {
@@ -1194,28 +1237,57 @@ export function formatCitationsInText(
 function bindChatEvents(container: HTMLElement, actions: ChatActions): void {
   const input = container.querySelector(
     "#chat-composer-input"
-  ) as HTMLInputElement | null;
+  ) as HTMLTextAreaElement | HTMLInputElement | null;
   const submit = () => {
     const val = input?.value.trim() ?? "";
     if (!val || isConvStreaming(state.activeDetail?.conversation.id)) return;
     if (input) input.value = "";
+    state.composerModelMenuOpen = false;
     actions.onSendMessage(val);
   };
 
   input?.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
+    const ke = e as KeyboardEvent;
+    if (ke.key === "Enter" && !ke.shiftKey) {
+      ke.preventDefault();
       submit();
     }
   });
 
+  if (input && input.tagName.toLowerCase() === "textarea") {
+    const resizeTa = () => {
+      input.style.height = "auto";
+      input.style.height = `${Math.min(140, input.scrollHeight)}px`;
+    };
+    resizeTa();
+    input.addEventListener("input", resizeTa);
+  }
+
   container.querySelector("#chat-send-btn")?.addEventListener("click", submit);
 
-  const modelSelect = container.querySelector(
-    "#chat-model-select"
-  ) as HTMLSelectElement | null;
-  modelSelect?.addEventListener("change", () => {
-    actions.onChangeModel(modelSelect.value as LocalModelId);
+  container
+    .querySelector("#chat-context-expand-btn")
+    ?.addEventListener("click", () => {
+      state.composerContextExpanded = !state.composerContextExpanded;
+      renderChatPanel(container, actions);
+    });
+
+  container
+    .querySelector("#chat-model-chip")
+    ?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      state.composerModelMenuOpen = !state.composerModelMenuOpen;
+      renderChatPanel(container, actions);
+    });
+
+  container.querySelectorAll("[data-select-model]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const mId = (btn as HTMLElement).getAttribute("data-select-model");
+      state.composerModelMenuOpen = false;
+      if (mId) {
+        actions.onChangeModel(mId as LocalModelId);
+      }
+    });
   });
 
   container

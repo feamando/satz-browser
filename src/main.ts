@@ -472,6 +472,11 @@ async function initApp(): Promise<void> {
         renderRailRegion();
         return;
       }
+      if (state.composerModelMenuOpen) {
+        state.composerModelMenuOpen = false;
+        refreshChatContextIfVisible();
+        return;
+      }
       if (state.showErrorLog) {
         state.showErrorLog = false;
         renderStatusLine();
@@ -540,6 +545,13 @@ async function initApp(): Promise<void> {
     ) {
       state.openCodesPopoverTabId = null;
       changed = true;
+    }
+    if (
+      state.composerModelMenuOpen &&
+      !target.closest(".model-chip-anchor")
+    ) {
+      state.composerModelMenuOpen = false;
+      refreshChatContextIfVisible();
     }
     if (changed) {
       renderAllRegions();

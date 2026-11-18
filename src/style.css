@@ -46,8 +46,8 @@ select {
 }
 
 :where(
-  input:not(.input, .address-input),
-  textarea,
+  input:not(.input, .address-input, .cbox-input),
+  textarea:not(.cbox-input),
   select,
   button:not(
     .seg > button,
@@ -62,6 +62,7 @@ select {
     .send,
     .tab,
     .tab-close-btn,
+    .composer-pill-close,
     .addr-trigger,
     .pill,
     .badge
@@ -72,8 +73,8 @@ select {
   border-radius: 0;
 }
 
-input:not(.input, .address-input):focus,
-textarea:focus,
+input:not(.input, .address-input, .cbox-input):focus,
+textarea:not(.cbox-input):focus,
 select:focus {
   border-color: var(--fg);
 }
@@ -92,6 +93,7 @@ select:focus {
     .send,
     .tab,
     .tab-close-btn,
+    .composer-pill-close,
     .addr-trigger,
     .pill,
     .badge
@@ -116,6 +118,7 @@ select:focus {
     .send,
     .tab,
     .tab-close-btn,
+    .composer-pill-close,
     .addr-trigger,
     .pill,
     .badge
@@ -138,6 +141,7 @@ select:focus {
     .send,
     .tab,
     .tab-close-btn,
+    .composer-pill-close,
     .addr-trigger,
     .pill,
     .badge
@@ -560,6 +564,137 @@ select:focus {
   background: var(--line);
   margin: 0 2px;
   flex-shrink: 0;
+}
+
+/* v0.7 D4 Composer Helpers */
+.composer .cbox {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+}
+
+.composer-ctx {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-bottom: 8px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+
+.composer-ctx-warn {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 2px 0 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.composer-pill-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  padding: 1px;
+  border-radius: 4px;
+  opacity: 0.65;
+  cursor: pointer;
+}
+
+.composer-pill-close:hover {
+  opacity: 1;
+  background: var(--hover);
+}
+
+.cbox-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.cbox-foot .chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+  flex: 1;
+}
+
+.model-chip-anchor {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.model-chip-anchor .chip {
+  max-width: 190px;
+}
+
+#chat-model-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  min-width: 260px;
+  max-width: min(340px, 85vw);
+  max-height: 280px;
+  overflow-y: auto;
+  z-index: 65;
+}
+
+#chat-model-menu .model-menu-note {
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 2px;
+}
+
+#chat-model-menu .menu-item {
+  justify-content: space-between;
+}
+
+.cbox .cbox-input {
+  width: 100%;
+  resize: none;
+  border: none;
+  background: transparent;
+  padding: 2px 0;
+  min-height: 24px;
+  max-height: 140px;
+  overflow-y: auto;
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.cbox .cbox-input::placeholder {
+  color: var(--faint);
+}
+
+.cbox .send .stop-sq {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: currentColor;
+  display: block;
+}
+
+#region-agent .composer {
+  padding: 8px 10px;
+}
+
+#region-agent .sugg {
+  padding: 0 10px 6px;
 }
 
 /* App Shell */

@@ -175,6 +175,8 @@ export interface AppState {
   railAccordion: Record<RailAccordionKey, boolean>;
   telemetryOpen: boolean;
   profileMenuOpen: boolean;
+  composerModelMenuOpen: boolean;
+  composerContextExpanded: boolean;
   showKnowledgeView: boolean;
   showBrainView: boolean;
   commandBarOpen: boolean;
@@ -327,6 +329,8 @@ export const state: AppState = {
   railAccordion: getRailAccordionPref(),
   telemetryOpen: false,
   profileMenuOpen: false,
+  composerModelMenuOpen: false,
+  composerContextExpanded: false,
   showKnowledgeView: false,
   showBrainView: false,
   commandBarOpen: false,

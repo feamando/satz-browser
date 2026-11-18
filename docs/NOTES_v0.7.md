@@ -43,3 +43,12 @@ Plan: `docs/PLAN_v0.7_design_system.md` · Spec: `docs/design/DESIGN_SYSTEM.md` 
   - During D3–D5, Mail account selector pills (`All mail` + accounts) remain in `#region-tab-strip` without `[brackets]` until D6 moves account selection into `.acct-bar` inside `src/mail.ts`.
   - `#region-top` hides (`display: none`) on Home, Settings, and Brain views so each surface leads cleanly with its own header.
 - **Checks:** `npm run build` passed; `cargo check --manifest-path src-tauri/Cargo.toml` passed; `python -m pytest sidecar -q` (`42 passed`); 12 screenshots verified under `docs/smoke/v0.7/d3/windows/` with `0` console errors.
+
+### D4 · Unified composer, model menu & context pills
+- **Files:** `src/chat.ts`, `src/state.ts`, `src/main.ts`, `src/style.css`
+- **What changed:**
+  - Refactored the Chat / Agent-rail composer (`src/chat.ts`) into v1 `.composer` with suggestion chips `.sugg` and stacked `.cbox` (`composer-ctx`, borderless auto-resizing `<textarea id="chat-composer-input" class="cbox-input">`, `.cbox-foot`).
+  - Collapsed composer context `.pill` items past 2 behind `#chat-context-expand-btn` (`+N more` / `Show fewer`), tracking state in `state.composerContextExpanded` (`src/state.ts`).
+  - Replaced the legacy `<select>` and `.composer-meta-row` with `#chat-model-chip` `.chip`, `#chat-model-menu` `.menu` (`[data-select-model]`, `state.composerModelMenuOpen`, outside-click / `Escape` dismissal in `src/main.ts`), `Web` / `Mail` `.chip.on` toggles, and circular `.send` / `.send.stop` (`#chat-send-btn`) inside `.cbox-foot`.
+  - Added `.cbox` flex-column stacking, `.composer-ctx`, `.cbox-foot`, `.model-chip-anchor`, and `:where(...)` exclusions for `.cbox-input` and `.composer-pill-close` in `src/style.css`.
+- **Checks:** `npm run build` passed; `cargo check --manifest-path src-tauri/Cargo.toml` passed; `python -m pytest sidecar -q` (`42 passed`); Besley 700 + Inter 400 loaded with `0` console errors; 12 screenshots verified under `docs/smoke/v0.7/d4/windows/`.
