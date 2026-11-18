@@ -489,6 +489,13 @@ async function initApp(): Promise<void> {
         refreshChatContextIfVisible();
         return;
       }
+      if (state.newsStoryMenuId !== null) {
+        state.newsStoryMenuId = null;
+        if (state.activeTabId.startsWith("news-lane:")) {
+          renderViewportRegion();
+        }
+        return;
+      }
       if (state.showErrorLog) {
         state.showErrorLog = false;
         renderStatusLine();
@@ -564,6 +571,15 @@ async function initApp(): Promise<void> {
     ) {
       state.composerModelMenuOpen = false;
       refreshChatContextIfVisible();
+    }
+    if (
+      state.newsStoryMenuId !== null &&
+      !target.closest(".story-more-anchor")
+    ) {
+      state.newsStoryMenuId = null;
+      if (state.activeTabId.startsWith("news-lane:")) {
+        renderViewportRegion();
+      }
     }
     if (
       state.commandModelMenuOpen !== null &&

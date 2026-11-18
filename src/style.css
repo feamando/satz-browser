@@ -2358,6 +2358,134 @@ select:not(.select):focus {
   resize: vertical;
 }
 
+/* ── D7 News ─────────────────────────────────────────────────────────────── */
+
+.news-view {
+  width: 100%;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: var(--sp-6) var(--sp-8) var(--sp-8);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+}
+
+.view-h > .end.news-head-actions,
+.news-head-actions {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.news-story-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.story.no-thumb {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.story-more-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+.story-more-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  min-width: 190px;
+  z-index: 65;
+}
+
+@media (max-width: 1080px) {
+  .story-foot > .pills > .pill:nth-child(n + 2):not([data-news-expand-fams]) {
+    display: none;
+  }
+}
+
+.story-foot > .pills.expanded {
+  flex-wrap: wrap;
+  overflow: visible;
+}
+
+.story-foot > .pills.expanded > .pill {
+  display: inline-flex;
+}
+
+.news-card-list,
+.reader-body,
+.persp-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.persp-card ul {
+  margin: 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.persp-bullets {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: var(--fs-sm);
+}
+
+.persp-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.reader-card > .reader {
+  margin: var(--sp-2) auto 0;
+  width: 100%;
+}
+
+.reader-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.news-src-checks {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.news-src-rss-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: 4px;
+  font-size: var(--fs-xs);
+  color: var(--faint);
+}
+
+.news-src-rss-row > .truncate {
+  flex: 1;
+  min-width: 0;
+}
+
+
 
 
 

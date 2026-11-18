@@ -313,6 +313,7 @@ export interface AppState {
   newsStatusMessage: string;
   newsReaderArticleId: string | null;
   newsReaderShowOriginal: boolean;
+  newsStoryMenuId: string | null;
   messageAnswerMeta: Record<string, AnswerMeta>;
   expandedExplainMessages: Record<string, boolean>;
   expandedInDepthMessages: Record<string, boolean>;
@@ -459,6 +460,7 @@ export const state: AppState = {
   newsStatusMessage: "",
   newsReaderArticleId: null,
   newsReaderShowOriginal: false,
+  newsStoryMenuId: null,
   messageAnswerMeta: {},
   expandedExplainMessages: {},
   expandedInDepthMessages: {},

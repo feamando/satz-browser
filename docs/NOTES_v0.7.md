@@ -72,3 +72,11 @@ Plan: `docs/PLAN_v0.7_design_system.md` · Spec: `docs/design/DESIGN_SYSTEM.md` 
 - **Deviations / Notes:**
   - Because `sidecar/satz_mail.py` injects a legacy terminal `<style>` block (`#000000` / `#e8e8e8`), `buildMailIframeSrcdoc` appends a computed theme override `<style>` block inside `srcdoc` rather than altering sidecar HTML sanitization tests.
 - **Checks:** `npm run build` passed; `cargo check --manifest-path src-tauri/Cargo.toml` passed; `python -m pytest sidecar -q` (`42 passed`); Besley 700 + Inter 400 loaded with `0` console errors; 12 screenshots verified (`05`, `06` visually checked) under `docs/smoke/v0.7/d6/windows/`.
+
+### D7 · News story cards, perspectives, reader, topics & sources
+- **Files:** `src/news.ts`, `src/state.ts`, `src/main.ts`, `src/style.css`
+- **What changed:**
+  - Migrated News story cards (`src/news.ts`) to v1 `.story` grid (`DESIGN_SYSTEM.md` §5.14) with full-color `.story-thumb`, `.story-meta` + `.conf` bar (`--c` percentage + `.conf.low`), `.story-title`, max-3 bullet `ul`, `.story-match` with `.flag`, and single-line `.story-foot` (up to 2 family `.pill`s + expandable `+N`, 3 primary actions `Open reader` / next best action / `Save`, and overflow `more` `.menu` managed via `state.newsStoryMenuId` with Escape and outside-click dismissal in `src/main.ts`).
+  - Migrated Perspectives lane to `.persp-grid` with computed `style="--cols:${gridCols};"`, Reader overlay to `.card` + `.reader`, Topics to `.source-row` + `.form-row`, and Sources trust registry to `.table-wrap > .table` with `.slider-row` / `.slider` displaying system-only trust alongside personal sliders and effective trust (`30%` max blend).
+  - Removed all 6 non-computed inline `style=` attributes, hex colors, grayscale thumbnail filters, and bracket button copy from `src/news.ts`.
+- **Checks:** `npm run build` passed; `cargo check --manifest-path src-tauri/Cargo.toml` passed; `python -m pytest sidecar -q` (`42 passed`); Besley 700 + Inter 400 loaded with `0` console errors; 12 screenshots verified (`03`, `04` visually checked) under `docs/smoke/v0.7/d7/windows/`.
