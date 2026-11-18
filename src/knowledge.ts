@@ -1,3 +1,4 @@
+import { icon } from "./design-system/icons";
 import {
   bindMailAccountsEvents,
   renderMailAccountsSectionHtml,
@@ -143,8 +144,14 @@ export function renderKnowledgeView(
   const roleNewsAnalyzer = modelCfg?.roles?.news_analyzer ?? roleChat;
   const cloudSummaryBadge =
     configuredCloudProviders.length > 0
-      ? `[cloud: ${configuredCloudProviders.map((p) => `${p.id} (${(p.models ?? []).length})`).join(" · ")}]`
-      : "[local only · 0 cloud providers configured]";
+      ? `Cloud: ${configuredCloudProviders.map((p) => `${p.id} (${(p.models ?? []).length})`).join(" · ")}`
+      : "Local only · 0 cloud providers";
+
+  const renderBanner = (msg: string): string => {
+    const low = msg.toLowerCase();
+    const cls = low.includes("error") || low.includes("failed") ? "banner danger" : "banner";
+    return `<div class="${cls}">${escapeHtml(msg)}</div>`;
+  };
 
   const renderCloudOptionsHtml = (selectedRoleVal: string) =>
     discoveredCloudModels
@@ -155,450 +162,490 @@ export function renderKnowledgeView(
       .join("");
 
   const doctorSectionHtml = `
-      <div class="knowledge-section">
-        <div class="panel-header accordion-header" data-settings-accordion="models">
-          <span>[${acc.models ? "-" : "+"}] 1. model management &amp; cloud setup (local /doctor + gemini · anthropic · openai · mistral)</span>
-          <span class="muted">${escapeHtml(cloudSummaryBadge)}</span>
+      <div class="card kb-acc-card acc ${acc.models ? "open" : ""}">
+        <div class="settings-acc-bar">
+          <button type="button" class="acc-h" data-settings-accordion="models">
+            <span>1. Model management &amp; cloud setup</span>
+            <span class="ct">${escapeHtml(cloudSummaryBadge)}</span>
+            ${icon("chev", "ico-sm")}
+          </button>
         </div>
         ${
           !acc.models
             ? ""
             : `
-          <div class="kb-card">
-            <div class="kb-card-header">
-              <span><strong>role routing matrix</strong> (which model handles each browser task · cloud models pulled live from configured provider APIs)</span>
-              <span class="muted">mail classifier &amp; brain encoder stay 100% local</span>
+          <div class="acc-b section">
+            <div class="card inset">
+              <div class="card-h">
+                <b>Role routing matrix</b>
+                <span class="end muted">Mail classifier &amp; Brain encoder stay 100% local</span>
+              </div>
+              <div class="form-row">
+                <div class="kb-form-field">
+                  <label for="kb-role-chat-select">Chat &amp; synthesis</label>
+                  <select id="kb-role-chat-select" class="select">
+                    <option value="gemma-4-e4b" ${roleChat === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local · default)</option>
+                    ${renderCloudOptionsHtml(roleChat)}
+                  </select>
+                </div>
+                <div class="kb-form-field">
+                  <label for="kb-role-web-select">Web answer</label>
+                  <select id="kb-role-web-select" class="select">
+                    <option value="planck3 (web)" ${roleWeb === "planck3 (web)" ? "selected" : ""}>planck3 (local read→weigh→write)</option>
+                    ${renderCloudOptionsHtml(roleWeb)}
+                  </select>
+                </div>
+                <div class="kb-form-field">
+                  <label for="kb-role-reader-select">Page reader</label>
+                  <select id="kb-role-reader-select" class="select">
+                    <option value="hertz (reader)" ${roleReader === "hertz (reader)" ? "selected" : ""}>hertz 1.2 (local extractive)</option>
+                    <option value="planck (reader)" ${roleReader === "planck (reader)" ? "selected" : ""}>planck (local extractive)</option>
+                    <option value="gemma-4-e4b" ${roleReader === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local generative)</option>
+                    ${renderCloudOptionsHtml(roleReader)}
+                  </select>
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="kb-form-field">
+                  <label for="kb-role-news-planner-select">News planner</label>
+                  <select id="kb-role-news-planner-select" class="select">
+                    <option value="gemma-4-e4b" ${roleNewsPlanner === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local · default)</option>
+                    ${renderCloudOptionsHtml(roleNewsPlanner)}
+                  </select>
+                </div>
+                <div class="kb-form-field">
+                  <label for="kb-role-news-capture-select">News translate</label>
+                  <select id="kb-role-news-capture-select" class="select">
+                    <option value="gemma-4-e4b" ${roleNewsCapture === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local · default)</option>
+                    ${renderCloudOptionsHtml(roleNewsCapture)}
+                  </select>
+                </div>
+                <div class="kb-form-field">
+                  <label for="kb-role-news-reader-select">News reader (trust-blind)</label>
+                  <select id="kb-role-news-reader-select" class="select">
+                    <option value="hertz (reader)" ${roleNewsReader === "hertz (reader)" ? "selected" : ""}>hertz 1.2 (local int8)</option>
+                    <option value="planck (reader)" ${roleNewsReader === "planck (reader)" ? "selected" : ""}>planck (local reader)</option>
+                    <option value="heuristic" ${roleNewsReader === "heuristic" ? "selected" : ""}>heuristic lexical</option>
+                    <option value="gemma-4-e4b" ${roleNewsReader === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local)</option>
+                    ${renderCloudOptionsHtml(roleNewsReader)}
+                  </select>
+                </div>
+                <div class="kb-form-field">
+                  <label for="kb-role-news-analyzer-select">News analyzer</label>
+                  <select id="kb-role-news-analyzer-select" class="select">
+                    <option value="gemma-4-e4b" ${roleNewsAnalyzer === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local)</option>
+                    <option value="template" ${roleNewsAnalyzer === "template" ? "selected" : ""}>template extractive</option>
+                    ${renderCloudOptionsHtml(roleNewsAnalyzer)}
+                  </select>
+                </div>
+                <button id="kb-save-roles-btn" type="button" class="btn primary">Apply role routing</button>
+              </div>
             </div>
-            <div class="vault-form-row">
-              <label class="muted">chat &amp; synthesis:</label>
-              <select id="kb-role-chat-select" class="vault-input">
-                <option value="gemma-4-e4b" ${roleChat === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local · default)</option>
-                ${renderCloudOptionsHtml(roleChat)}
-              </select>
-              <label class="muted">web answer (+web):</label>
-              <select id="kb-role-web-select" class="vault-input">
-                <option value="planck3 (web)" ${roleWeb === "planck3 (web)" ? "selected" : ""}>planck3 (local read->weigh->write)</option>
-                ${renderCloudOptionsHtml(roleWeb)}
-              </select>
-              <label class="muted">page reader:</label>
-              <select id="kb-role-reader-select" class="vault-input">
-                <option value="hertz (reader)" ${roleReader === "hertz (reader)" ? "selected" : ""}>hertz 1.2 (local extractive reader)</option>
-                <option value="planck (reader)" ${roleReader === "planck (reader)" ? "selected" : ""}>planck (local extractive reader)</option>
-                <option value="gemma-4-e4b" ${roleReader === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local generative)</option>
-                ${renderCloudOptionsHtml(roleReader)}
-              </select>
-              <button id="kb-save-roles-btn">[apply role routing]</button>
-            </div>
-            <div class="vault-form-row" style="margin-top:6px;">
-              <label class="muted">news planner:</label>
-              <select id="kb-role-news-planner-select" class="vault-input">
-                <option value="gemma-4-e4b" ${roleNewsPlanner === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local · default)</option>
-                ${renderCloudOptionsHtml(roleNewsPlanner)}
-              </select>
-              <label class="muted">news capture/translate:</label>
-              <select id="kb-role-news-capture-select" class="vault-input">
-                <option value="gemma-4-e4b" ${roleNewsCapture === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local · default)</option>
-                ${renderCloudOptionsHtml(roleNewsCapture)}
-              </select>
-              <label class="muted">news reader (trust-blind):</label>
-              <select id="kb-role-news-reader-select" class="vault-input">
-                <option value="hertz (reader)" ${roleNewsReader === "hertz (reader)" ? "selected" : ""}>hertz 1.2 (local int8 · default)</option>
-                <option value="planck (reader)" ${roleNewsReader === "planck (reader)" ? "selected" : ""}>planck (local reader)</option>
-                <option value="heuristic" ${roleNewsReader === "heuristic" ? "selected" : ""}>heuristic lexical (0 model)</option>
-                <option value="gemma-4-e4b" ${roleNewsReader === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local)</option>
-                ${renderCloudOptionsHtml(roleNewsReader)}
-              </select>
-              <label class="muted">news analyzer:</label>
-              <select id="kb-role-news-analyzer-select" class="vault-input">
-                <option value="gemma-4-e4b" ${roleNewsAnalyzer === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local)</option>
-                <option value="template" ${roleNewsAnalyzer === "template" ? "selected" : ""}>template extractive (0 LLM)</option>
-                ${renderCloudOptionsHtml(roleNewsAnalyzer)}
-              </select>
-            </div>
-          </div>
 
-          ${
-            state.modelConfigStatusMsg
-              ? `<div class="profile-status-banner">${escapeHtml(state.modelConfigStatusMsg)}</div>`
-              : ""
-          }
+            ${state.modelConfigStatusMsg ? renderBanner(state.modelConfigStatusMsg) : ""}
 
-          <div class="rail-group-label">
-            <span>cloud model providers (models discovered dynamically from each provider's /models endpoint)</span>
-          </div>
-          ${cloudProviders
-            .map((p) => {
-              const envKey = p.env_key ?? `${p.id.toUpperCase()}_API_KEY`;
-              const modelsList = p.models ?? [];
-              const modelsCount = modelsList.length;
-              const storedKey = p.stored_key ?? "";
-              return `
-                <div class="kb-card">
-                  <div class="kb-card-header">
-                    <span><strong>${escapeHtml(p.label)}</strong> <span class="muted">(${escapeHtml(envKey)} · ${escapeHtml(p.host ?? "")})</span></span>
-                    <span class="status-item">${
-                      p.configured
-                        ? `[configured in ${escapeHtml(p.key_source ?? "vault.enc")} · ${escapeHtml(p.masked_key || "***")} · ${modelsCount} models]`
-                        : "[not configured]"
-                    }</span>
-                  </div>
-                  <div class="muted">${escapeHtml(p.privacy_disclosure)}</div>
-                  <div class="vault-form-row">
-                    <input
-                      data-cloud-key-input="${escapeHtml(p.id)}"
-                      class="vault-input"
-                      type="password"
-                      spellcheck="false"
-                      autocorrect="off"
-                      autocapitalize="off"
-                      value="${escapeHtml(storedKey)}"
-                      placeholder="paste ${escapeHtml(envKey)} (${escapeHtml(p.placeholder ?? "api key")})_"
-                    />
-                    <button data-cloud-toggle-vis="${escapeHtml(p.id)}" type="button">[show key]</button>
-                    <button data-cloud-save-key="${escapeHtml(p.id)}" type="button">[${p.configured ? "update key &amp; pull models" : "save key &amp; pull models"}]</button>
-                    <button data-cloud-refresh-models="${escapeHtml(p.id)}" type="button">[refresh models from api]</button>
+            <div class="label">Cloud model providers (models discovered from /models)</div>
+            ${cloudProviders
+              .map((p) => {
+                const envKey = p.env_key ?? `${p.id.toUpperCase()}_API_KEY`;
+                const modelsList = p.models ?? [];
+                const modelsCount = modelsList.length;
+                const storedKey = p.stored_key ?? "";
+                return `
+                  <div class="card inset">
+                    <div class="card-h">
+                      <b>${escapeHtml(p.label)}</b>
+                      <span class="muted">${escapeHtml(envKey)} · ${escapeHtml(p.host ?? "")}</span>
+                      <span class="end badge ${p.configured ? "" : "soft"}">${
+                        p.configured
+                          ? `${escapeHtml(p.key_source ?? "vault")} · ${escapeHtml(p.masked_key || "***")} · ${modelsCount} models`
+                          : "Not configured"
+                      }</span>
+                    </div>
+                    <div class="muted">${escapeHtml(p.privacy_disclosure)}</div>
+                    <div class="form-row">
+                      <input
+                        data-cloud-key-input="${escapeHtml(p.id)}"
+                        class="input"
+                        type="password"
+                        spellcheck="false"
+                        autocorrect="off"
+                        autocapitalize="off"
+                        value="${escapeHtml(storedKey)}"
+                        placeholder="Paste ${escapeHtml(envKey)} (${escapeHtml(p.placeholder ?? "api key")})"
+                      />
+                      <button data-cloud-toggle-vis="${escapeHtml(p.id)}" type="button" class="btn">Show key</button>
+                      <button data-cloud-save-key="${escapeHtml(p.id)}" type="button" class="btn primary">${p.configured ? "Update & pull models" : "Save & pull models"}</button>
+                      <button data-cloud-refresh-models="${escapeHtml(p.id)}" type="button" class="btn">Refresh models</button>
+                      ${
+                        p.configured || storedKey
+                          ? `<button data-cloud-clear-key="${escapeHtml(p.id)}" type="button" class="btn danger">Delete key</button>`
+                          : ""
+                      }
+                    </div>
                     ${
-                      p.configured || storedKey
-                        ? `<button data-cloud-clear-key="${escapeHtml(p.id)}" type="button">[delete key]</button>`
-                        : ""
+                      modelsCount > 0
+                        ? `
+                          <div class="form-row">
+                            <span class="muted">Discovered (${modelsCount})</span>
+                            <select data-cloud-model-picker="${escapeHtml(p.id)}" class="select">
+                              ${modelsList
+                                .map(
+                                  (m) =>
+                                    `<option value="${escapeHtml(m.id)}" ${roleChat === m.id ? "selected" : ""}>${escapeHtml(m.label || m.slug)} · ${escapeHtml(m.id)}</option>`
+                                )
+                                .join("")}
+                            </select>
+                            <button data-cloud-use-model="${escapeHtml(p.id)}" type="button" class="btn">Use as chat model</button>
+                          </div>
+                        `
+                        : `<div class="muted">${
+                            p.configured
+                              ? "0 models cached. Click Refresh models to query /models."
+                              : "Paste your API key above and click Save & pull models to discover available models."
+                          }</div>`
                     }
                   </div>
-                  ${
-                    modelsCount > 0
-                      ? `
-                        <div class="vault-form-row">
-                          <label class="muted">discovered models (${modelsCount}):</label>
-                          <select data-cloud-model-picker="${escapeHtml(p.id)}" class="vault-input">
-                            ${modelsList
-                              .map(
-                                (m) =>
-                                  `<option value="${escapeHtml(m.id)}" ${roleChat === m.id ? "selected" : ""}>${escapeHtml(m.label || m.slug)} — ${escapeHtml(m.id)}</option>`
-                              )
-                              .join("")}
-                          </select>
-                          <button data-cloud-use-model="${escapeHtml(p.id)}" type="button">[use as chat model]</button>
-                        </div>
-                      `
-                      : `<div class="muted">${
-                          p.configured
-                            ? "0 models cached — click [refresh models from api] to query /models."
-                            : "paste your API key above and click [save key & pull models] to load all available models from the provider API."
-                        }</div>`
-                  }
-                </div>
-              `;
-            })
-            .join("")}
+                `;
+              })
+              .join("")}
 
-          <div class="rail-group-label">
-            <span>local on-device models (/doctor · ${doctorRoles.length || 5} roles)</span>
-          </div>
-          ${
-            doctorRoles.length === 0
-              ? `<div class="muted">models [offline]: start sidecar to inspect model checkpoints and device placement.</div>`
-              : doctorRoles
-                  .map((dr) => {
-                    const badge =
-                      dr.state === "ready"
-                        ? `[ready · ${escapeHtml(dr.device)}]`
-                        : dr.state === "cpu_only"
-                          ? `[cpu_only · ${escapeHtml(dr.device)}]`
-                          : `[missing]`;
-                    return `
-                      <div class="source-row">
-                        <div class="source-row-top">
-                          <span>
-                            <strong>${escapeHtml(dr.role)}</strong>
-                            <span class="muted">· ${escapeHtml(dr.model)}</span>
-                          </span>
-                          <span class="${dr.state === "missing" ? "msg-error-badge" : "status-item"}">${badge}</span>
+            <div class="label">Local on-device models (${doctorRoles.length || 5} roles)</div>
+            ${
+              doctorRoles.length === 0
+                ? `<div class="muted">Models offline. Start sidecar to inspect checkpoints and device placement.</div>`
+                : `<div>${doctorRoles
+                    .map((dr) => {
+                      const dotCls =
+                        dr.state === "ready"
+                          ? "dot"
+                          : dr.state === "cpu_only"
+                            ? "dot warn"
+                            : "dot danger";
+                      const stateText =
+                        dr.state === "ready"
+                          ? `Ready · ${escapeHtml(dr.device)}`
+                          : dr.state === "cpu_only"
+                            ? `CPU only · ${escapeHtml(dr.device)}`
+                            : "Missing";
+                      return `
+                        <div class="source-row">
+                          <div class="source-row-top">
+                            <b class="t">${escapeHtml(dr.role)} · <span class="muted">${escapeHtml(dr.model)}</span></b>
+                            <span class="status"><span class="${dotCls}"></span><span>${stateText}</span></span>
+                          </div>
+                          ${
+                            dr.fix
+                              ? `<div class="source-row-meta">Fix: ${escapeHtml(dr.fix)}</div>`
+                              : dr.path
+                                ? `<div class="source-row-meta">${escapeHtml(dr.path)}</div>`
+                                : ""
+                          }
                         </div>
-                        ${
-                          dr.fix
-                            ? `<div class="muted">fix: ${escapeHtml(dr.fix)}</div>`
-                            : dr.path
-                              ? `<div class="muted">${escapeHtml(dr.path)}</div>`
-                              : ""
-                        }
-                      </div>
-                    `;
-                  })
-                  .join("")
-          }
+                      `;
+                    })
+                    .join("")}</div>`
+            }
+          </div>
         `
         }
       </div>
   `;
 
   container.innerHTML = `
-    <div class="knowledge-view">
-      <div class="knowledge-section">
-        <div class="panel-header">
-          <span>settings · accordion navigation (click any section header to expand / collapse)</span>
+    <div class="kb-page">
+      <div class="kb-page-inner">
+        <div class="view-h">
           <div>
-            <button id="kb-expand-all-btn">[expand all]</button>
-            <button id="kb-collapse-all-btn">[collapse all]</button>
-            <button id="kb-open-brain-btn">[brain · ${MOD_LABEL}+b]</button>
-            <button id="kb-pause-btn" class="${kb.pause_learning ? "active" : ""}">
-              [pause learning: ${kb.pause_learning ? "on" : "off"}]
+            <h1>Settings</h1>
+            <p>${
+              isUnlocked && activeProfile
+                ? `Profile ${escapeHtml(activeProfile.name)} unlocked · ${brainEntities.length} brain entities · ${bookmarksIndexed.length} indexed bookmarks · ${escapeHtml(brainRankingLabel)}`
+                : `No active profile · ${escapeHtml(brainRankingLabel)} · queue ${kb.queue_len}`
+            }</p>
+          </div>
+          <div class="end kb-head-actions">
+            <button id="kb-expand-all-btn" type="button" class="btn">Expand all</button>
+            <button id="kb-collapse-all-btn" type="button" class="btn">Collapse all</button>
+            <button id="kb-open-brain-btn" type="button" class="btn">Brain (${escapeHtml(MOD_LABEL)}+B)</button>
+            <button id="kb-pause-btn" type="button" class="btn" aria-pressed="${kb.pause_learning ? "true" : "false"}">
+              Pause learning: ${kb.pause_learning ? "On" : "Off"}
             </button>
-            <button id="kb-close-btn">[close]</button>
+            <button id="kb-close-btn" type="button" class="icon-btn" title="Close settings">${icon("x", "ico-sm")}</button>
           </div>
         </div>
-        <div class="muted">
-          active profile: ${
-            isUnlocked && activeProfile
-              ? `${escapeHtml(activeProfile.name)} [unlocked]`
-              : "none [locked - unlock a profile to save to your Brain, Mail, and password vault; browsing uses an ephemeral in-memory store]"
-          } · brain entities: ${brainEntities.length} · ${escapeHtml(brainRankingLabel)} · indexed bookmarks: ${bookmarksIndexed.length} · ingest queue: ${kb.queue_len}
-        </div>
-        <div class="vault-form-row">
-          <span class="muted">Theme</span>
-          <div class="seg" role="group" aria-label="Theme">
-            <button type="button" data-ui-theme="system" aria-pressed="${getUiThemePref() === "system"}">System</button>
-            <button type="button" data-ui-theme="light" aria-pressed="${getUiThemePref() === "light"}">Light</button>
-            <button type="button" data-ui-theme="dark" aria-pressed="${getUiThemePref() === "dark"}">Dark</button>
+
+        <div class="card">
+          <div class="card-h">
+            <b>Appearance</b>
+            <span class="end muted">Stored locally in browser preferences</span>
           </div>
-          <span class="muted">Layout</span>
-          <div class="seg" role="group" aria-label="Layout">
-            <button type="button" data-ui-layout="floating" aria-pressed="${getUiLayoutPref() === "floating"}">Floating</button>
-            <button type="button" data-ui-layout="flush" aria-pressed="${getUiLayoutPref() === "flush"}">Flush</button>
-          </div>
-        </div>
-        ${
-          state.profileStatusMessage
-            ? `<div class="profile-status-banner">${escapeHtml(state.profileStatusMessage)}</div>`
-            : ""
-        }
-      </div>
-
-      ${doctorSectionHtml}
-
-      <div class="knowledge-section">
-        <div class="panel-header accordion-header" data-settings-accordion="profiles">
-          <span>[${acc.profiles ? "-" : "+"}] 2. user profiles &amp; security (name + 6-digit pin) (${profilesList.length})</span>
-          ${
-            isUnlocked
-              ? `<button id="kb-lock-profile-btn">[lock active profile]</button>`
-              : `<span class="muted">[locked]</span>`
-          }
-        </div>
-        ${
-          !acc.profiles
-            ? ""
-            : `
-        <div class="vault-form-row">
-          <input
-            id="kb-new-profile-name"
-            class="vault-input"
-            type="text"
-            spellcheck="false"
-            autocorrect="off"
-            autocapitalize="off"
-            placeholder="profile name (e.g. Nikita)_"
-          />
-          <input
-            id="kb-new-profile-pin"
-            class="vault-input vault-pin-input"
-            type="password"
-            inputmode="numeric"
-            maxlength="6"
-            spellcheck="false"
-            autocorrect="off"
-            autocapitalize="off"
-            placeholder="6-digit PIN (e.g. 123456)_"
-          />
-          <button id="kb-create-profile-btn">[+ create profile]</button>
-        </div>
-        ${
-          profilesList.length === 0
-            ? `<div class="muted">no profiles created yet. create a profile with a name and a 6-digit PIN above.</div>`
-            : profilesList
-                .map(
-                  (p) => `
-              <div class="source-row">
-                <div class="source-row-top">
-                  <span>
-                    ${p.is_active ? "* " : ""}${escapeHtml(p.name)}
-                    <span class="muted">(id: ${escapeHtml(p.id)} · ${p.credential_services_count} .env services)</span>
-                  </span>
-                  <div class="vault-inline-controls">
-                    ${
-                      p.is_active
-                        ? `<span class="status-item">[unlocked]</span>`
-                        : `
-                      <input
-                        class="vault-input vault-pin-input"
-                        type="password"
-                        inputmode="numeric"
-                        maxlength="6"
-                        spellcheck="false"
-                        autocorrect="off"
-                        autocapitalize="off"
-                        placeholder="6-digit PIN"
-                        data-profile-pin-input="${escapeHtml(p.id)}"
-                      />
-                      <button data-unlock-profile="${escapeHtml(p.id)}">[unlock]</button>
-                      ${
-                        IS_MAC
-                          ? `<button data-unlock-touchid="${escapeHtml(p.id)}">[unlock with Touch ID]</button>`
-                          : ""
-                      }
-                    `
-                    }
-                    <button class="rail-menu-btn" data-delete-profile="${escapeHtml(p.id)}" title="enter 6-digit PIN to delete profile">[delete]</button>
-                  </div>
-                </div>
-              </div>
-            `
-                )
-                .join("")
-        }
-        `
-        }
-      </div>
-
-      <div class="knowledge-section">
-        <div class="panel-header accordion-header" data-settings-accordion="vault">
-          <span>[${acc.vault ? "-" : "+"}] 3. profile .env password vault (${isUnlocked ? `${vaultServices.length} services` : "locked"})</span>
-          ${
-            isUnlocked && state.activeDetail?.tabs.some((t) => t.is_open)
-              ? `<button id="kb-autofill-tab-btn" title="Auto-fill & login on open tab using active profile .env credentials">[auto-fill open tab]</button>`
-              : `<span class="muted">AES-256-GCM + Argon2id</span>`
-          }
-        </div>
-        ${
-          !acc.vault
-            ? ""
-            : !isUnlocked
-              ? `<div class="muted">locked: vault credentials (vault.enc), Mail (mail.sqlite), the Satz Brain (BRAIN.md), and the passage store (planck_store.sqlite) are scoped to an unlocked profile.</div>`
-              : `
-          <div class="muted">
-            profile .env file: ${escapeHtml(vault?.env_path ?? "")} · only accessible while profile "${escapeHtml(activeProfile?.name ?? "")}" is unlocked. used by the agent when prompted and in the background for bookmarks.
-          </div>
-
-          <div class="vault-form-row">
-            <input id="kb-cred-service" class="vault-input" type="text" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="service/domain (e.g. gmail.com, zalando.de)_" />
-            <input id="kb-cred-username" class="vault-input" type="text" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="username / email_" />
-            <input id="kb-cred-password" class="vault-input" type="password" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="password / app-password_" />
-            <input id="kb-cred-token" class="vault-input" type="password" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="token or cookie (optional)_" />
-            <button id="kb-save-cred-btn">[+ save to .env]</button>
-          </div>
-
-          <div class="vault-form-row">
-            <input id="kb-import-env-path" class="vault-input" type="text" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="import external .env file path (e.g. ${IS_MAC ? "~/Downloads/.env" : "C:\\Users\\...\\.env"})_" />
-            <button id="kb-import-env-btn">[import .env file]</button>
-            <input
-              id="kb-reveal-pin-input"
-              class="vault-input vault-pin-input"
-              type="password"
-              inputmode="numeric"
-              maxlength="6"
-              spellcheck="false"
-              autocorrect="off"
-              autocapitalize="off"
-              placeholder="6-digit PIN to [reveal]_"
-            />
-          </div>
-
-          ${
-            vaultServices.length === 0
-              ? `<div class="muted">no credentials in this profile's vault.enc yet. add a service above or paste/import a .env file below.</div>`
-              : vaultServices
-                  .map((s) => {
-                    const revPwd = state.revealedPasswords[`${s.service}:password`];
-                    const revTok = state.revealedPasswords[`${s.service}:token`];
-                    const revCook = state.revealedPasswords[`${s.service}:cookie`];
-                    return `
-                <div class="rail-row">
-                  <span>
-                    <strong>${escapeHtml(s.service)}</strong>
-                    ${s.domain ? `<span class="muted">(${escapeHtml(s.domain)})</span>` : ""}
-                    · user: ${escapeHtml(s.username || "(token/cookie)")}
-                  </span>
-                  <span>
-                    <span class="muted">
-                      ${
-                        s.has_password
-                          ? revPwd
-                            ? `[password: ${escapeHtml(revPwd)}] `
-                            : `[password <button class="rail-menu-btn" data-reveal-service="${escapeHtml(s.service)}" data-reveal-field="password">[reveal]</button>] `
-                          : ""
-                      }${
-                        s.has_token
-                          ? revTok
-                            ? `[token: ${escapeHtml(revTok)}] `
-                            : `[token <button class="rail-menu-btn" data-reveal-service="${escapeHtml(s.service)}" data-reveal-field="token">[reveal]</button>] `
-                          : ""
-                      }${
-                        s.has_cookie
-                          ? revCook
-                            ? `[cookie: ${escapeHtml(revCook)}]`
-                            : `[cookie <button class="rail-menu-btn" data-reveal-service="${escapeHtml(s.service)}" data-reveal-field="cookie">[reveal]</button>]`
-                          : ""
-                      }
-                    </span>
-                    <button class="rail-menu-btn" data-delete-cred="${escapeHtml(s.service)}">[delete]</button>
-                  </span>
-                </div>
-              `;
-                  })
-                  .join("")
-          }
-
-          <div class="vault-raw-block">
-            <div class="muted">write-only .env batch importer for encrypted vault.enc (${escapeHtml(activeProfile?.name ?? "")}):</div>
-            <textarea id="kb-raw-env-textarea" class="vault-textarea" rows="5" spellcheck="false" placeholder="paste KEY=VALUE lines here to merge into encrypted vault.enc (write-only; stored secrets are never returned over HTTP)_"></textarea>
-            <div>
-              <button id="kb-save-raw-env-btn">[merge into vault.enc]</button>
+          <div class="form-row">
+            <span class="muted">Theme</span>
+            <div class="seg" role="group" aria-label="Theme">
+              <button type="button" data-ui-theme="system" aria-pressed="${getUiThemePref() === "system"}">System</button>
+              <button type="button" data-ui-theme="light" aria-pressed="${getUiThemePref() === "light"}">Light</button>
+              <button type="button" data-ui-theme="dark" aria-pressed="${getUiThemePref() === "dark"}">Dark</button>
+            </div>
+            <span class="muted">Layout</span>
+            <div class="seg" role="group" aria-label="Layout">
+              <button type="button" data-ui-layout="floating" aria-pressed="${getUiLayoutPref() === "floating"}">Floating</button>
+              <button type="button" data-ui-layout="flush" aria-pressed="${getUiLayoutPref() === "flush"}">Flush</button>
             </div>
           </div>
-        `
-        }
-      </div>
+        </div>
 
-      <div class="knowledge-section">
-        <div class="panel-header accordion-header" data-settings-accordion="mail">
-          <span>[${acc.mail ? "-" : "+"}] 4. mail accounts &amp; classifier eval (${state.mailAccounts.length} accounts)</span>
-          <span class="muted">IMAP / POP3 / SMTP</span>
-        </div>
-        ${!acc.mail ? "" : renderMailAccountsSectionHtml()}
-      </div>
+        ${state.profileStatusMessage ? renderBanner(state.profileStatusMessage) : ""}
 
-      <div class="knowledge-section">
-        <div class="panel-header accordion-header" data-settings-accordion="indexing">
-          <span>[${acc.indexing ? "-" : "+"}] 5. background indexing &amp; bookmarks (${bookmarksIndexed.length})</span>
-          <span class="muted">30-min conditional fetch</span>
+        ${doctorSectionHtml}
+
+        <div class="card kb-acc-card acc ${acc.profiles ? "open" : ""}">
+          <div class="settings-acc-bar">
+            <button type="button" class="acc-h" data-settings-accordion="profiles">
+              <span>2. User profiles &amp; security</span>
+              <span class="ct">${profilesList.length}</span>
+              ${icon("chev", "ico-sm")}
+            </button>
+            ${
+              isUnlocked
+                ? `<button id="kb-lock-profile-btn" type="button" class="btn">Lock active profile</button>`
+                : `<span class="badge soft">Locked</span>`
+            }
+          </div>
+          ${
+            !acc.profiles
+              ? ""
+              : `
+          <div class="acc-b section">
+            <div class="form-row">
+              <input
+                id="kb-new-profile-name"
+                class="input"
+                type="text"
+                spellcheck="false"
+                autocorrect="off"
+                autocapitalize="off"
+                placeholder="Profile name (e.g. Nikita)"
+              />
+              <input
+                id="kb-new-profile-pin"
+                class="input pin"
+                type="password"
+                inputmode="numeric"
+                maxlength="6"
+                spellcheck="false"
+                autocorrect="off"
+                autocapitalize="off"
+                placeholder="6-digit PIN"
+              />
+              <button id="kb-create-profile-btn" type="button" class="btn primary">${icon("plus", "ico-sm")}<span>Create profile</span></button>
+            </div>
+            ${
+              profilesList.length === 0
+                ? `<div class="muted">No profiles created yet. Create one with a 6-digit PIN above.</div>`
+                : profilesList
+                    .map(
+                      (p) => `
+                  <div class="source-row">
+                    <div class="source-row-top">
+                      <span class="t">
+                        ${p.is_active ? `<span class="dot"></span> ` : ""}
+                        <b>${escapeHtml(p.name)}</b>
+                        <span class="muted">(${escapeHtml(p.id)} · ${p.credential_services_count} vault services)</span>
+                      </span>
+                      ${
+                        p.is_active
+                          ? `<span class="badge">Unlocked</span>`
+                          : `
+                        <input
+                          class="input pin"
+                          type="password"
+                          inputmode="numeric"
+                          maxlength="6"
+                          spellcheck="false"
+                          autocorrect="off"
+                          autocapitalize="off"
+                          placeholder="PIN"
+                          data-profile-pin-input="${escapeHtml(p.id)}"
+                        />
+                        <button type="button" class="btn primary" data-unlock-profile="${escapeHtml(p.id)}">Unlock</button>
+                        ${
+                          IS_MAC
+                            ? `<button type="button" class="btn" data-unlock-touchid="${escapeHtml(p.id)}">Touch ID</button>`
+                            : ""
+                        }
+                      `
+                      }
+                      <button type="button" class="btn-text" data-delete-profile="${escapeHtml(p.id)}" title="Enter 6-digit PIN to delete profile">Delete</button>
+                    </div>
+                  </div>
+                `
+                    )
+                    .join("")
+            }
+          </div>
+          `
+          }
         </div>
-        ${
-          !acc.indexing
-            ? ""
-            : `
-        <div class="muted">
-          bookmarked sources are continuously fetched, authenticated (via unlocked profile .env when applicable), and indexed in the background.
-        </div>
-        ${
-          bookmarksIndexed.length === 0
-            ? `<div class="muted">no bookmarks hooked up yet. click [+ bookmark current] in the left rail to continuously index a source.</div>`
-            : bookmarksIndexed
-                .map(
-                  (bm) => `
-              <div class="rail-row">
-                <span>${escapeHtml(bm.title || bm.domain)} <span class="muted">(${escapeHtml(bm.url)})</span></span>
-                <span class="muted">
-                  [${escapeHtml(bm.status)}] · ${bm.text_chars} chars · ${
-                    bm.last_indexed_at > 0
-                      ? `updated ${escapeHtml(formatRelativeTime(String(Math.floor(bm.last_indexed_at))))}`
-                      : "indexing..."
-                  }
-                </span>
+
+        <div class="card kb-acc-card acc ${acc.vault ? "open" : ""}">
+          <div class="settings-acc-bar">
+            <button type="button" class="acc-h" data-settings-accordion="vault">
+              <span>3. Profile .env password vault</span>
+              <span class="ct">${isUnlocked ? `${vaultServices.length} services` : "locked"}</span>
+              ${icon("chev", "ico-sm")}
+            </button>
+            ${
+              isUnlocked && state.activeDetail?.tabs.some((t) => t.is_open)
+                ? `<button id="kb-autofill-tab-btn" type="button" class="btn" title="Auto-fill & login on open tab using active profile .env credentials">Auto-fill open tab</button>`
+                : `<span class="muted">AES-256-GCM + Argon2id</span>`
+            }
+          </div>
+          ${
+            !acc.vault
+              ? ""
+              : !isUnlocked
+                ? `<div class="muted acc-b">Locked. Vault credentials (vault.enc), Mail (mail.sqlite), Satz Brain (BRAIN.md), and the passage store belong to an unlocked profile.</div>`
+                : `
+            <div class="acc-b section">
+              <div class="muted">
+                Vault file: ${escapeHtml(vault?.env_path ?? "")} · accessible only while profile "${escapeHtml(activeProfile?.name ?? "")}" is unlocked.
               </div>
-            `
-                )
-                .join("")
-        }
-        `
-        }
+
+              <div class="form-row">
+                <input id="kb-cred-service" class="input" type="text" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="Service/domain (e.g. gmail.com)" />
+                <input id="kb-cred-username" class="input" type="text" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="Username / email" />
+                <input id="kb-cred-password" class="input" type="password" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="Password / app password" />
+                <input id="kb-cred-token" class="input" type="password" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="Token or cookie (optional)" />
+                <button id="kb-save-cred-btn" type="button" class="btn primary">Save to .env</button>
+              </div>
+
+              <div class="form-row">
+                <input id="kb-import-env-path" class="input" type="text" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="Import .env file path (${IS_MAC ? "~/Downloads/.env" : "C:\\Users\\...\\.env"})" />
+                <button id="kb-import-env-btn" type="button" class="btn">Import .env file</button>
+                <input
+                  id="kb-reveal-pin-input"
+                  class="input pin"
+                  type="password"
+                  inputmode="numeric"
+                  maxlength="6"
+                  spellcheck="false"
+                  autocorrect="off"
+                  autocapitalize="off"
+                  placeholder="PIN to reveal"
+                />
+              </div>
+
+              ${
+                vaultServices.length === 0
+                  ? `<div class="muted">No credentials stored in this profile yet. Add a service above or paste/import a .env file below.</div>`
+                  : `<div>${vaultServices
+                      .map((s) => {
+                        const revPwd = state.revealedPasswords[`${s.service}:password`];
+                        const revTok = state.revealedPasswords[`${s.service}:token`];
+                        const revCook = state.revealedPasswords[`${s.service}:cookie`];
+                        return `
+                    <div class="kb-kv-row">
+                      <span>
+                        <b>${escapeHtml(s.service)}</b>
+                        ${s.domain ? `<span class="muted">(${escapeHtml(s.domain)})</span>` : ""}
+                        · user: ${escapeHtml(s.username || "(token/cookie)")}
+                      </span>
+                      <span class="news-src-checks">
+                        ${
+                          s.has_password
+                            ? revPwd
+                              ? `<span class="pill">Password: ${escapeHtml(revPwd)}</span>`
+                              : `<button type="button" class="btn-text" data-reveal-service="${escapeHtml(s.service)}" data-reveal-field="password">Reveal password</button>`
+                            : ""
+                        }
+                        ${
+                          s.has_token
+                            ? revTok
+                              ? `<span class="pill">Token: ${escapeHtml(revTok)}</span>`
+                              : `<button type="button" class="btn-text" data-reveal-service="${escapeHtml(s.service)}" data-reveal-field="token">Reveal token</button>`
+                            : ""
+                        }
+                        ${
+                          s.has_cookie
+                            ? revCook
+                              ? `<span class="pill">Cookie: ${escapeHtml(revCook)}</span>`
+                              : `<button type="button" class="btn-text" data-reveal-service="${escapeHtml(s.service)}" data-reveal-field="cookie">Reveal cookie</button>`
+                            : ""
+                        }
+                        <button type="button" class="btn-text" data-delete-cred="${escapeHtml(s.service)}">Delete</button>
+                      </span>
+                    </div>
+                  `;
+                      })
+                      .join("")}</div>`
+              }
+
+              <div class="section">
+                <div class="muted">Write-only .env batch importer for encrypted vault.enc (${escapeHtml(activeProfile?.name ?? "")})</div>
+                <textarea id="kb-raw-env-textarea" class="textarea mono" rows="5" spellcheck="false" placeholder="Paste KEY=VALUE lines here to merge into encrypted vault.enc (write-only; secrets are never returned over HTTP)"></textarea>
+                <div>
+                  <button id="kb-save-raw-env-btn" type="button" class="btn">Merge into vault.enc</button>
+                </div>
+              </div>
+            </div>
+          `
+          }
+        </div>
+
+        <div class="card kb-acc-card acc ${acc.mail ? "open" : ""}">
+          <div class="settings-acc-bar">
+            <button type="button" class="acc-h" data-settings-accordion="mail">
+              <span>4. Mail accounts &amp; classifier eval</span>
+              <span class="ct">${state.mailAccounts.length} accounts</span>
+              ${icon("chev", "ico-sm")}
+            </button>
+            <span class="muted">IMAP / POP3 / SMTP</span>
+          </div>
+          ${!acc.mail ? "" : `<div class="acc-b">${renderMailAccountsSectionHtml()}</div>`}
+        </div>
+
+        <div class="card kb-acc-card acc ${acc.indexing ? "open" : ""}">
+          <div class="settings-acc-bar">
+            <button type="button" class="acc-h" data-settings-accordion="indexing">
+              <span>5. Background indexing &amp; bookmarks</span>
+              <span class="ct">${bookmarksIndexed.length}</span>
+              ${icon("chev", "ico-sm")}
+            </button>
+            <span class="muted">30-min conditional fetch</span>
+          </div>
+          ${
+            !acc.indexing
+              ? ""
+              : `
+          <div class="acc-b section">
+            <div class="muted">
+              Bookmarked sources are continuously fetched, authenticated via unlocked profile vault credentials, and indexed in the background.
+            </div>
+            ${
+              bookmarksIndexed.length === 0
+                ? `<div class="muted">No bookmarks hooked up yet. Click Bookmark current in the sidebar to index a source.</div>`
+                : bookmarksIndexed
+                    .map(
+                      (bm) => `
+                  <div class="kb-kv-row">
+                    <span class="truncate">${escapeHtml(bm.title || bm.domain)} <span class="muted">(${escapeHtml(bm.url)})</span></span>
+                    <span class="muted">
+                      <span class="badge soft">${escapeHtml(bm.status)}</span> · ${bm.text_chars} chars · ${
+                        bm.last_indexed_at > 0
+                          ? `updated ${escapeHtml(formatRelativeTime(String(Math.floor(bm.last_indexed_at))))}`
+                          : "indexing..."
+                      }
+                    </span>
+                  </div>
+                `
+                    )
+                    .join("")
+            }
+          </div>
+          `
+          }
+        </div>
       </div>
     </div>
   `;
@@ -624,9 +671,7 @@ export function renderKnowledgeView(
   });
 
   container.querySelectorAll("[data-settings-accordion]").forEach((hdr) => {
-    hdr.addEventListener("click", (e) => {
-      const target = e.target as HTMLElement;
-      if (target.closest("button")) return;
+    hdr.addEventListener("click", () => {
       const key = (hdr as HTMLElement).getAttribute("data-settings-accordion") ?? "";
       if (key) {
         state.settingsAccordionOpen[key] = !state.settingsAccordionOpen[key];
@@ -679,10 +724,10 @@ export function renderKnowledgeView(
       if (!inputEl) return;
       if (inputEl.type === "password") {
         inputEl.type = "text";
-        btn.textContent = "[hide key]";
+        btn.textContent = "Hide key";
       } else {
         inputEl.type = "password";
-        btn.textContent = "[show key]";
+        btn.textContent = "Show key";
       }
     });
   });
@@ -914,29 +959,26 @@ function renderBrainEntityCardHtml(e: BrainEntityItem): string {
     (normalizedSrcUrl.startsWith("http://") ||
       normalizedSrcUrl.startsWith("https://") ||
       normalizedSrcUrl.startsWith("satzmail://"))
-      ? `<button class="rail-menu-btn" data-brain-open-source="${escapeHtml(normalizedSrcUrl)}" data-brain-source-title="${escapeHtml(e.name)}">[source]</button>`
+      ? `<button type="button" class="btn-text" data-brain-open-source="${escapeHtml(normalizedSrcUrl)}" data-brain-source-title="${escapeHtml(e.name)}">Source</button>`
       : "";
 
   return `
     <div
-      class="source-row ${isHighlighted ? "active" : ""}"
+      class="source-row ${isHighlighted ? "on" : ""}"
       id="brain-card-${escapeHtml(e.slug)}"
       data-brain-card-slug="${escapeHtml(e.slug)}"
     >
       <div class="source-row-top">
-        <span>
-          <button class="citation-link" data-select-brain-slug="${escapeHtml(e.slug)}">
-            [${escapeHtml(e.type)}] <strong>${escapeHtml(e.name)}</strong>
-          </button>
-          <span class="muted">(tier ${e.tier} · ${escapeHtml(e.path)})</span>
+        <span class="t">
+          <span class="flag">${escapeHtml(e.type)}</span>
+          <button type="button" class="btn-text pri" data-select-brain-slug="${escapeHtml(e.slug)}">${escapeHtml(e.name)}</button>
+          <span class="muted">Tier ${e.tier} · ${escapeHtml(e.path)}</span>
         </span>
-        <div>
-          ${sourceBtnHtml}
-          <button class="rail-menu-btn" data-delete-brain-entity="${escapeHtml(e.slug)}">[forget]</button>
-        </div>
+        ${sourceBtnHtml}
+        <button type="button" class="btn-text" data-delete-brain-entity="${escapeHtml(e.slug)}">Forget</button>
       </div>
       <div>${escapeHtml(e.summary)}</div>
-      ${attrEntries ? `<div class="muted">${escapeHtml(attrEntries)}</div>` : ""}
+      ${attrEntries ? `<div class="source-row-meta">${escapeHtml(attrEntries)}</div>` : ""}
       ${
         isHighlighted && e.body
           ? `<div class="muted">${escapeHtml(e.body)}</div>`
@@ -962,7 +1004,7 @@ export function renderBrainView(
   const brainRankingLabel =
     kb.brain?.brain_ranking ??
     kb.brain?.encoder?.label ??
-    "brain ranking: lexical (planck13 missing)";
+    "Ranking: lexical (planck13 missing)";
   const profileInfo = kb.profile;
   const isUnlocked = Boolean(profileInfo?.unlocked && profileInfo?.active_profile);
   const activeProfile = profileInfo?.active_profile ?? null;
@@ -971,13 +1013,13 @@ export function renderBrainView(
   const hasActiveSearch = Boolean(state.brainSearchQuery.trim() && searchRes);
 
   const typeOrder = [
-    { key: "order", label: "orders" },
-    { key: "person", label: "people" },
-    { key: "organization", label: "organizations" },
-    { key: "promotion", label: "promotions" },
-    { key: "place", label: "places" },
-    { key: "account", label: "accounts" },
-    { key: "note", label: "notes" },
+    { key: "order", label: "Orders" },
+    { key: "person", label: "People" },
+    { key: "organization", label: "Organizations" },
+    { key: "promotion", label: "Promotions" },
+    { key: "place", label: "Places" },
+    { key: "account", label: "Accounts" },
+    { key: "note", label: "Notes" },
   ];
 
   const groupedEntities = new Map<string, BrainEntityItem[]>();
@@ -995,98 +1037,105 @@ export function renderBrainView(
   }
 
   const entityGroupsHtml = !isUnlocked
-    ? `<div class="muted">unlock a profile to save to your Brain.</div>`
+    ? `<div class="muted">Unlock a profile to load and store Brain entities.</div>`
     : brainEntities.length === 0
-      ? `<div class="muted">no brain entities stored yet. sync mail, browse authenticated tabs, or ask chat to store addresses, contacts, orders, or notes.</div>`
+      ? `<div class="muted">No Brain entities stored yet. Sync mail, browse authenticated tabs, or ask Chat to remember facts.</div>`
       : [
           ...typeOrder
             .filter((tg) => (groupedEntities.get(tg.key)?.length ?? 0) > 0)
             .map((tg) => {
               const items = groupedEntities.get(tg.key) ?? [];
               return `
-                <div class="rail-group-label">
-                  <span>${escapeHtml(tg.label)} (${items.length})</span>
+                <div class="section">
+                  <div class="label">${escapeHtml(tg.label)} <span class="ct">${items.length}</span></div>
+                  ${items.map((item) => renderBrainEntityCardHtml(item)).join("")}
                 </div>
-                ${items.map((item) => renderBrainEntityCardHtml(item)).join("")}
               `;
             }),
           otherEntities.length > 0
             ? `
-              <div class="rail-group-label">
-                <span>other (${otherEntities.length})</span>
+              <div class="section">
+                <div class="label">Other <span class="ct">${otherEntities.length}</span></div>
+                ${otherEntities.map((item) => renderBrainEntityCardHtml(item)).join("")}
               </div>
-              ${otherEntities.map((item) => renderBrainEntityCardHtml(item)).join("")}
             `
             : "",
         ].join("");
 
   const searchResultsSectionHtml = hasActiveSearch && searchRes
     ? `
-      <div class="knowledge-section" id="brain-search-results-section">
-        <div class="panel-header">
-          <span>search results for "${escapeHtml(state.brainSearchQuery)}" · ${searchRes.entities.length} entities · ${searchRes.passages.length} passages · ${searchRes.mail.length} mail</span>
-          <button id="brain-search-clear-btn">[clear]</button>
+      <div class="card" id="brain-search-results-section">
+        <div class="card-h">
+          <b>Search results for "${escapeHtml(state.brainSearchQuery)}"</b>
+          <span class="muted">${searchRes.entities.length} entities · ${searchRes.passages.length} passages · ${searchRes.mail.length} mail</span>
+          <button id="brain-search-clear-btn" type="button" class="btn-text end">Clear</button>
         </div>
         ${
           searchRes.entities.length === 0 &&
           searchRes.passages.length === 0 &&
           searchRes.mail.length === 0
-            ? `<div class="muted">no matches in entities, passages, or mail.</div>`
+            ? `<div class="muted">No matches in entities, passages, or mail.</div>`
             : `
               ${
                 searchRes.entities.length > 0
                   ? `
-                    <div class="rail-group-label"><span>matching entities (${searchRes.entities.length})</span></div>
-                    ${searchRes.entities.map((e) => renderBrainEntityCardHtml(e)).join("")}
+                    <div class="section">
+                      <div class="label">Matching entities <span class="ct">${searchRes.entities.length}</span></div>
+                      ${searchRes.entities.map((e) => renderBrainEntityCardHtml(e)).join("")}
+                    </div>
                   `
                   : ""
               }
               ${
                 searchRes.passages.length > 0
                   ? `
-                    <div class="rail-group-label"><span>matching passages (${searchRes.passages.length})</span></div>
-                    ${searchRes.passages
-                      .map(
-                        (p) => `
-                          <div class="source-row">
-                            <div class="source-row-top">
-                              <button class="citation-link" data-brain-open-source="${escapeHtml(p.url)}" data-brain-source-title="${escapeHtml(p.title || p.entity || p.url)}">
-                                ${escapeHtml(p.title || p.entity || p.url)}
-                              </button>
-                              <button class="rail-menu-btn" data-delete-passage="${escapeHtml(p.id)}">[forget]</button>
+                    <div class="section">
+                      <div class="label">Matching passages <span class="ct">${searchRes.passages.length}</span></div>
+                      ${searchRes.passages
+                        .map(
+                          (p) => `
+                            <div class="source-row">
+                              <div class="source-row-top">
+                                <button type="button" class="btn-text pri t" data-brain-open-source="${escapeHtml(p.url)}" data-brain-source-title="${escapeHtml(p.title || p.entity || p.url)}">
+                                  ${escapeHtml(p.title || p.entity || p.url)}
+                                </button>
+                                <button type="button" class="btn-text" data-delete-passage="${escapeHtml(p.id)}">Forget</button>
+                              </div>
+                              <div class="source-row-meta">${escapeHtml(p.url)}</div>
+                              <div>${escapeHtml(p.text.slice(0, 260))}</div>
                             </div>
-                            <div class="muted">${escapeHtml(p.url)}</div>
-                            <div>${escapeHtml(p.text.slice(0, 260))}</div>
-                          </div>
-                        `
-                      )
-                      .join("")}
+                          `
+                        )
+                        .join("")}
+                    </div>
                   `
                   : ""
               }
               ${
                 searchRes.mail.length > 0
                   ? `
-                    <div class="rail-group-label"><span>matching mail (${searchRes.mail.length})</span></div>
-                    ${searchRes.mail
-                      .map((m) => {
-                        const mid = String(m.id ?? "");
-                        const sender = String(m.from_name || m.from_addr || "");
-                        const subj = String(m.subject ?? "(no subject)");
-                        const snip = String(m.snippet ?? "");
-                        return `
-                          <div class="source-row">
-                            <div class="source-row-top">
-                              <button class="citation-link" data-brain-open-source="satzmail://message/${escapeHtml(mid)}" data-brain-source-title="${escapeHtml(subj)}">
-                                [mail] ${escapeHtml(sender)} · ${escapeHtml(subj)}
-                              </button>
-                              <span class="muted">[${escapeHtml(String(m.label ?? "email"))}]</span>
+                    <div class="section">
+                      <div class="label">Matching mail <span class="ct">${searchRes.mail.length}</span></div>
+                      ${searchRes.mail
+                        .map((m) => {
+                          const mid = String(m.id ?? "");
+                          const sender = String(m.from_name || m.from_addr || "");
+                          const subj = String(m.subject ?? "(no subject)");
+                          const snip = String(m.snippet ?? "");
+                          return `
+                            <div class="source-row">
+                              <div class="source-row-top">
+                                <button type="button" class="btn-text pri t" data-brain-open-source="satzmail://message/${escapeHtml(mid)}" data-brain-source-title="${escapeHtml(subj)}">
+                                  ${escapeHtml(sender)} · ${escapeHtml(subj)}
+                                </button>
+                                <span class="badge soft">${escapeHtml(String(m.label ?? "email"))}</span>
+                              </div>
+                              <div class="muted">${escapeHtml(snip.slice(0, 200))}</div>
                             </div>
-                            <div class="muted">${escapeHtml(snip.slice(0, 200))}</div>
-                          </div>
-                        `;
-                      })
-                      .join("")}
+                          `;
+                        })
+                        .join("")}
+                    </div>
                   `
                   : ""
               }
@@ -1097,169 +1146,187 @@ export function renderBrainView(
     : "";
 
   container.innerHTML = `
-    <div class="knowledge-view" id="brain-view-root">
-      <div class="knowledge-section">
-        <div class="panel-header">
-          <span>satz brain · ${MOD_LABEL}+b · ${
-            isUnlocked && activeProfile
-              ? `profile: ${escapeHtml(activeProfile.name)}`
-              : "locked"
-          }</span>
+    <div class="kb-page" id="brain-view-root">
+      <div class="kb-page-inner">
+        <div class="view-h">
           <div>
-            <span class="muted">${escapeHtml(brainRankingLabel)}</span>
-            <button id="brain-open-settings-btn">[settings]</button>
-            <button id="brain-close-btn">[close]</button>
+            <h1>Satz Brain</h1>
+            <p>${
+              isUnlocked && activeProfile
+                ? `Profile ${escapeHtml(activeProfile.name)} · ${escapeHtml(brainRankingLabel)} · ${escapeHtml(MOD_LABEL)}+B`
+                : `Locked · ${escapeHtml(MOD_LABEL)}+B`
+            }</p>
+          </div>
+          <div class="end kb-head-actions">
+            <button id="brain-open-settings-btn" type="button" class="btn">${icon("settings", "ico-sm")}<span>Settings</span></button>
+            <button id="brain-close-btn" type="button" class="icon-btn" title="Close Brain">${icon("x", "ico-sm")}</button>
           </div>
         </div>
-        <div class="vault-form-row">
-          <input
-            id="brain-search-input"
-            class="vault-input"
-            type="text"
-            spellcheck="false"
-            autocorrect="off"
-            autocapitalize="off"
-            placeholder="search entities, passages, and mail (FTS5 + encoder rank)_"
-            value="${escapeHtml(state.brainSearchQuery)}"
-          />
-          <button id="brain-search-btn">[search]</button>
+
+        <div class="card">
+          <div class="form-row">
+            <div class="input-wrap">
+              ${icon("search", "ico-sm")}
+              <input
+                id="brain-search-input"
+                class="input"
+                type="text"
+                spellcheck="false"
+                autocorrect="off"
+                autocapitalize="off"
+                placeholder="Search entities, passages, and mail (FTS5 + encoder rank)"
+                value="${escapeHtml(state.brainSearchQuery)}"
+              />
+            </div>
+            <button id="brain-search-btn" type="button" class="btn primary">Search</button>
+            ${
+              state.brainSearchQuery
+                ? `<button id="brain-search-reset-btn" type="button" class="btn">Clear</button>`
+                : ""
+            }
+          </div>
+        </div>
+
+        ${searchResultsSectionHtml}
+
+        <div class="card">
+          <div class="card-h">
+            <b>Entity cards</b>
+            <span class="badge soft">${brainEntities.length}</span>
+            <span class="end muted">${escapeHtml(brainRankingLabel)}</span>
+          </div>
+          ${entityGroupsHtml}
+        </div>
+
+        <div class="card">
+          <div class="card-h">
+            <b>This week</b>
+            <span class="badge soft">${thisWeek.length}</span>
+            <span class="end muted">Pages read and mail received</span>
+          </div>
           ${
-            state.brainSearchQuery
-              ? `<button id="brain-search-reset-btn">[clear]</button>`
-              : ""
+            thisWeek.length === 0
+              ? `<div class="muted">No pages read or emails received in the last 7 days.</div>`
+              : thisWeek
+                  .map((item) => {
+                    const kindText = item.kind === "received" ? "Received" : "Read";
+                    const rel = item.ts > 0 ? formatRelativeTime(String(Math.floor(item.ts))) : "";
+                    return `
+                      <div class="kb-kv-row">
+                        <span class="truncate">
+                          <span class="flag">${escapeHtml(kindText)}</span>
+                          <button type="button" class="btn-text pri" data-brain-open-source="${escapeHtml(item.url)}" data-brain-source-title="${escapeHtml(item.title)}">
+                            ${escapeHtml(item.title)}
+                          </button>
+                        </span>
+                        <span class="muted">${escapeHtml(item.domain)} · ${escapeHtml(rel)}</span>
+                      </div>
+                    `;
+                  })
+                  .join("")
           }
         </div>
-      </div>
 
-      ${searchResultsSectionHtml}
-
-      <div class="knowledge-section">
-        <div class="panel-header">
-          <span>entity cards by type (${brainEntities.length})</span>
-          <span class="muted">${escapeHtml(brainRankingLabel)}</span>
+        <div class="card">
+          <div class="card-h">
+            <b>Top domains &amp; source trust</b>
+            <span class="badge soft">${kb.top_domains.length}</span>
+            <span class="end muted">Personal trust counts for at most 30% (0.7 system + 0.3 yours)</span>
+          </div>
+          ${
+            kb.top_domains.length === 0
+              ? `<div class="muted">No domains recorded yet.</div>`
+              : `<div class="table-wrap">
+                  <table class="table">
+                    <thead>
+                      <tr>
+                        <th>Domain</th>
+                        <th class="num">System</th>
+                        <th>Personal trust (0-10)</th>
+                        <th class="num">Effective</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${kb.top_domains
+                        .map((d) => {
+                          const sysScore = Number(d.system ?? d.trust ?? 5.0);
+                          const hasPersonal =
+                            d.personal !== undefined && d.personal !== null;
+                          const personalScore = hasPersonal
+                            ? Number(d.personal)
+                            : sysScore;
+                          const effScore = Number(
+                            d.effective ??
+                              (0.7 * sysScore + 0.3 * personalScore).toFixed(2)
+                          );
+                          const bandLabel = d.band_label || "Unscored";
+                          const sysReason = d.scored
+                            ? d.why || d.category || "registry"
+                            : "unscored (default 5.0)";
+                          const conflictBadge = d.conflict
+                            ? ` <span class="badge soft" title="Personal and system trust differ by at least 3.0">Conflict</span>`
+                            : "";
+                          return `
+                            <tr data-domain-trust-row="${escapeHtml(d.domain)}">
+                              <td>
+                                <div><b>${escapeHtml(d.domain)}</b></div>
+                                <div class="muted">${d.visits} visits · ${escapeHtml(sysReason)}</div>
+                              </td>
+                              <td class="num">${sysScore.toFixed(1)}</td>
+                              <td>
+                                <div class="slider-row">
+                                  <input
+                                    class="slider"
+                                    type="range"
+                                    min="0"
+                                    max="10"
+                                    step="0.5"
+                                    value="${personalScore}"
+                                    data-trust-slider-domain="${escapeHtml(d.domain)}"
+                                  />
+                                  <span class="slider-val" data-trust-slider-val="${escapeHtml(d.domain)}">${personalScore.toFixed(1)}</span>
+                                  ${
+                                    hasPersonal
+                                      ? `<button type="button" class="btn-text" data-trust-reset-domain="${escapeHtml(d.domain)}">Reset</button>`
+                                      : ""
+                                  }
+                                </div>
+                              </td>
+                              <td class="num">${effScore.toFixed(2)}/10 · ${escapeHtml(bandLabel)}${conflictBadge}</td>
+                            </tr>
+                          `;
+                        })
+                        .join("")}
+                    </tbody>
+                  </table>
+                </div>`
+          }
         </div>
-        ${entityGroupsHtml}
-      </div>
 
-      <div class="knowledge-section">
-        <div class="panel-header">
-          <span>this week · read &amp; received (${thisWeek.length})</span>
-        </div>
-        ${
-          thisWeek.length === 0
-            ? `<div class="muted">no pages read or emails received in the last 7 days.</div>`
-            : thisWeek
-                .map((item) => {
-                  const badge = item.kind === "received" ? "[received]" : "[read]";
-                  const rel = item.ts > 0 ? formatRelativeTime(String(Math.floor(item.ts))) : "";
-                  return `
-                    <div class="rail-row">
-                      <span>
-                        <span class="muted">${badge}</span>
-                        <button class="citation-link" data-brain-open-source="${escapeHtml(item.url)}" data-brain-source-title="${escapeHtml(item.title)}">
-                          ${escapeHtml(item.title)}
-                        </button>
-                      </span>
-                      <span class="muted">${escapeHtml(item.domain)} · ${escapeHtml(rel)}</span>
-                    </div>
-                  `;
-                })
-                .join("")
-        }
-      </div>
-
-      <div class="knowledge-section">
-        <div class="panel-header">
-          <span>top domains &amp; source trust (${kb.top_domains.length})</span>
-          <span class="muted">effective = 0.7 * system + 0.3 * yours (30% hard cap)</span>
-        </div>
-        ${
-          kb.top_domains.length === 0
-            ? `<div class="muted">no domains recorded yet</div>`
-            : kb.top_domains
-                .map((d) => {
-                  const sysScore = Number(d.system ?? d.trust ?? 5.0);
-                  const hasPersonal =
-                    d.personal !== undefined && d.personal !== null;
-                  const personalScore = hasPersonal
-                    ? Number(d.personal)
-                    : sysScore;
-                  const effScore = Number(
-                    d.effective ??
-                      (0.7 * sysScore + 0.3 * personalScore).toFixed(2)
-                  );
-                  const bandLabel = d.band_label || "Unscored";
-                  const sysReason = d.scored
-                    ? d.why || d.category || "registry"
-                    : "unscored (default 5.0)";
-                  const conflictBadge = d.conflict
-                    ? ` <span class="msg-error-badge" title="|yours - system| >= 3.0">[conflict]</span>`
-                    : "";
-                  return `
-                    <div class="source-row" data-domain-trust-row="${escapeHtml(d.domain)}">
-                      <div class="source-row-top">
-                        <span>
-                          <strong>${escapeHtml(d.domain)}</strong>
-                          <span class="muted">· ${d.visits} visits</span>
-                        </span>
-                        <span>
-                          effective <strong>${effScore.toFixed(2)}</strong> / 10
-                          <span class="muted">[${escapeHtml(bandLabel)}]</span>${conflictBadge}
-                        </span>
-                      </div>
-                      <div class="muted">
-                        system: ${sysScore.toFixed(1)} (${escapeHtml(sysReason)}) · yours: ${
-                          hasPersonal
-                            ? `${personalScore.toFixed(1)} (0.7 * ${sysScore.toFixed(1)} + 0.3 * ${personalScore.toFixed(1)} = ${effScore.toFixed(2)})`
-                            : `default (${sysScore.toFixed(1)})`
-                        }
-                      </div>
-                      <div class="vault-form-row">
-                        <span class="muted">your score (0-10, 30% max blend):</span>
-                        <input
-                          type="range"
-                          min="0"
-                          max="10"
-                          step="0.5"
-                          value="${personalScore}"
-                          data-trust-slider-domain="${escapeHtml(d.domain)}"
-                        />
-                        <span class="muted" data-trust-slider-val="${escapeHtml(d.domain)}">${personalScore.toFixed(1)}</span>
-                        ${
-                          hasPersonal
-                            ? `<button class="rail-menu-btn" data-trust-reset-domain="${escapeHtml(d.domain)}">[reset]</button>`
-                            : ""
-                        }
-                      </div>
-                    </div>
-                  `;
-                })
-                .join("")
-        }
-      </div>
-
-      <div class="knowledge-section">
-        <div class="panel-header">
-          <span>recent passages (${kb.passages.length})</span>
-        </div>
-        ${
-          kb.passages.length === 0
-            ? `<div class="muted">no passages ingested yet</div>`
-            : kb.passages
-                .map(
-                  (p) => `
-              <div class="source-row">
-                <div class="source-row-top">
-                  <span>${escapeHtml(p.entity || p.url)}</span>
-                  <button class="rail-menu-btn" data-delete-passage="${escapeHtml(p.id)}">[forget]</button>
+        <div class="card">
+          <div class="card-h">
+            <b>Recent passages</b>
+            <span class="badge soft">${kb.passages.length}</span>
+          </div>
+          ${
+            kb.passages.length === 0
+              ? `<div class="muted">No passages ingested yet.</div>`
+              : kb.passages
+                  .map(
+                    (p) => `
+                <div class="source-row">
+                  <div class="source-row-top">
+                    <b class="t">${escapeHtml(p.entity || p.url)}</b>
+                    <button type="button" class="btn-text" data-delete-passage="${escapeHtml(p.id)}">Forget</button>
+                  </div>
+                  <div class="source-row-meta">${escapeHtml(p.url)}</div>
+                  <div>${escapeHtml(p.text.slice(0, 260))}</div>
                 </div>
-                <div class="muted">${escapeHtml(p.url)}</div>
-                <div>${escapeHtml(p.text.slice(0, 260))}</div>
-              </div>
-            `
-                )
-                .join("")
-        }
+              `
+                  )
+                  .join("")
+          }
+        </div>
       </div>
     </div>
   `;

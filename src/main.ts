@@ -1774,37 +1774,35 @@ function renderCompareViewport(viewport: HTMLElement): void {
   const count = Math.max(2, Math.min(4, tabs.length));
 
   viewport.innerHTML = `
-    <div class="chat-view">
-      <div class="viewport-primary">
-        <div class="compare-grid panes-${count}">
-          ${tabs
-            .map(
-              (tab) => `
-            <div class="compare-tile">
-              <div class="site-tab-toolbar">
-                <button data-nav-btn="back" data-tab="${escapeHtml(tab.id)}">&lt;-</button>
-                <button data-nav-btn="forward" data-tab="${escapeHtml(tab.id)}">-&gt;</button>
-                <button data-nav-btn="reload" data-tab="${escapeHtml(tab.id)}">[r]</button>
-                <input
-                  id="address-input-${escapeHtml(tab.id)}"
-                  class="address-input"
-                  data-address-tab="${escapeHtml(tab.id)}"
-                  type="text"
-                  spellcheck="false"
-                  autocorrect="off"
-                  autocapitalize="off"
-                  placeholder="enter a url or search query_"
-                  value="${escapeHtml(tab.url === "about:blank" ? "" : tab.url)}"
-                />
-              </div>
-              <div id="webview-slot-${escapeHtml(tab.id)}" class="webview-slot">
-                loading ${escapeHtml(tab.url)}...
-              </div>
+    <div class="compare-view">
+      <div class="compare-grid panes-${count}">
+        ${tabs
+          .map(
+            (tab) => `
+          <div class="compare-tile">
+            <div class="tile-h">
+              <button class="icon-btn tile-nav-btn" type="button" data-nav-btn="back" data-tab="${escapeHtml(tab.id)}" title="Back">${icon("back", "ico-sm")}</button>
+              <button class="icon-btn tile-nav-btn" type="button" data-nav-btn="forward" data-tab="${escapeHtml(tab.id)}" title="Forward">${icon("fwd", "ico-sm")}</button>
+              <button class="icon-btn tile-nav-btn" type="button" data-nav-btn="reload" data-tab="${escapeHtml(tab.id)}" title="Reload">${icon("reload", "ico-sm")}</button>
+              <input
+                id="address-input-${escapeHtml(tab.id)}"
+                class="address-input tile-addr"
+                data-address-tab="${escapeHtml(tab.id)}"
+                type="text"
+                spellcheck="false"
+                autocorrect="off"
+                autocapitalize="off"
+                placeholder="Enter a URL or search query"
+                value="${escapeHtml(tab.url === "about:blank" ? "" : tab.url)}"
+              />
             </div>
-          `
-            )
-            .join("")}
-        </div>
+            <div id="webview-slot-${escapeHtml(tab.id)}" class="webview-slot">
+              Loading ${escapeHtml(extractDomain(tab.url) || tab.url)}...
+            </div>
+          </div>
+        `
+          )
+          .join("")}
       </div>
     </div>
   `;

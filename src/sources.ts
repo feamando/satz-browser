@@ -1,3 +1,4 @@
+import { icon } from "./design-system/icons";
 import { escapeHtml, state } from "./state";
 import type { SourceItem } from "./types";
 
@@ -22,14 +23,14 @@ export function renderSourcesPanel(
   let nextCiteIdx = 1;
 
   container.innerHTML = `
-    <div class="panel-header">
-      <span>sources (${sources.length})</span>
-      <span>in context</span>
+    <div class="label sources-subhead">
+      <span>Sources in context</span>
+      <span class="ct">${sources.length}</span>
     </div>
-    <div class="panel-scroll">
+    <div class="sources-list">
       ${
         sources.length === 0
-          ? `<div class="muted">no sources yet. open a site tab [+] to add pages.</div>`
+          ? `<div class="empty">No sources yet. Open a tab to capture pages into context.</div>`
           : sources
               .map((src) => {
                 const matchingTabIdx = openTabs.findIndex(
@@ -41,10 +42,9 @@ export function renderSourcesPanel(
                   locationLabel =
                     openTab.url === src.url
                       ? `tab ${matchingTabIdx + 2}`
-                      : `earlier`;
+                      : "earlier";
                 }
                 const timeStr = formatTimeHhMm(src.captured_at || src.added_at);
-                const checkMark = src.in_context ? "[x]" : "[ ]";
                 const stat = state.sourceStats[src.id];
                 const isMailSource =
                   src.id.startsWith("mail:") ||
@@ -58,26 +58,34 @@ export function renderSourcesPanel(
                 const captureMode = stat?.capture_mode ?? "dom";
                 const citeBadgeHtml =
                   charsCaptured > 0 && src.in_context
-                    ? `<span class="muted">[${nextCiteIdx++}]</span>`
-                    : `<span class="muted">[-]</span>`;
+                    ? `<span class="cite">${nextCiteIdx++}</span>`
+                    : `<span class="badge soft">off</span>`;
                 const modeLabel =
                   captureMode === "fetch" ? " · public fetch" : "";
                 const charsBadgeHtml =
                   charsCaptured > 0
-                    ? `${charsSent.toLocaleString()} / ${charsCaptured.toLocaleString()} chars${escapeHtml(modeLabel)}${wasCut ? " · cut" : ""}`
-                    : `empty ${src.tab_id ? `<button class="citation-link" data-recapture-src-tab="${escapeHtml(src.tab_id)}">[recapture]</button>` : ""}`;
+                    ? `<span>${charsSent.toLocaleString()} / ${charsCaptured.toLocaleString()} chars${escapeHtml(modeLabel)}</span>${wasCut ? `<span class="flag">cut</span>` : ""}`
+                    : `<span>Empty</span>${src.tab_id ? `<button type="button" class="btn-text" data-recapture-src-tab="${escapeHtml(src.tab_id)}">Recapture</button>` : ""}`;
                 return `
                   <div class="source-row ${charsCaptured === 0 ? "muted" : ""}" data-source-id="${escapeHtml(src.id)}">
                     <div class="source-row-top">
-                      <button class="rail-menu-btn" data-toggle-src="${escapeHtml(src.id)}" data-current-ctx="${src.in_context ? "1" : "0"}">${checkMark}</button>
+                      <button
+                        type="button"
+                        class="icon-btn src-ctx-btn ${src.in_context ? "on" : ""}"
+                        data-toggle-src="${escapeHtml(src.id)}"
+                        data-current-ctx="${src.in_context ? "1" : "0"}"
+                        title="${src.in_context ? "In context (click to exclude)" : "Excluded (click to include)"}"
+                      >${src.in_context ? icon("check", "ico-sm") : icon("plus", "ico-sm")}</button>
                       ${citeBadgeHtml}
-                      <span class="truncate">${escapeHtml(src.domain)}</span>
-                      <span class="muted">${escapeHtml(locationLabel)} · ${escapeHtml(timeStr)}</span>
+                      <span class="t" data-jump-src="${escapeHtml(src.id)}" title="${escapeHtml(src.title || src.url)}">
+                        ${escapeHtml(src.title || src.domain || src.url)}
+                      </span>
+                      <span class="trust">${escapeHtml(src.domain)}</span>
                     </div>
-                    <div class="source-row-title truncate" data-jump-src="${escapeHtml(src.id)}">
-                      ${escapeHtml(src.title || src.url)}
+                    <div class="source-row-meta">
+                      <span>${escapeHtml(locationLabel)} · ${escapeHtml(timeStr)}</span>
+                      ${charsBadgeHtml}
                     </div>
-                    <div class="muted">${charsBadgeHtml}</div>
                   </div>
                 `;
               })

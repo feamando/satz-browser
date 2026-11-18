@@ -190,7 +190,7 @@ export function renderChatPanel(
   const stepsHtml = (convStream?.steps ?? [])
     .map(
       (step, idx) =>
-        `<div class="streaming-step-line">${idx === (convStream?.steps.length ?? 0) - 1 ? "&gt;" : "ok"} ${escapeHtml(step)}</div>`
+        `<div class="stream-step">${idx === (convStream?.steps.length ?? 0) - 1 ? "Now" : "Done"} · ${escapeHtml(step)}</div>`
     )
     .join("");
 
@@ -223,66 +223,73 @@ export function renderChatPanel(
     .map((task) => renderTaskCardBlock(task))
     .join("");
   const watchNoticeHtml = state.watchStatusNotice
-    ? `<div class="kb-card muted">${escapeHtml(state.watchStatusNotice)}</div>`
+    ? `<div class="banner">${escapeHtml(state.watchStatusNotice)}</div>`
     : "";
 
   container.innerHTML = `
-    <div class="chat-column">
-      <div class="chat-messages" id="chat-messages-list">
-        ${watchNoticeHtml}
-        ${
-          isMailConv && state.mailTriageOverview
-            ? renderMessageBlock(
-                "mail-triage-overview",
-                "assistant",
-                state.mailTriageOverview,
-                "triage overview",
-                JSON.stringify(triageSourceIds)
-              )
-            : ""
-        }
-        ${
-          messages.length === 0 && convTasks.length === 0 && !isStreamingHere && !(isMailConv && state.mailTriageOverview)
-            ? `<div class="muted">no messages in this conversation yet.</div>`
-            : messages
-                .map((m) =>
-                  renderMessageBlock(
-                    m.id,
-                    m.role,
-                    m.content,
-                    m.model,
-                    m.source_ids_json,
-                    m.cited_sources ?? state.messageCitedSources[m.id],
-                    m.proposals ?? state.messageProposals[m.id],
-                    m.citation_check,
-                    m.citations_ok,
-                    m.citations_flagged,
-                    m.findings ?? state.messageFindings[m.id],
-                    m.brain_sources ?? state.messageBrainSources[m.id],
-                    m.email_cards ?? state.messageEmailCards[m.id],
-                    m.answer_meta ?? state.messageAnswerMeta[m.id]
-                  )
+    <div class="chat-stage">
+      <div class="thread-scroll" id="chat-messages-list">
+        <div class="thread">
+          ${watchNoticeHtml}
+          ${
+            isMailConv && state.mailTriageOverview
+              ? renderMessageBlock(
+                  "mail-triage-overview",
+                  "assistant",
+                  state.mailTriageOverview,
+                  "triage overview",
+                  JSON.stringify(triageSourceIds)
                 )
-                .join("")
-        }
-        ${taskCardsHtml}
-        ${
-          isStreamingHere && convStream
-            ? `
-          <div class="msg-block msg-streaming-block" id="streaming-msg-block" data-streaming-conv-id="${escapeHtml(convId)}">
-            <div class="msg-header">
-              <span>assistant</span>
-              <span>${escapeHtml(convStream.model)} [<span id="streaming-phase-badge">${escapeHtml(phaseLabel)}</span> · <span id="streaming-elapsed-timer">${elapsedSec}s</span>]</span>
+              : ""
+          }
+          ${
+            messages.length === 0 && convTasks.length === 0 && !isStreamingHere && !(isMailConv && state.mailTriageOverview)
+              ? `<div class="chat-empty">No messages in this conversation yet.</div>`
+              : messages
+                  .map((m) =>
+                    renderMessageBlock(
+                      m.id,
+                      m.role,
+                      m.content,
+                      m.model,
+                      m.source_ids_json,
+                      m.cited_sources ?? state.messageCitedSources[m.id],
+                      m.proposals ?? state.messageProposals[m.id],
+                      m.citation_check,
+                      m.citations_ok,
+                      m.citations_flagged,
+                      m.findings ?? state.messageFindings[m.id],
+                      m.brain_sources ?? state.messageBrainSources[m.id],
+                      m.email_cards ?? state.messageEmailCards[m.id],
+                      m.answer_meta ?? state.messageAnswerMeta[m.id]
+                    )
+                  )
+                  .join("")
+          }
+          ${taskCardsHtml}
+          ${
+            isStreamingHere && convStream
+              ? `
+            <div class="msg-bot" id="streaming-msg-block" data-streaming-conv-id="${escapeHtml(convId)}">
+              <div class="msg-meta">
+                <span>Assistant</span>
+                <span>· ${escapeHtml(convStream.model)}</span>
+                <span>· <span id="streaming-phase-badge">${escapeHtml(phaseLabel)}</span></span>
+                <span>· <span id="streaming-elapsed-timer">${elapsedSec}s</span></span>
+              </div>
+              <div class="stream" id="streaming-status-box">
+                <div class="stream-now">
+                  <span class="dot live"></span>
+                  <span id="streaming-status-current" class="truncate">${escapeHtml(statusLineText)}</span>
+                </div>
+                <div id="streaming-steps-list">${stepsHtml}</div>
+              </div>
+              <div class="msg-text" id="streaming-msg-text">${escapeHtml(convStream.text)}</div>
             </div>
-            <div class="streaming-status-box" id="streaming-status-box">
-              <div class="streaming-status-current" id="streaming-status-current">&gt; status: ${escapeHtml(statusLineText)}</div>
-              <div class="streaming-steps-list" id="streaming-steps-list">${stepsHtml}</div>
-            </div>
-            <div class="msg-body"><span id="streaming-msg-text">${escapeHtml(convStream.text)}</span><span class="caret-blink">▌</span></div>
-          </div>
-        `
-            : ""
-        }
+          `
+              : ""
+          }
+        </div>
       </div>
 
       <div class="composer">
@@ -459,14 +466,14 @@ export function updateStreamingStatus(
   }
   const curEl = document.getElementById("streaming-status-current");
   if (curEl) {
-    curEl.textContent = `> status: ${status}`;
+    curEl.textContent = status;
   }
   const stepsEl = document.getElementById("streaming-steps-list");
   if (stepsEl) {
     stepsEl.innerHTML = s.steps
       .map(
         (step, idx) =>
-          `<div class="streaming-step-line">${idx === s.steps.length - 1 ? "&gt;" : "ok"} ${escapeHtml(step)}</div>`
+          `<div class="stream-step">${idx === s.steps.length - 1 ? "Now" : "Done"} · ${escapeHtml(step)}</div>`
       )
       .join("");
   }
@@ -474,7 +481,7 @@ export function updateStreamingStatus(
     "chat-composer-input"
   ) as HTMLInputElement | null;
   if (inputEl && state.activeDetail?.conversation.id === convId) {
-    inputEl.placeholder = `[in progress: ${status}]`;
+    inputEl.placeholder = `In progress: ${status}`;
   }
   const list = document.getElementById("chat-messages-list");
   if (list) {
@@ -532,7 +539,12 @@ function renderMessageBlock(
   const formattedBody = plainErr
     ? escapeHtml(plainErr.summary)
     : formatCitationsInText(content, sourceIds, citationCheck, brainSources);
-  const modelLabel = model ? `model: ${escapeHtml(model)}` : "";
+
+  if (role === "user") {
+    return `<div class="msg-you">${formattedBody}</div>`;
+  }
+
+  const modelLabel = model ? escapeHtml(model) : "";
   const srcCountLabel =
     sourceIds.length > 0 ? ` · ${sourceIds.length} src` : "";
   const citeStatsLabel =
@@ -543,9 +555,6 @@ function renderMessageBlock(
           ? ` · cites: ${citationsOk} ok`
           : ""
       : "";
-  const statusBadge = isErrorMsg
-    ? ` <span class="msg-error-badge">[error]</span>`
-    : "";
 
   let readFooterHtml = "";
   if (role === "assistant" && !isErrorMsg && sourceIds.length > 0) {
@@ -563,7 +572,7 @@ function renderMessageBlock(
         if (chars > 6000) cutCount += 1;
       }
     }
-    readFooterHtml = `<div class="muted">read ${sourceIds.length} source${sourceIds.length === 1 ? "" : "s"} · ${totalSent.toLocaleString()} chars · ${cutCount} cut</div>`;
+    readFooterHtml = `<div class="msg-sources">Read ${sourceIds.length} source${sourceIds.length === 1 ? "" : "s"} · ${totalSent.toLocaleString()} chars · ${cutCount} cut</div>`;
   }
 
   const lastPromptHere =
@@ -571,22 +580,22 @@ function renderMessageBlock(
   const retryButtonHtml =
     isErrorMsg
       ? `
-      <div class="composer-controls">
+      <div class="chat-audit-row">
         ${
           lastPromptHere
-            ? `<button class="citation-link" data-retry-prompt="${escapeHtml(lastPromptHere)}">[retry]</button>
-               <button class="citation-link" data-use-planck-prompt="${escapeHtml(lastPromptHere)}">[use planck instead]</button>`
+            ? `<button type="button" class="btn primary" data-retry-prompt="${escapeHtml(lastPromptHere)}">Retry</button>
+               <button type="button" class="btn" data-use-planck-prompt="${escapeHtml(lastPromptHere)}">Use Planck instead</button>`
             : ""
         }
         ${
           plainErr && plainErr.rawDetail && plainErr.rawDetail !== plainErr.summary
-            ? `<button class="citation-link" data-toggle-debug-msg="${escapeHtml(msgId)}">[debug]</button>`
+            ? `<button type="button" class="btn" data-toggle-debug-msg="${escapeHtml(msgId)}">Debug</button>`
             : ""
         }
       </div>
       ${
         debugExpanded && plainErr
-          ? `<div class="muted">${escapeHtml(plainErr.rawDetail)}</div>`
+          ? `<div class="card inset muted">${escapeHtml(plainErr.rawDetail)}</div>`
           : ""
       }
     `
@@ -623,25 +632,24 @@ function renderMessageBlock(
   const embeddedVideosHtml =
     ytVideos.length > 0
       ? `
-      <div class="msg-findings-section">
-        <div class="muted msg-findings-header">embedded video players (${ytVideos.length}):</div>
-        <div class="chat-video-grid">
+      <div class="chat-section-block">
+        <div class="label">Videos <span class="ct">${ytVideos.length}</span></div>
+        <div class="video-grid">
           ${ytVideos
             .slice(0, 4)
             .map(
               (v) => `
-            <div class="kb-card chat-video-card">
+            <div class="card chat-video-card">
               <iframe
-                class="chat-video-embed"
                 src="https://www.youtube-nocookie.com/embed/${escapeHtml(v.videoId)}"
                 title="${escapeHtml(v.title)}"
                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                 allowfullscreen
                 loading="lazy"
               ></iframe>
-              <div class="rail-row">
+              <div class="card-h">
                 <span class="truncate" title="${escapeHtml(v.title)}">${escapeHtml(v.title)}</span>
-                <button class="citation-link" data-open-tab-url="${escapeHtml(v.url)}" data-open-tab-title="${escapeHtml(v.title)}">[open tab]</button>
+                <button type="button" class="btn-text end" data-open-tab-url="${escapeHtml(v.url)}" data-open-tab-title="${escapeHtml(v.title)}">Open tab</button>
               </div>
             </div>
           `
@@ -703,18 +711,18 @@ function renderMessageBlock(
   const pagePreviewCardsHtml =
     effectiveCitedSources.length > 0
       ? `
-      <div class="msg-findings-section">
-        <div class="muted msg-findings-header">page previews (${effectiveCitedSources.length}):</div>
-        <div class="chat-preview-cards-grid">
+      <div class="chat-section-block">
+        <div class="label">Page previews <span class="ct">${effectiveCitedSources.length}</span></div>
+        <div class="preview-grid">
           ${effectiveCitedSources
             .slice(0, 6)
             .map((cs, idx) => {
               const dom = extractDomain(cs.url);
               return `
-              <div class="kb-card chat-page-preview-card" data-open-tab-url="${escapeHtml(cs.url)}" data-open-tab-title="${escapeHtml(cs.title)}">
-                <div class="kb-card-header">
-                  <span><strong>[${idx + 1}] ${escapeHtml(dom)}</strong></span>
-                  <button class="citation-link" data-open-tab-url="${escapeHtml(cs.url)}" data-open-tab-title="${escapeHtml(cs.title)}">[open tab ↗]</button>
+              <div class="card link" data-open-tab-url="${escapeHtml(cs.url)}" data-open-tab-title="${escapeHtml(cs.title)}">
+                <div class="card-h">
+                  <b>${idx + 1} · ${escapeHtml(dom)}</b>
+                  <button type="button" class="btn-text end" data-open-tab-url="${escapeHtml(cs.url)}" data-open-tab-title="${escapeHtml(cs.title)}">Open tab</button>
                 </div>
                 <div class="truncate" title="${escapeHtml(cs.title || cs.url)}">${escapeHtml(cs.title || cs.url)}</div>
                 <div class="muted truncate">${escapeHtml(cs.url)}</div>
@@ -730,24 +738,28 @@ function renderMessageBlock(
   const proposalsHtml =
     proposals && proposals.length > 0
       ? `
-      <div class="composer-controls">
+      <div class="chat-section-block">
         ${proposals
           .map((p) => {
             const summaryPart = p.summary ? `, ${escapeHtml(p.summary.slice(0, 80))}` : "";
             const status = p.status ?? "pending";
             if (status === "accepted") {
-              return `<div class="muted">[store] ${escapeHtml(p.type)}: ${escapeHtml(p.name)}${summaryPart} [accepted]</div>`;
+              return `<div class="banner"><span>Stored ${escapeHtml(p.type)}: <b>${escapeHtml(p.name)}</b>${summaryPart}</span><span class="badge">Accepted</span></div>`;
             }
             if (status === "rejected") {
-              return `<div class="muted">[store] ${escapeHtml(p.type)}: ${escapeHtml(p.name)}${summaryPart} [rejected]</div>`;
+              return `<div class="banner"><span class="muted">Skipped ${escapeHtml(p.type)}: ${escapeHtml(p.name)}${summaryPart}</span><span class="badge soft">Rejected</span></div>`;
             }
             return `
-              <div class="rail-row">
-                <span>[store] ${escapeHtml(p.type)}: ${escapeHtml(p.name)}${summaryPart}</span>
-                <span>
-                  <button class="citation-link" data-accept-proposal="${escapeHtml(p.proposal_id)}" data-proposal-msg="${escapeHtml(msgId)}">[accept]</button>
-                  <button class="citation-link" data-reject-proposal="${escapeHtml(p.proposal_id)}" data-proposal-msg="${escapeHtml(msgId)}">[reject]</button>
-                </span>
+              <div class="card inset">
+                <div class="card-h">
+                  <span class="badge soft">Store</span>
+                  <b>${escapeHtml(p.type)}: ${escapeHtml(p.name)}</b>
+                  <span class="end">
+                    <button type="button" class="btn primary" data-accept-proposal="${escapeHtml(p.proposal_id)}" data-proposal-msg="${escapeHtml(msgId)}">Accept</button>
+                    <button type="button" class="btn" data-reject-proposal="${escapeHtml(p.proposal_id)}" data-proposal-msg="${escapeHtml(msgId)}">Reject</button>
+                  </span>
+                </div>
+                ${summaryPart ? `<div class="muted">${escapeHtml(p.summary)}</div>` : ""}
               </div>
             `;
           })
@@ -759,27 +771,26 @@ function renderMessageBlock(
   const findingsHtml =
     nonVideoFindings.length > 0
       ? `
-      <div class="msg-findings-section">
-        <div class="muted msg-findings-header">captured visual findings (${nonVideoFindings.length}):</div>
-        <div class="msg-findings-grid">
+      <div class="chat-section-block">
+        <div class="label">Findings <span class="ct">${nonVideoFindings.length}</span></div>
+        <div class="findings">
           ${nonVideoFindings
             .map(
               (f) => `
             <div
-              class="msg-finding-card"
+              class="finding"
               data-open-tab-url="${escapeHtml(f.page_url || f.image_url)}"
               data-open-tab-title="${escapeHtml(f.title)}"
               title="${escapeHtml(f.title)}${f.price ? ` · ${escapeHtml(f.price)}` : ""}"
             >
               <img
-                class="msg-finding-img"
                 src="${escapeHtml(f.image_url)}"
                 alt="${escapeHtml(f.title)}"
                 loading="lazy"
               />
-              <div class="msg-finding-meta">
-                <div class="msg-finding-title truncate">${escapeHtml(f.title)}</div>
-                ${f.price ? `<div class="msg-finding-price">${escapeHtml(f.price)}</div>` : ""}
+              <div>
+                <div class="truncate">${escapeHtml(f.title)}</div>
+                ${f.price ? `<div class="price">${escapeHtml(f.price)}</div>` : ""}
               </div>
             </div>
           `
@@ -803,17 +814,18 @@ function renderMessageBlock(
   const brainCitationsListHtml =
     citedBrainItems.length > 0
       ? `
-      <div class="composer-controls">
-        <span class="muted">brain memory:</span>
+      <div class="msg-cite-row">
+        <span>Brain memory:</span>
         ${citedBrainItems
           .map(
             (bs) => `
           <button
-            class="citation-link"
+            type="button"
+            class="cite"
             data-brain-cite="${escapeHtml(bs.cite_label)}"
             data-brain-slug="${escapeHtml(bs.slug)}"
-            title="open Brain card: ${escapeHtml(bs.name)}"
-          >[${escapeHtml(bs.cite_label)}] ${escapeHtml(bs.name)}</button>
+            title="Open Brain card: ${escapeHtml(bs.name)}"
+          >${escapeHtml(bs.cite_label)} · ${escapeHtml(bs.name)}</button>
         `
           )
           .join("")}
@@ -823,18 +835,36 @@ function renderMessageBlock(
 
   const watchBtnHtml =
     role === "assistant" && !isErrorMsg && msgId !== "mail-triage-overview"
-      ? ` <button class="citation-link" data-watch-msg="${escapeHtml(msgId)}" title="watch this answer or source for changes">[watch]</button>`
+      ? `<button type="button" class="btn-text" data-watch-msg="${escapeHtml(msgId)}" title="Watch this answer or source for changes">${icon("watch", "ico-sm")}<span>Watch</span></button>`
       : "";
 
   const answerAuditHtml = renderAnswerMetaSectionHtml(msgId, answerMeta);
 
-  return `
-    <div class="msg-block ${isErrorMsg ? "msg-error-block" : ""}">
-      <div class="msg-header">
-        <span>${escapeHtml(role)}${statusBadge}</span>
-        <span>${modelLabel}${srcCountLabel}${escapeHtml(citeStatsLabel)}${watchBtnHtml}</span>
+  if (isErrorMsg) {
+    return `
+      <div class="msg-bot msg-error">
+        <div class="msg-meta">
+          <span>Assistant</span>
+          ${modelLabel ? `<span>· ${modelLabel}</span>` : ""}
+        </div>
+        <div class="banner danger">
+          <span>${formattedBody}</span>
+        </div>
+        ${retryButtonHtml}
       </div>
-      <div class="msg-body">${formattedBody}</div>
+    `;
+  }
+
+  return `
+    <div class="msg-bot">
+      <div class="msg-meta">
+        <span>Assistant</span>
+        ${modelLabel ? `<span>· ${modelLabel}</span>` : ""}
+        ${srcCountLabel ? `<span>${escapeHtml(srcCountLabel)}</span>` : ""}
+        ${citeStatsLabel ? `<span>${escapeHtml(citeStatsLabel)}</span>` : ""}
+        ${watchBtnHtml ? `<span class="msg-meta-acts">${watchBtnHtml}</span>` : ""}
+      </div>
+      <div class="msg-text">${formattedBody}</div>
       ${answerAuditHtml}
       ${readFooterHtml}
       ${brainCitationsListHtml}
@@ -843,7 +873,6 @@ function renderMessageBlock(
       ${findingsHtml}
       ${pagePreviewCardsHtml}
       ${proposalsHtml}
-      ${retryButtonHtml}
     </div>
   `;
 }
@@ -854,18 +883,15 @@ function renderAnswerMetaSectionHtml(
 ): string {
   if (!meta) return "";
   const conf10 = meta.confidence10 ?? 0;
-  const filledBars = Math.max(0, Math.min(10, Math.round(conf10)));
-  const meterStr = `${"=".repeat(filledBars)}${"-".repeat(10 - filledBars)}`;
-  const bandCls =
-    meta.band === "high" || meta.band === "good"
-      ? "news-band-good"
-      : "news-band-low";
+  const pct = Math.max(0, Math.min(100, Math.round(conf10 * 10)));
+  const isLowBand =
+    meta.band === "low" || meta.band === "sceptical" || (meta.conflicts?.length ?? 0) > 0;
   const rolesLine = meta.models_used
-    ? `plan: ${meta.models_used.planner} · read: ${meta.models_used.reader} · analyze: ${meta.models_used.analyzer}`
+    ? `Plan: ${meta.models_used.planner} · Read: ${meta.models_used.reader} · Analyze: ${meta.models_used.analyzer}`
     : "";
 
   const divHtml = meta.divergence
-    ? `<div class="profile-status-banner">[! notice: personal trust shifted result | system-only: ${escapeHtml(String(meta.divergence.system_value ?? "n/a"))} (${meta.divergence.system_confidence.toFixed(1)}/10 ${escapeHtml(meta.divergence.system_band)})]</div>`
+    ? `<div class="banner warn">Personal trust shifted result · system-only: ${escapeHtml(String(meta.divergence.system_value ?? "n/a"))} (${meta.divergence.system_confidence.toFixed(1)}/10 ${escapeHtml(meta.divergence.system_band)})</div>`
     : "";
 
   const defaultOpenExplain =
@@ -875,28 +901,28 @@ function renderAnswerMetaSectionHtml(
 
   const explainBodyHtml = explainOpen
     ? `
-      <div class="kb-card" style="margin-top:6px;">
-        <div class="muted">steps: ${meta.steps.map((s) => escapeHtml(s)).join(" -> ")}</div>
+      <div class="card inset">
+        <div class="muted">Steps: ${meta.steps.map((s) => escapeHtml(s)).join(" → ")}</div>
         ${
           meta.items && meta.items.length > 0
-            ? `<table class="kb-table" style="margin-top:6px;"><thead><tr><th>delta</th><th>reason</th></tr></thead><tbody>${meta.items
+            ? `<div class="table-wrap"><table class="table"><thead><tr><th class="num">Delta</th><th>Reason</th></tr></thead><tbody>${meta.items
                 .map(
                   ([lbl, val]) =>
-                    `<tr><td>${val >= 0 ? `+${val.toFixed(1)}` : val.toFixed(1)}</td><td>${escapeHtml(lbl)}</td></tr>`
+                    `<tr><td class="num">${val >= 0 ? `+${val.toFixed(1)}` : val.toFixed(1)}</td><td>${escapeHtml(lbl)}</td></tr>`
                 )
-                .join("")}</tbody></table>`
+                .join("")}</tbody></table></div>`
             : ""
         }
         ${
           meta.sources && meta.sources.length > 0
-            ? `<table class="kb-table" style="margin-top:6px;"><thead><tr><th>role</th><th>domain</th><th>fam</th><th>sys</th><th>you</th><th>eff</th><th>category</th><th>trust</th></tr></thead><tbody>${meta.sources
+            ? `<div class="table-wrap"><table class="table"><thead><tr><th>Role</th><th>Domain</th><th>Family</th><th class="num">Sys</th><th class="num">You</th><th class="num">Eff</th><th>Category</th><th>Trust</th></tr></thead><tbody>${meta.sources
                 .map((s) => {
                   const t = s.trust;
-                  const youStr = t.personal !== null && t.personal !== undefined ? t.personal.toFixed(1) : "-";
-                  const confFlag = t.conflict ? " [!]" : "";
-                  return `<tr><td>${escapeHtml(s.role)}</td><td><button class="citation-link" data-open-tab-url="${escapeHtml(s.url)}" data-open-tab-title="${escapeHtml(s.title)}">${escapeHtml(s.domain)}</button>${escapeHtml(confFlag)}</td><td>${escapeHtml(t.family)}</td><td>${t.system.toFixed(0)}</td><td>${escapeHtml(youStr)}</td><td><strong>${t.effective.toFixed(1)}</strong></td><td>${escapeHtml(t.category)}</td><td><button class="citation-link" data-news-trust-msg="${escapeHtml(msgId)}" data-news-trust-dom="${escapeHtml(s.domain)}" data-news-trust-delta="2">[+]</button> <button class="citation-link" data-news-trust-msg="${escapeHtml(msgId)}" data-news-trust-dom="${escapeHtml(s.domain)}" data-news-trust-delta="-2">[-]</button></td></tr>`;
+                  const youStr = t.personal !== null && t.personal !== undefined ? t.personal.toFixed(1) : "—";
+                  const confFlag = t.conflict ? ` <span class="badge soft">Conflict</span>` : "";
+                  return `<tr><td>${escapeHtml(s.role)}</td><td><button type="button" class="btn-text" data-open-tab-url="${escapeHtml(s.url)}" data-open-tab-title="${escapeHtml(s.title)}">${escapeHtml(s.domain)}</button>${confFlag}</td><td>${escapeHtml(t.family)}</td><td class="num">${t.system.toFixed(0)}</td><td class="num">${escapeHtml(youStr)}</td><td class="num"><b>${t.effective.toFixed(1)}</b></td><td>${escapeHtml(t.category)}</td><td><button type="button" class="btn-text" data-news-trust-msg="${escapeHtml(msgId)}" data-news-trust-dom="${escapeHtml(s.domain)}" data-news-trust-delta="2">+</button> <button type="button" class="btn-text" data-news-trust-msg="${escapeHtml(msgId)}" data-news-trust-dom="${escapeHtml(s.domain)}" data-news-trust-delta="-2">-</button></td></tr>`;
                 })
-                .join("")}</tbody></table>`
+                .join("")}</tbody></table></div>`
             : ""
         }
       </div>
@@ -906,16 +932,16 @@ function renderAnswerMetaSectionHtml(
   const inDepthBodyHtml =
     inDepthOpen && meta.passages && meta.passages.length > 0
       ? `
-      <div class="kb-card" style="margin-top:6px;">
+      <div class="card inset">
         ${meta.passages
           .map(
             (p) => `
           <div class="source-row">
             <div class="source-row-top">
-              <strong>${escapeHtml(p.domain)}</strong>
-              <button class="citation-link" data-open-tab-url="${escapeHtml(p.url)}" data-open-tab-title="${escapeHtml(p.title || p.domain)}">[open tab]</button>
+              <b class="t">${escapeHtml(p.domain)}</b>
+              <button type="button" class="btn-text" data-open-tab-url="${escapeHtml(p.url)}" data-open-tab-title="${escapeHtml(p.title || p.domain)}">Open tab</button>
             </div>
-            <div>${escapeHtml(p.text)}</div>
+            <div class="muted">${escapeHtml(p.text)}</div>
           </div>`
           )
           .join("")}
@@ -924,19 +950,18 @@ function renderAnswerMetaSectionHtml(
       : "";
 
   return `
-    <div class="news-audit-box">
-      <div class="composer-controls">
-        <span class="news-band-pill ${bandCls}">[${escapeHtml((meta.band || "low").toUpperCase())} · ${conf10.toFixed(1)}/10 · ${escapeHtml(meta.band_label)}]</span>
-        <span class="muted">[${escapeHtml(meterStr)}]</span>
-        ${rolesLine ? `<span class="muted">${escapeHtml(rolesLine)}</span>` : ""}
+    <div class="chat-audit">
+      <div class="chat-audit-row">
+        <span class="conf ${isLowBand ? "low" : ""}" style="--c:${pct}%"><i></i>${conf10.toFixed(1)}/10 · ${escapeHtml(meta.band_label)}</span>
+        ${rolesLine ? `<span>${escapeHtml(rolesLine)}</span>` : ""}
       </div>
       ${divHtml}
       ${meta.privacy_disclosure ? `<div class="muted">${escapeHtml(meta.privacy_disclosure)}</div>` : ""}
-      <div class="composer-controls">
-        <button class="citation-link" data-toggle-explain-msg="${escapeHtml(msgId)}">[${explainOpen ? "hide" : "show"} how i got this]</button>
+      <div class="chat-audit-row">
+        <button type="button" class="btn-text" data-toggle-explain-msg="${escapeHtml(msgId)}">${explainOpen ? "Hide how I got this" : "Show how I got this"}</button>
         ${
           meta.passages && meta.passages.length > 0
-            ? `<button class="citation-link" data-toggle-indepth-msg="${escapeHtml(msgId)}">[${inDepthOpen ? "hide" : "show"} in depth · ${meta.passages.length} passages]</button>`
+            ? `<button type="button" class="btn-text" data-toggle-indepth-msg="${escapeHtml(msgId)}">${inDepthOpen ? "Hide" : "Show"} in depth · ${meta.passages.length} passages</button>`
             : ""
         }
       </div>
@@ -984,8 +1009,8 @@ function renderChatEmailCardsHtml(
   if (cards.length === 0) return "";
 
   return `
-    <div class="msg-findings-section">
-      <div class="muted msg-findings-header">referenced emails &amp; attachments (${cards.length}):</div>
+    <div class="chat-section-block">
+      <div class="label">Referenced emails <span class="ct">${cards.length}</span></div>
       ${cards
         .map((ec) => {
           const expandKey = `${msgId}:${ec.message_id}`;
@@ -997,26 +1022,28 @@ function renderChatEmailCardsHtml(
           const attsHtml =
             atts.length > 0
               ? `
-            <div class="composer-controls">
-              <span class="muted">attachments (${atts.length}):</span>
+            <div class="chat-audit-row">
+              <span class="muted">Attachments (${atts.length}):</span>
               ${atts
                 .map((att) => {
                   const attKey = `${ec.message_id}:${att.part_id}`;
                   const previewObj = state.previewedAttachments[attKey];
                   const sizeKb = Math.max(1, Math.round((att.size || 0) / 1024));
                   return `
-                    <span class="context-pill">
+                    <span class="pill">
                       <span>${escapeHtml(att.filename)} (${sizeKb} KB)</span>
                       <button
-                        class="citation-link"
+                        type="button"
+                        class="btn-text"
                         data-chat-preview-att="${escapeHtml(ec.message_id)}"
                         data-part-id="${escapeHtml(String(att.part_id))}"
-                      >${previewObj ? "[hide preview]" : "[preview in chat]"}</button>
+                      >${previewObj ? "Hide" : "Preview"}</button>
                       <button
-                        class="citation-link"
+                        type="button"
+                        class="btn-text"
                         data-chat-download-att="${escapeHtml(ec.message_id)}"
                         data-part-id="${escapeHtml(String(att.part_id))}"
-                      >[download]</button>
+                      >Download</button>
                     </span>
                   `;
                 })
@@ -1028,35 +1055,38 @@ function renderChatEmailCardsHtml(
                 const prev = state.previewedAttachments[attKey];
                 if (!prev || !prev.data_url) return "";
                 if (prev.mime.startsWith("image/")) {
-                  return `<div class="kb-card"><img class="chat-attachment-img" src="${escapeHtml(prev.data_url)}" alt="${escapeHtml(prev.filename)}" /></div>`;
+                  return `<img class="attach-img" src="${escapeHtml(prev.data_url)}" alt="${escapeHtml(prev.filename)}" />`;
                 }
-                return `<div class="kb-card"><embed class="chat-attachment-embed" type="${escapeHtml(prev.mime)}" src="${escapeHtml(prev.data_url)}" /></div>`;
+                return `<embed class="attach-embed" type="${escapeHtml(prev.mime)}" src="${escapeHtml(prev.data_url)}" />`;
               })
               .join("")}
           `
               : "";
 
           return `
-            <div class="kb-card">
-              <div class="kb-card-header">
-                <span><strong>${escapeHtml(ec.subject)}</strong> · <span class="source-cut-badge">${escapeHtml(ec.label)}</span></span>
-                <div>
+            <div class="card inset">
+              <div class="card-h">
+                <b>${escapeHtml(ec.subject)}</b>
+                <span class="badge soft">${escapeHtml(ec.label)}</span>
+                <span class="end">
                   <button
-                    class="citation-link"
+                    type="button"
+                    class="btn-text"
                     data-chat-toggle-email="${escapeHtml(expandKey)}"
                     data-email-mid="${escapeHtml(ec.message_id)}"
-                  >${isExpanded ? "[hide email in chat]" : "[open email in chat]"}</button>
+                  >${isExpanded ? "Hide body" : "Show body"}</button>
                   <button
-                    class="citation-link"
+                    type="button"
+                    class="btn-text"
                     data-chat-open-email-tab="${escapeHtml(ec.message_id)}"
                     data-email-subj="${escapeHtml(ec.subject)}"
-                  >[open in tab]</button>
-                </div>
+                  >Open tab</button>
+                </span>
               </div>
-              <div class="muted">from: ${escapeHtml(fromDisp)}</div>
+              <div class="muted">From: ${escapeHtml(fromDisp)}</div>
               ${
                 isExpanded
-                  ? `<div class="msg-body chat-inline-email-body"><pre>${escapeHtml(ec.body_text || ec.snippet || "(empty body)")}${ec.quoted_text ? `\n\n--- Quoted Thread ---\n${escapeHtml(ec.quoted_text)}` : ""}</pre></div>`
+                  ? `<div class="chat-inline-email"><pre>${escapeHtml(ec.body_text || ec.snippet || "(empty body)")}${ec.quoted_text ? `\n\n--- Quoted Thread ---\n${escapeHtml(ec.quoted_text)}` : ""}</pre></div>`
                   : `<div class="muted truncate">${escapeHtml(ec.snippet || ec.body_text.slice(0, 160))}</div>`
               }
               ${attsHtml}
@@ -1072,7 +1102,7 @@ function renderTaskCardBlock(task: AgentTaskCard): string {
   const isRunning =
     task.status === "running" || task.status === "waiting_confirm";
   const stopBtnHtml = isRunning
-    ? `<button class="citation-link" data-task-stop="${escapeHtml(task.id)}" data-stop-token="${escapeHtml(task.stop_token)}">[stop]</button>`
+    ? `<button type="button" class="btn" data-task-stop="${escapeHtml(task.id)}" data-stop-token="${escapeHtml(task.stop_token)}">Stop</button>`
     : "";
 
   const stepsHtml = (task.steps ?? [])
@@ -1081,45 +1111,48 @@ function renderTaskCardBlock(task: AgentTaskCard): string {
         const summary = step.action_summary || step.text;
         if (step.status === "waiting_confirm") {
           return `
-            <div class="rail-row">
-              <span>[send-gate] ${escapeHtml(summary)}</span>
-              <span>
+            <div class="draft">
+              <div class="gate">Send gate · confirmation required</div>
+              <div>${escapeHtml(summary)}</div>
+              <div class="acts">
                 <button
-                  class="citation-link"
+                  type="button"
+                  class="btn primary"
                   data-task-confirm="${escapeHtml(task.id)}"
                   data-step-id="${escapeHtml(step.id)}"
                   data-confirm-token="${escapeHtml(step.confirm_token ?? "")}"
-                >[confirm]</button>
+                >Confirm</button>
                 <button
-                  class="citation-link"
+                  type="button"
+                  class="btn"
                   data-task-cancel="${escapeHtml(task.id)}"
                   data-step-id="${escapeHtml(step.id)}"
-                >[cancel]</button>
-              </span>
+                >Cancel</button>
+              </div>
             </div>
           `;
         }
-        return `<div class="streaming-step-line">[send-gate · ${escapeHtml(step.status)}] ${escapeHtml(summary)}</div>`;
+        return `<div class="stream-step">Send gate (${escapeHtml(step.status)}): ${escapeHtml(summary)}</div>`;
       }
-      const prefix = step.status === "running" ? "&gt;" : "ok";
-      return `<div class="streaming-step-line">${prefix} ${escapeHtml(step.text)}</div>`;
+      const prefix = step.status === "running" ? "Now" : "Done";
+      return `<div class="stream-step">${prefix} · ${escapeHtml(step.text)}</div>`;
     })
     .join("");
 
   const activeSourceIds = (state.activeDetail?.sources ?? []).map((s) => s.id);
   const resultHtml = task.result_md
-    ? `<div class="msg-body">${formatCitationsInText(task.result_md, activeSourceIds)}</div>`
+    ? `<div class="msg-text">${formatCitationsInText(task.result_md, activeSourceIds)}</div>`
     : "";
 
   return `
-    <div class="msg-block" data-task-card="${escapeHtml(task.id)}">
-      <div class="msg-header">
-        <span>task · ${escapeHtml(task.agent)} [${escapeHtml(task.status)}]</span>
-        <span>goal: ${escapeHtml(task.goal)} ${stopBtnHtml}</span>
+    <div class="card" data-task-card="${escapeHtml(task.id)}">
+      <div class="card-h">
+        <b>Task · ${escapeHtml(task.agent)}</b>
+        <span class="badge soft">${escapeHtml(task.status)}</span>
+        <span class="end muted truncate">${escapeHtml(task.goal)}</span>
+        ${stopBtnHtml}
       </div>
-      <div class="streaming-status-box">
-        <div class="streaming-steps-list">${stepsHtml}</div>
-      </div>
+      <div class="stream">${stepsHtml}</div>
       ${resultHtml}
     </div>
   `;
@@ -1154,7 +1187,7 @@ function renderMarkdownTablesInHtml(escapedWithCites: string): string {
       const tbody = `<tbody>${bodyRows
         .map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`)
         .join("")}</tbody>`;
-      out.push(`<table class="kb-table">${thead}${tbody}</table>`);
+      out.push(`<div class="table-wrap"><table class="table">${thead}${tbody}</table></div>`);
       continue;
     }
     out.push(lines[i]);
@@ -1171,7 +1204,7 @@ export function formatCitationsInText(
 ): string {
   const escaped = escapeHtml(text).replace(
     /\[unsourced\]/g,
-    `<span class="msg-error-badge" title="citation index outside source list">[unsourced]</span>`
+    `<span class="cite flagged" title="Citation index outside source list">unsourced</span>`
   );
   const withSrcCites = escaped.replace(/\[(\d+)\]/g, (_match, digits) => {
     const idx = Number(digits);
@@ -1183,7 +1216,7 @@ export function formatCitationsInText(
       (sourceIds.length > 0 && idx > sourceIds.length) ||
       outOfRangeCheck
     ) {
-      return `<span class="msg-error-badge" title="citation [${idx}] outside ${sourceIds.length} source(s)">[unsourced]</span>`;
+      return `<span class="cite flagged" title="Citation ${idx} outside ${sourceIds.length} source(s)">unsourced</span>`;
     }
     const sourceId = sourceIds[idx - 1] ?? "";
     const flaggedEntries = (citationCheck ?? []).filter(
@@ -1193,10 +1226,10 @@ export function formatCitationsInText(
       const missingItems = Array.from(
         new Set(flaggedEntries.flatMap((e) => e.missing ?? []))
       );
-      const tooltip = `not found in source [${idx}]: ${missingItems.join(", ")}`;
-      return `<button class="citation-link msg-error-badge" data-citation-idx="${idx}" data-citation-src="${escapeHtml(sourceId)}" title="${escapeHtml(tooltip)}">[${idx}?]</button>`;
+      const tooltip = `Not found in source ${idx}: ${missingItems.join(", ")}`;
+      return `<button type="button" class="cite flagged" data-citation-idx="${idx}" data-citation-src="${escapeHtml(sourceId)}" title="${escapeHtml(tooltip)}">${idx}?</button>`;
     }
-    return `<button class="citation-link" data-citation-idx="${idx}" data-citation-src="${escapeHtml(sourceId)}">[${idx}]</button>`;
+    return `<button type="button" class="cite" data-citation-idx="${idx}" data-citation-src="${escapeHtml(sourceId)}">${idx}</button>`;
   });
 
   const withBrainCites = withSrcCites.replace(/\[B(\d+)\]/g, (_match, digits) => {
@@ -1207,7 +1240,7 @@ export function formatCitationsInText(
     );
     const maxB = brainSources?.length ?? 0;
     if (bIdx < 1 || (maxB > 0 && bIdx > maxB) || outOfRangeCheck) {
-      return `<span class="msg-error-badge" title="brain citation [${bKey}] outside ${maxB} brain item(s)">[unsourced]</span>`;
+      return `<span class="cite flagged" title="Brain citation ${bKey} outside ${maxB} brain item(s)">unsourced</span>`;
     }
     const bs = brainSources?.[bIdx - 1];
     const slug = bs?.slug ?? "";
@@ -1219,16 +1252,16 @@ export function formatCitationsInText(
       const missingItems = Array.from(
         new Set(flaggedEntries.flatMap((e) => e.missing ?? []))
       );
-      const tooltip = `not found in brain [${bKey}] (${labelName}): ${missingItems.join(", ")}`;
-      return `<button class="citation-link msg-error-badge" data-brain-cite="${escapeHtml(bKey)}" data-brain-slug="${escapeHtml(slug)}" title="${escapeHtml(tooltip)}">[${escapeHtml(bKey)}?]</button>`;
+      const tooltip = `Not found in brain ${bKey} (${labelName}): ${missingItems.join(", ")}`;
+      return `<button type="button" class="cite flagged" data-brain-cite="${escapeHtml(bKey)}" data-brain-slug="${escapeHtml(slug)}" title="${escapeHtml(tooltip)}">${escapeHtml(bKey)}?</button>`;
     }
-    return `<button class="citation-link" data-brain-cite="${escapeHtml(bKey)}" data-brain-slug="${escapeHtml(slug)}" title="open Brain card: ${escapeHtml(labelName)}">[${escapeHtml(bKey)}]</button>`;
+    return `<button type="button" class="cite" data-brain-cite="${escapeHtml(bKey)}" data-brain-slug="${escapeHtml(slug)}" title="Open Brain card: ${escapeHtml(labelName)}">${escapeHtml(bKey)}</button>`;
   });
   const withMdLinksAndBold = withBrainCites
     .replace(
       /\[([^\][]+)\]\((https?:\/\/[^\s)]+)\)/g,
       (_m, labelTxt, urlTxt) =>
-        `<button class="citation-link inline-page-link" data-open-tab-url="${urlTxt}" data-open-tab-title="${labelTxt}" title="open ${urlTxt} in tab">${labelTxt} ↗</button>`
+        `<button type="button" class="btn-text inline-page-link" data-open-tab-url="${urlTxt}" data-open-tab-title="${labelTxt}" title="Open ${urlTxt} in tab">${labelTxt} ↗</button>`
     )
     .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
   return renderMarkdownTablesInHtml(withMdLinksAndBold);
