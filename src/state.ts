@@ -176,6 +176,7 @@ export interface AppState {
   telemetryOpen: boolean;
   profileMenuOpen: boolean;
   composerModelMenuOpen: boolean;
+  commandModelMenuOpen: "start" | "overlay" | null;
   composerContextExpanded: boolean;
   showKnowledgeView: boolean;
   showBrainView: boolean;
@@ -330,6 +331,7 @@ export const state: AppState = {
   telemetryOpen: false,
   profileMenuOpen: false,
   composerModelMenuOpen: false,
+  commandModelMenuOpen: null,
   composerContextExpanded: false,
   showKnowledgeView: false,
   showBrainView: false,

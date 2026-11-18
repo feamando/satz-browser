@@ -450,8 +450,19 @@ async function initApp(): Promise<void> {
         scheduleWebviewLayoutSync();
         return;
       }
+      if (state.commandModelMenuOpen !== null) {
+        const prevMenu = state.commandModelMenuOpen;
+        state.commandModelMenuOpen = null;
+        if (prevMenu === "overlay" && state.commandBarOpen) {
+          renderCommandBarOverlay(getStartScreenActions());
+        } else if (prevMenu === "start" && document.getElementById("start-command-bar-box")) {
+          renderViewportRegion();
+        }
+        return;
+      }
       if (state.commandBarOpen) {
         state.commandBarOpen = false;
+        state.commandModelMenuOpen = null;
         renderCommandBarOverlay(getStartScreenActions());
         return;
       }
@@ -552,6 +563,18 @@ async function initApp(): Promise<void> {
     ) {
       state.composerModelMenuOpen = false;
       refreshChatContextIfVisible();
+    }
+    if (
+      state.commandModelMenuOpen !== null &&
+      !target.closest(".model-chip-anchor")
+    ) {
+      const prevMenu = state.commandModelMenuOpen;
+      state.commandModelMenuOpen = null;
+      if (prevMenu === "overlay" && state.commandBarOpen) {
+        renderCommandBarOverlay(getStartScreenActions());
+      } else if (prevMenu === "start" && document.getElementById("start-command-bar-box")) {
+        renderViewportRegion();
+      }
     }
     if (changed) {
       renderAllRegions();
@@ -2320,6 +2343,7 @@ function handleToggleCommandBar(): void {
   }
   state.commandBarOpen = !state.commandBarOpen;
   state.commandBarSelectedIdx = 0;
+  state.commandModelMenuOpen = null;
   renderCommandBarOverlay(getStartScreenActions());
   if (state.commandBarOpen) {
     void refreshDigest();
@@ -2394,6 +2418,7 @@ function getStartScreenActions() {
     },
     onCloseCommandBar: () => {
       state.commandBarOpen = false;
+      state.commandModelMenuOpen = null;
       renderCommandBarOverlay(getStartScreenActions());
     },
     onGoHome: () => {
@@ -2427,6 +2452,7 @@ async function handleExecuteCommandRoute(
   raw: string
 ): Promise<void> {
   state.commandBarOpen = false;
+  state.commandModelMenuOpen = null;
   renderCommandBarOverlay(getStartScreenActions());
 
   if (route.kind === "run_command") {

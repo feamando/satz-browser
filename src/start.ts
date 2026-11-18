@@ -1,7 +1,9 @@
+import { icon, type IconName } from "./design-system/icons";
 import {
   escapeHtml,
   formatRelativeTime,
   getAvailableModelsForPicker,
+  getModelPrivacySummary,
   MOD_LABEL,
   rankCommandBarRoutes,
   state,
@@ -22,32 +24,60 @@ export interface StartScreenActions {
   onCreateProfile?: (name: string, pin: string) => void;
 }
 
-function digestKindTag(kind?: string): string {
+function digestKindMeta(kind?: string): { ico: IconName; label: string } {
   switch (kind) {
     case "watch_triggered":
-      return "[watch]";
+      return { ico: "watch", label: "Watch" };
     case "bookmark_changed":
-      return "[changed]";
+      return { ico: "star", label: "Changed" };
     case "mail_reply":
-      return "[reply]";
+      return { ico: "reply", label: "Reply" };
     case "mail_recent":
-      return "[mail]";
+      return { ico: "mail", label: "Mail" };
     case "mail_ping":
-      return "[ping]";
+      return { ico: "mail", label: "Ping" };
     case "mail_order":
-      return "[order]";
+      return { ico: "box", label: "Order" };
     case "mail_promo":
-      return "[promo]";
+      return { ico: "spark", label: "Promo" };
     case "news_story":
-      return "[news]";
+      return { ico: "news", label: "News" };
     case "brain_entity":
-      return "[brain]";
+      return { ico: "brain", label: "Brain" };
     case "digest_adjacent":
-      return "[related]";
+      return { ico: "globe", label: "Related" };
     case "source_capture":
-      return "[captured]";
+      return { ico: "doc", label: "Captured" };
     default:
-      return "[web]";
+      return { ico: "globe", label: "Web" };
+  }
+}
+
+function routeKindIcon(kind: CommandBarRoute["kind"]): string {
+  switch (kind) {
+    case "open_url":
+      return icon("globe", "ico-sm");
+    case "ask_model":
+      return icon("spark", "ico-sm");
+    case "search_mail":
+      return icon("mail", "ico-sm");
+    case "search_brain":
+      return icon("brain", "ico-sm");
+    case "search_news":
+      return icon("news", "ico-sm");
+    default:
+      return icon("cmd", "ico-sm");
+  }
+}
+
+function convOriginIcon(origin?: string): string {
+  switch (origin) {
+    case "mail":
+      return icon("mail", "ico-sm");
+    case "news":
+      return icon("news", "ico-sm");
+    default:
+      return icon("chat", "ico-sm");
   }
 }
 
@@ -56,17 +86,51 @@ function formatDigestTime(ts?: number): string {
   return formatRelativeTime(String(Math.floor(ts)));
 }
 
+function formatHomeDateLine(): string {
+  const now = new Date();
+  const weekday = now
+    .toLocaleDateString("en-US", { weekday: "long" })
+    .toUpperCase();
+  const day = String(now.getDate());
+  const month = now
+    .toLocaleDateString("en-US", { month: "short" })
+    .toUpperCase();
+  return `${weekday} · ${day} ${month}`;
+}
+
+function formatHomeGreeting(): string {
+  const profileInfo = state.knowledge.profile;
+  const activeName = profileInfo?.unlocked
+    ? profileInfo.active_profile?.name?.trim()
+    : "";
+  const hour = new Date().getHours();
+  const part =
+    hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+  if (activeName) {
+    return `${part}, ${activeName}`;
+  }
+  return "Where do you want to start?";
+}
+
+function formatPlainPrivacyNote(rawPrivacy: string): string {
+  return rawPrivacy.replace(/^\[|\]$/g, "").trim();
+}
+
+function renderBannerClass(msg: string): string {
+  return msg.toLowerCase().startsWith("error") ? "banner danger" : "banner warn";
+}
+
 function renderDigestItemsHtml(
   items: DigestEntry[],
   mode: "start" | "overlay"
 ): string {
   if (items.length === 0) {
-    return `<div class="muted">unlock profile, receive mail, browse pages, or refresh news to populate your feed</div>`;
+    return `<div class="home-empty">Unlock a profile, receive mail, browse pages, or refresh news to populate your feed.</div>`;
   }
   const visible = mode === "overlay" ? items.slice(0, 6) : items;
   return visible
     .map((item) => {
-      const tag = digestKindTag(item.kind);
+      const kind = digestKindMeta(item.kind);
       const relTime = formatDigestTime(item.ts);
       const leadImg = (item.image_url || "").trim();
       const extraImgs =
@@ -75,55 +139,45 @@ function renderDigestItemsHtml(
           : [];
       const snippetText = (item.summary || "").trim();
       const reasonText = (item.reason || "").trim();
+      const metaParts = [
+        kind.label,
+        item.domain,
+        relTime,
+        mode === "start" ? reasonText : "",
+      ].filter((p) => Boolean(p && p.trim()));
+
       return `
         <div
-          class="start-digest-card ${mode === "overlay" ? "compact" : ""}"
+          class="digest ${mode === "overlay" ? "compact" : ""}"
           data-digest-url="${escapeHtml(item.url)}"
           data-digest-title="${escapeHtml(item.title)}"
           ${item.conversation_id ? `data-digest-conv-id="${escapeHtml(item.conversation_id)}"` : ""}
         >
-          <div class="start-digest-card-top">
-            <span class="start-digest-title-wrap">
-              <span class="start-digest-kind">${escapeHtml(tag)}</span>
-              <strong>${escapeHtml(item.title)}</strong>
-            </span>
-            <span class="muted start-digest-right-meta">
-              ${escapeHtml(item.domain)}${relTime ? ` · ${escapeHtml(relTime)}` : ""}
-            </span>
+          <div class="digest-src" title="${escapeHtml(kind.label)}">
+            ${icon(kind.ico)}
+          </div>
+          <div class="digest-body">
+            <b>${escapeHtml(item.title)}</b>
+            <small>${escapeHtml(metaParts.join(" · "))}</small>
+            ${
+              mode === "start" && snippetText
+                ? `<div class="digest-snippet">${escapeHtml(snippetText)}</div>`
+                : ""
+            }
+            ${
+              extraImgs.length > 0
+                ? `<div class="digest-thumbs">${extraImgs
+                    .map(
+                      (iu) =>
+                        `<img src="${escapeHtml(iu)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
+                    )
+                    .join("")}</div>`
+                : ""
+            }
           </div>
           ${
-            leadImg || snippetText || reasonText
-              ? `
-                <div class="start-digest-media">
-                  ${
-                    leadImg
-                      ? `<img class="start-digest-thumb ${mode === "overlay" ? "compact" : ""}" src="${escapeHtml(leadImg)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
-                      : ""
-                  }
-                  <div class="start-digest-body">
-                    ${
-                      snippetText
-                        ? `<div class="start-digest-snippet">${escapeHtml(snippetText)}</div>`
-                        : ""
-                    }
-                    ${
-                      reasonText
-                        ? `<div class="start-digest-meta muted">${escapeHtml(reasonText)}</div>`
-                        : ""
-                    }
-                    ${
-                      extraImgs.length > 0
-                        ? `<div class="start-digest-extra-thumbs">${extraImgs
-                            .map(
-                              (iu) =>
-                                `<img class="start-digest-extra-thumb" src="${escapeHtml(iu)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
-                            )
-                            .join("")}</div>`
-                        : ""
-                    }
-                  </div>
-                </div>
-              `
+            leadImg
+              ? `<img class="digest-thumb ${mode === "overlay" ? "compact" : ""}" src="${escapeHtml(leadImg)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
               : ""
           }
         </div>
@@ -143,6 +197,7 @@ function bindDigestItemEvents(
       const url = node.getAttribute("data-digest-url");
       const title = node.getAttribute("data-digest-title") ?? url ?? "";
       const convId = node.getAttribute("data-digest-conv-id") ?? undefined;
+      state.commandModelMenuOpen = null;
       if (closeCommandBarOnClick) {
         actions.onCloseCommandBar?.();
       }
@@ -151,7 +206,7 @@ function bindDigestItemEvents(
   });
 
   root
-    .querySelectorAll("img.start-digest-thumb, img.start-digest-extra-thumb")
+    .querySelectorAll("img.digest-thumb, .digest-thumbs img")
     .forEach((imgEl) => {
       imgEl.addEventListener("error", () => {
         imgEl.remove();
@@ -192,25 +247,22 @@ function renderRoutesListHtml(
   prefixId: string
 ): string {
   return `
-    <div id="${escapeHtml(prefixId)}-routes" class="kb-section" style="margin-top:8px; border-top:1px solid #333333; padding-top:6px;">
+    <div id="${escapeHtml(prefixId)}-routes" class="cmd-results">
       ${routes
         .map((r, idx) => {
           const isSelected = idx === selectedIdx;
-          const badge = idx === 0 ? "[default · enter]" : `[${idx + 1}]`;
+          const privacyText = formatPlainPrivacyNote(r.privacy);
           return `
-            <div
-              class="rail-row ${isSelected ? "active" : ""}"
+            <button
+              type="button"
+              class="menu-item"
               data-cmd-route-idx="${idx}"
-              style="padding:4px 6px; cursor:pointer; justify-content:space-between; border:1px solid ${isSelected ? "#e8e8e8" : "transparent"};"
+              aria-selected="${isSelected ? "true" : "false"}"
             >
-              <span class="truncate">
-                <span class="muted">${escapeHtml(badge)}</span>
-                ${escapeHtml(r.label)}
-              </span>
-              <span class="muted" style="margin-left:8px; flex-shrink:0;">
-                [${escapeHtml(r.privacy)}]
-              </span>
-            </div>
+              ${routeKindIcon(r.kind)}
+              <span class="truncate">${escapeHtml(r.label)}</span>
+              <span class="end">${escapeHtml(privacyText)}</span>
+            </button>
           `;
         })
         .join("")}
@@ -218,9 +270,150 @@ function renderRoutesListHtml(
   `;
 }
 
+function renderCommandModelSelectorHtml(mode: "start" | "overlay"): string {
+  const models = getAvailableModelsForPicker();
+  const cur = models.find((m) => m.id === state.selectedModel);
+  const curLabel = cur?.label || state.selectedModel;
+  const privacyNote = formatPlainPrivacyNote(
+    getModelPrivacySummary(state.selectedModel)
+  );
+  const menuOpen = state.commandModelMenuOpen === mode;
+  return `
+    <div class="model-chip-anchor">
+      <button
+        id="${mode}-model-chip"
+        class="chip"
+        type="button"
+        title="${escapeHtml(privacyNote)}"
+        aria-expanded="${menuOpen ? "true" : "false"}"
+      >
+        ${icon("spark", "ico-sm")}
+        <span class="truncate">${escapeHtml(curLabel)}</span>
+        ${icon("chev", "ico-sm")}
+      </button>
+      ${
+        menuOpen
+          ? `
+            <div class="menu model-menu-pop" id="${mode}-model-menu" role="menu">
+              <div class="model-menu-note">${escapeHtml(privacyNote)}</div>
+              ${models
+                .map(
+                  (m) => `
+                <button
+                  type="button"
+                  class="menu-item ${state.selectedModel === m.id ? "active" : ""}"
+                  data-select-cmd-model="${escapeHtml(m.id)}"
+                >
+                  <span class="truncate">${escapeHtml(m.label)}</span>
+                  ${state.selectedModel === m.id ? icon("check", "ico-sm") : ""}
+                </button>
+              `
+                )
+                .join("")}
+            </div>
+          `
+          : ""
+      }
+    </div>
+  `;
+}
+
+function renderBigBarHtml(
+  mode: "start" | "overlay",
+  routes: CommandBarRoute[],
+  selectedIdx: number
+): string {
+  const boxId = mode === "start" ? "start-command-bar-box" : "command-bar-modal";
+  const inputId = mode === "start" ? "start-main-input" : "command-bar-input";
+  const routesSlotId =
+    mode === "start" ? "start-routes-slot" : "overlay-routes-slot";
+
+  return `
+    <div id="${boxId}" class="bigbar ${mode === "overlay" ? "cmd-bigbar" : ""}">
+      <div class="bigbar-in">
+        ${icon("cmd", "ico-sm")}
+        <input
+          id="${inputId}"
+          class="bigbar-input"
+          type="text"
+          spellcheck="false"
+          autocorrect="off"
+          autocapitalize="off"
+          placeholder="URL, question, mail: term, brain: term, or command"
+          value="${escapeHtml(state.commandBarInput)}"
+        />
+        ${
+          mode === "start"
+            ? `<span class="kbd">${escapeHtml(MOD_LABEL)}+K</span>`
+            : `<button id="command-bar-close-btn" class="icon-btn" type="button" title="Close command bar (Esc)">${icon("x", "ico-sm")}</button>`
+        }
+      </div>
+
+      <div class="bigbar-ctl">
+        ${renderCommandModelSelectorHtml(mode)}
+        <button
+          id="${mode}-web-toggle"
+          type="button"
+          class="chip ${state.webSearchEnabled ? "on" : ""}"
+          aria-pressed="${state.webSearchEnabled ? "true" : "false"}"
+          title="Toggle live web search"
+        >
+          ${icon("globe", "ico-sm")}
+          <span>Web</span>
+        </button>
+        ${
+          mode === "overlay"
+            ? `
+              <button id="command-bar-home-btn" class="chip" type="button" title="Go to Home">
+                ${icon("home", "ico-sm")}
+                <span>Home</span>
+              </button>
+              <button id="command-bar-refresh-btn" class="chip" type="button" title="Refresh For you digest">
+                ${icon("reload", "ico-sm")}
+                <span>Refresh</span>
+              </button>
+            `
+            : ""
+        }
+        <button
+          id="${mode}-submit-btn"
+          class="send"
+          type="button"
+          title="Run selected route (Enter)"
+        >
+          ${icon("send", "ico-sm")}
+        </button>
+      </div>
+
+      <div id="${routesSlotId}">
+        ${renderRoutesListHtml(routes, selectedIdx, mode)}
+      </div>
+
+      ${
+        mode === "overlay"
+          ? `
+            <div class="sep cmd-sep"></div>
+            <div class="cmd-foryou-head">
+              <div class="label">
+                <span>For you</span>
+                <span class="ct" id="overlay-foryou-count">(${state.digestItems.length}${state.digestRefreshing ? " · updating..." : ""})</span>
+                <button id="overlay-open-home-foryou-btn" class="btn-text end" type="button">View all</button>
+              </div>
+            </div>
+            <div id="overlay-foryou-slot" class="cmd-foryou-list">
+              ${renderDigestItemsHtml(state.digestItems, "overlay")}
+            </div>
+          `
+          : ""
+      }
+    </div>
+  `;
+}
+
 export function renderStartScreen(
   container: HTMLElement,
-  actions: StartScreenActions
+  actions: StartScreenActions,
+  autoFocusInput = true
 ): void {
   const resumeConvs = state.conversations
     .filter((c) => c.status === "active")
@@ -240,22 +433,22 @@ export function renderStartScreen(
 
   const unlockPromptHtml = !isUnlocked
     ? `
-      <div class="kb-card" id="start-profile-unlock-card" style="margin-bottom:14px;">
-        <div class="kb-card-header">
-          <span><strong>profile locked</strong> · unlock your profile to load your Brain, Mail accounts &amp; password vault</span>
-          <span class="muted">[6-digit PIN]</span>
+      <div class="card start-unlock-card" id="start-profile-unlock-card">
+        <div class="card-h">
+          ${icon("lock", "ico-sm")}
+          <b>Profile locked</b>
+          <span class="end muted">Unlock Brain, Mail &amp; Password Vault</span>
         </div>
         ${
           state.profileStatusMessage
-            ? `<div class="profile-status-banner">${escapeHtml(state.profileStatusMessage)}</div>`
+            ? `<div class="${renderBannerClass(state.profileStatusMessage)}">${escapeHtml(state.profileStatusMessage)}</div>`
             : ""
         }
         ${
           profilesList.length > 0
             ? `
-              <div class="vault-form-row">
-                <label class="muted">profile:</label>
-                <select id="start-unlock-profile-select" class="vault-input">
+              <div class="form-row">
+                <select id="start-unlock-profile-select" class="select">
                   ${profilesList
                     .map(
                       (p) =>
@@ -265,149 +458,119 @@ export function renderStartScreen(
                 </select>
                 <input
                   id="start-unlock-pin-input"
-                  class="vault-input vault-pin-input"
+                  class="input pin"
                   type="password"
                   inputmode="numeric"
                   maxlength="6"
                   spellcheck="false"
                   autocorrect="off"
                   autocapitalize="off"
-                  placeholder="6-digit PIN_"
+                  placeholder="PIN"
                 />
-                <button id="start-unlock-profile-btn" type="button">[unlock profile &amp; mail]</button>
+                <button id="start-unlock-profile-btn" class="btn primary" type="button">Unlock</button>
               </div>
+              <div class="sep"></div>
             `
             : ""
         }
-        <div class="vault-form-row" style="margin-top:6px;">
-          <span class="muted">${profilesList.length > 0 ? "or create a new profile:" : "create a new profile with a 6-digit PIN:"}</span>
-          <input
-            id="start-create-profile-name"
-            class="vault-input"
-            type="text"
-            spellcheck="false"
-            autocorrect="off"
-            autocapitalize="off"
-            placeholder="new profile name (e.g. Nikita)_"
-          />
-          <input
-            id="start-create-profile-pin"
-            class="vault-input vault-pin-input"
-            type="password"
-            inputmode="numeric"
-            maxlength="6"
-            spellcheck="false"
-            autocorrect="off"
-            autocapitalize="off"
-            placeholder="6-digit PIN_"
-          />
-          <button id="start-create-profile-btn" type="button">[+ create &amp; unlock]</button>
+        <div class="section">
+          <div class="muted">${profilesList.length > 0 ? "Or create a new profile" : "Create a new profile with a 6-digit PIN"}</div>
+          <div class="form-row">
+            <input
+              id="start-create-profile-name"
+              class="input"
+              type="text"
+              spellcheck="false"
+              autocorrect="off"
+              autocapitalize="off"
+              placeholder="Profile name (e.g. Nikita)"
+            />
+            <input
+              id="start-create-profile-pin"
+              class="input pin"
+              type="password"
+              inputmode="numeric"
+              maxlength="6"
+              spellcheck="false"
+              autocorrect="off"
+              autocapitalize="off"
+              placeholder="6-digit PIN"
+            />
+            <button id="start-create-profile-btn" class="btn" type="button">Create &amp; unlock</button>
+          </div>
         </div>
       </div>
     `
     : "";
 
+  const updatedLabel = state.digestUpdatedAt
+    ? ` · updated ${formatRelativeTime(String(Math.floor(state.digestUpdatedAt / 1000)))}`
+    : "";
+  const foryouMeta = `${state.digestItems.length} item${state.digestItems.length === 1 ? "" : "s"}${state.digestRefreshing ? " · updating..." : updatedLabel}`;
+
   container.innerHTML = `
-    <div class="start-screen">
-      <div class="start-container">
-        ${unlockPromptHtml}
-        <div class="start-prompt-title">where do you want to start? <span class="muted">[${MOD_LABEL}+k]</span></div>
+    <div class="home">
+      <div class="home-hello">
+        <div class="home-date">${escapeHtml(formatHomeDateLine())}</div>
+        <h1 class="home-greet">${escapeHtml(formatHomeGreeting())}</h1>
+      </div>
 
-        <div class="start-input-box" id="start-command-bar-box">
-          <div class="start-input-row">
-            <span class="muted">&gt;</span>
-            <input
-              id="start-main-input"
-              class="start-input-field"
-              type="text"
-              spellcheck="false"
-              autocorrect="off"
-              autocapitalize="off"
-              placeholder="url, question, mail: term, brain: term, or command (home, new, bookmark, compare, lock)_"
-              value="${escapeHtml(state.commandBarInput)}"
-            />
-            <span class="caret-blink">▌</span>
+      ${renderBigBarHtml("start", initialRoutes, clampedIdx)}
+
+      ${unlockPromptHtml}
+
+      <div class="home-cols">
+        <div>
+          <div class="label home-section-head">
+            <span>For you</span>
+            <span class="ct" id="start-foryou-meta">${escapeHtml(foryouMeta)}</span>
+            <button id="start-refresh-digest-btn" class="btn-text end" type="button">Refresh</button>
           </div>
-
-          <div class="start-controls-row">
-            <span class="muted">enter runs default route · up/down selects route</span>
-            <div class="composer-controls">
-              <label class="muted">model:</label>
-              <select id="start-model-select">
-                ${getAvailableModelsForPicker().map(
-                  (m) => `
-                  <option value="${escapeHtml(m.id)}" ${state.selectedModel === m.id ? "selected" : ""}>
-                    ${escapeHtml(m.label)}
-                  </option>
-                `
-                ).join("")}
-              </select>
-              <button id="start-web-toggle" class="${state.webSearchEnabled ? "active" : ""}">
-                web: ${state.webSearchEnabled ? "on" : "off"}
-              </button>
-            </div>
-          </div>
-
-          <div id="start-routes-slot">
-            ${renderRoutesListHtml(initialRoutes, clampedIdx, "start")}
+          <div id="start-foryou-slot">
+            ${renderDigestItemsHtml(state.digestItems, "start")}
           </div>
         </div>
 
-        <div class="start-columns">
-          <div class="start-col start-col-foryou">
-            <div class="start-col-header">
-              <span>for you</span>
-              <span class="composer-controls">
-                <span class="muted" id="start-foryou-meta">${state.digestItems.length} item${state.digestItems.length === 1 ? "" : "s"}${state.digestRefreshing ? " · updating..." : state.digestUpdatedAt ? ` · updated ${escapeHtml(formatRelativeTime(String(Math.floor(state.digestUpdatedAt / 1000))))}` : ""}</span>
-                <button id="start-refresh-digest-btn" type="button">[refresh]</button>
-              </span>
-            </div>
-            <div id="start-foryou-slot" class="start-foryou-list">
-              ${renderDigestItemsHtml(state.digestItems, "start")}
-            </div>
+        <div>
+          <div class="label home-section-head">
+            <span>Resume</span>
+            <span class="end">${resumeConvs.length} conversation${resumeConvs.length === 1 ? "" : "s"}</span>
           </div>
-
-          <div class="start-col start-col-resume">
-            <div class="start-col-header">
-              <span>resume</span>
-              <span class="muted">${resumeConvs.length} conversation${resumeConvs.length === 1 ? "" : "s"}</span>
-            </div>
-            ${
-              resumeConvs.length === 0
-                ? `<div class="muted">no recent conversations</div>`
-                : resumeConvs
-                    .map(
-                      (c) => `
-                  <div class="start-list-item start-resume-item" data-resume-id="${escapeHtml(c.id)}">
-                    <div class="start-resume-main truncate">
-                      <span class="muted">[${escapeHtml(c.origin)}]</span>
-                      <span>${escapeHtml(c.title)}</span>
-                    </div>
-                    <span class="muted start-digest-right-meta">${c.source_count ?? 0} src · ${escapeHtml(formatRelativeTime(c.last_active_at))}</span>
-                  </div>
-                `
-                    )
-                    .join("")
-            }
-          </div>
+          ${
+            resumeConvs.length === 0
+              ? `<div class="home-empty">No recent conversations yet.</div>`
+              : resumeConvs
+                  .map(
+                    (c) => `
+                <div class="row" data-resume-id="${escapeHtml(c.id)}">
+                  ${convOriginIcon(c.origin)}
+                  <span class="t">${escapeHtml(c.title)}</span>
+                  <span class="meta">${c.source_count ?? 0} src · ${escapeHtml(formatRelativeTime(c.last_active_at))}</span>
+                </div>
+              `
+                  )
+                  .join("")
+          }
         </div>
       </div>
     </div>
   `;
 
-  bindUnifiedCommandBox(
+  bindBigBarEvents(
     container,
     "#start-main-input",
     "#start-routes-slot",
     "start",
     actions,
-    !isUnlocked && profilesList.length > 0 ? false : false
+    false,
+    autoFocusInput && isUnlocked && !state.commandModelMenuOpen,
+    () => renderStartScreen(container, actions, false)
   );
 
   const startPinInput = container.querySelector(
     "#start-unlock-pin-input"
   ) as HTMLInputElement | null;
-  if (!isUnlocked && startPinInput) {
+  if (autoFocusInput && !isUnlocked && startPinInput) {
     startPinInput.focus();
   }
 
@@ -458,19 +621,6 @@ export function renderStartScreen(
       }
     });
 
-  const modelSelect = container.querySelector(
-    "#start-model-select"
-  ) as HTMLSelectElement | null;
-  modelSelect?.addEventListener("change", () => {
-    actions.onChangeModel(modelSelect.value as LocalModelId);
-  });
-
-  container
-    .querySelector("#start-web-toggle")
-    ?.addEventListener("click", () => {
-      actions.onToggleWeb();
-    });
-
   container
     .querySelector("#start-refresh-digest-btn")
     ?.addEventListener("click", () => {
@@ -480,6 +630,7 @@ export function renderStartScreen(
   container.querySelectorAll("[data-resume-id]").forEach((el) => {
     el.addEventListener("click", () => {
       const id = (el as HTMLElement).getAttribute("data-resume-id");
+      state.commandModelMenuOpen = null;
       if (id) actions.onSelectConversation(id);
     });
   });
@@ -487,9 +638,13 @@ export function renderStartScreen(
   bindDigestItemEvents(container, actions, false);
 }
 
-export function renderCommandBarOverlay(actions: StartScreenActions): void {
+export function renderCommandBarOverlay(
+  actions: StartScreenActions,
+  autoFocusInput = true
+): void {
   let overlay = document.getElementById("command-bar-overlay");
   if (!state.commandBarOpen) {
+    state.commandModelMenuOpen = null;
     if (overlay) {
       overlay.remove();
     }
@@ -499,9 +654,10 @@ export function renderCommandBarOverlay(actions: StartScreenActions): void {
   if (!overlay) {
     overlay = document.createElement("div");
     overlay.id = "command-bar-overlay";
-    overlay.style.cssText =
-      "position:fixed; inset:0; background:rgba(0,0,0,0.82); z-index:9000; display:flex; align-items:flex-start; justify-content:center; padding-top:48px;";
+    overlay.className = "cmd-backdrop";
     document.body.appendChild(overlay);
+  } else {
+    overlay.className = "cmd-backdrop";
   }
 
   const routes = rankCommandBarRoutes(state.commandBarInput);
@@ -510,71 +666,19 @@ export function renderCommandBarOverlay(actions: StartScreenActions): void {
     Math.min(state.commandBarSelectedIdx, Math.max(0, routes.length - 1))
   );
 
-  overlay.innerHTML = `
-    <div id="command-bar-modal" class="start-input-box" style="width:720px; max-width:94vw; max-height:84vh; overflow-y:auto; background:#000000; border:1px solid #e8e8e8; padding:12px;">
-      <div class="rail-row" style="justify-content:space-between; margin-bottom:6px;">
-        <span>command bar <span class="muted">[${MOD_LABEL}+k]</span></span>
-        <span class="composer-controls">
-          <button id="command-bar-home-btn" type="button">[~ home / start]</button>
-          <button id="command-bar-refresh-btn" type="button">[refresh]</button>
-          <button id="command-bar-close-btn" type="button">[close · esc]</button>
-        </span>
-      </div>
-      <div class="start-input-row">
-        <span class="muted">&gt;</span>
-        <input
-          id="command-bar-input"
-          class="start-input-field"
-          type="text"
-          spellcheck="false"
-          autocorrect="off"
-          autocapitalize="off"
-          placeholder="url, question, mail: term, brain: term, or command (home, new, bookmark, compare, lock)_"
-          value="${escapeHtml(state.commandBarInput)}"
-        />
-      </div>
-      <div class="start-controls-row" style="margin-top:6px;">
-        <span class="muted">enter runs selected route · up/down selects route</span>
-        <div class="composer-controls">
-          <label class="muted">model:</label>
-          <select id="overlay-model-select">
-            ${getAvailableModelsForPicker().map(
-              (m) => `
-              <option value="${escapeHtml(m.id)}" ${state.selectedModel === m.id ? "selected" : ""}>
-                ${escapeHtml(m.label)}
-              </option>
-            `
-            ).join("")}
-          </select>
-          <button id="overlay-web-toggle" class="${state.webSearchEnabled ? "active" : ""}">
-            web: ${state.webSearchEnabled ? "on" : "off"}
-          </button>
-        </div>
-      </div>
-      <div id="overlay-routes-slot">
-        ${renderRoutesListHtml(routes, clampedIdx, "overlay")}
-      </div>
-      <div class="cmd-foryou-section">
-        <div class="start-col-header">
-          <span>for you <span class="muted" id="overlay-foryou-count">(${state.digestItems.length}${state.digestRefreshing ? " · updating..." : ""})</span></span>
-          <button id="overlay-open-home-foryou-btn" type="button">[view all on start screen]</button>
-        </div>
-        <div id="overlay-foryou-slot" class="start-foryou-list">
-          ${renderDigestItemsHtml(state.digestItems, "overlay")}
-        </div>
-      </div>
-    </div>
-  `;
+  overlay.innerHTML = renderBigBarHtml("overlay", routes, clampedIdx);
 
-  overlay.addEventListener("click", (e) => {
+  overlay.onclick = (e) => {
     if (e.target === overlay) {
+      state.commandModelMenuOpen = null;
       actions.onCloseCommandBar?.();
     }
-  });
+  };
 
   overlay
     .querySelector("#command-bar-home-btn")
     ?.addEventListener("click", () => {
+      state.commandModelMenuOpen = null;
       actions.onCloseCommandBar?.();
       actions.onGoHome?.();
     });
@@ -582,6 +686,7 @@ export function renderCommandBarOverlay(actions: StartScreenActions): void {
   overlay
     .querySelector("#overlay-open-home-foryou-btn")
     ?.addEventListener("click", () => {
+      state.commandModelMenuOpen = null;
       actions.onCloseCommandBar?.();
       actions.onGoHome?.();
     });
@@ -595,51 +700,43 @@ export function renderCommandBarOverlay(actions: StartScreenActions): void {
   overlay
     .querySelector("#command-bar-close-btn")
     ?.addEventListener("click", () => {
+      state.commandModelMenuOpen = null;
       actions.onCloseCommandBar?.();
-    });
-
-  const modelSelect = overlay.querySelector(
-    "#overlay-model-select"
-  ) as HTMLSelectElement | null;
-  modelSelect?.addEventListener("change", () => {
-    actions.onChangeModel(modelSelect.value as LocalModelId);
-    renderCommandBarOverlay(actions);
-  });
-
-  overlay
-    .querySelector("#overlay-web-toggle")
-    ?.addEventListener("click", () => {
-      actions.onToggleWeb();
-      renderCommandBarOverlay(actions);
     });
 
   bindDigestItemEvents(overlay, actions, true);
 
-  bindUnifiedCommandBox(
+  bindBigBarEvents(
     overlay,
     "#command-bar-input",
     "#overlay-routes-slot",
     "overlay",
     actions,
-    true
+    true,
+    autoFocusInput && !state.commandModelMenuOpen,
+    () => renderCommandBarOverlay(actions, false)
   );
 }
 
-function bindUnifiedCommandBox(
+function bindBigBarEvents(
   root: HTMLElement,
   inputSelector: string,
   slotSelector: string,
-  prefixId: string,
+  prefixId: "start" | "overlay",
   actions: StartScreenActions,
-  isOverlay: boolean
+  isOverlay: boolean,
+  autoFocusInput: boolean,
+  onRefreshSelf: () => void
 ): void {
   const input = root.querySelector(inputSelector) as HTMLInputElement | null;
   const slot = root.querySelector(slotSelector) as HTMLElement | null;
   if (!input || !slot) return;
 
-  input.focus();
-  const len = input.value.length;
-  input.setSelectionRange(len, len);
+  if (autoFocusInput) {
+    input.focus();
+    const len = input.value.length;
+    input.setSelectionRange(len, len);
+  }
 
   const refreshSlot = () => {
     const routes = rankCommandBarRoutes(state.commandBarInput);
@@ -661,6 +758,7 @@ function bindUnifiedCommandBox(
     const raw = state.commandBarInput.trim();
     state.commandBarInput = "";
     state.commandBarSelectedIdx = 0;
+    state.commandModelMenuOpen = null;
     if (actions.onExecuteCommandRoute) {
       actions.onExecuteCommandRoute(chosen, raw);
     } else if (raw) {
@@ -680,6 +778,43 @@ function bindUnifiedCommandBox(
   };
 
   bindRouteClicks();
+
+  root.querySelector(`#${prefixId}-submit-btn`)?.addEventListener("click", () => {
+    executeRouteAt(state.commandBarSelectedIdx);
+  });
+
+  root
+    .querySelector(`#${prefixId}-model-chip`)
+    ?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      state.commandModelMenuOpen =
+        state.commandModelMenuOpen === prefixId ? null : prefixId;
+      onRefreshSelf();
+    });
+
+  root.querySelectorAll("[data-select-cmd-model]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const mId = (btn as HTMLElement).getAttribute("data-select-cmd-model");
+      state.commandModelMenuOpen = null;
+      if (mId) {
+        actions.onChangeModel(mId as LocalModelId);
+        if (isOverlay) {
+          renderCommandBarOverlay(actions, false);
+        }
+      } else {
+        onRefreshSelf();
+      }
+    });
+  });
+
+  root
+    .querySelector(`#${prefixId}-web-toggle`)
+    ?.addEventListener("click", () => {
+      actions.onToggleWeb();
+      if (isOverlay) {
+        renderCommandBarOverlay(actions, false);
+      }
+    });
 
   input.addEventListener("input", () => {
     state.commandBarInput = input.value;
@@ -713,6 +848,12 @@ function bindUnifiedCommandBox(
       return;
     }
     if (e.key === "Escape") {
+      if (state.commandModelMenuOpen === prefixId) {
+        e.preventDefault();
+        state.commandModelMenuOpen = null;
+        onRefreshSelf();
+        return;
+      }
       if (isOverlay) {
         e.preventDefault();
         actions.onCloseCommandBar?.();
@@ -747,78 +888,83 @@ export function renderProfileUnlockOverlay(actions: {
   if (!overlay) {
     overlay = document.createElement("div");
     overlay.id = "profile-unlock-overlay";
-    overlay.style.cssText =
-      "position:fixed; inset:0; background:rgba(0,0,0,0.84); z-index:9500; display:flex; align-items:center; justify-content:center;";
+    overlay.className = "modal-backdrop";
     document.body.appendChild(overlay);
+  } else {
+    overlay.className = "modal-backdrop";
   }
 
   const profilesList = profileInfo?.profiles ?? [];
 
   overlay.innerHTML = `
-    <div id="profile-unlock-modal" class="start-input-box" style="width:560px; max-width:94vw; background:#000000; border:1px solid #e8e8e8; padding:16px;">
-      <div class="rail-row" style="justify-content:space-between; margin-bottom:10px; border-bottom:1px solid #333333; padding-bottom:6px;">
-        <span><strong>unlock satz profile</strong> <span class="muted">(loads brain, mail &amp; vault)</span></span>
-        <button id="profile-modal-dismiss-btn" type="button">[skip · esc]</button>
+    <div id="profile-unlock-modal" class="card profile-modal">
+      <div class="card-h">
+        ${icon("lock", "ico-sm")}
+        <b>Unlock profile</b>
+        <button id="profile-modal-dismiss-btn" class="btn-text end" type="button">Skip</button>
       </div>
       ${
         state.profileStatusMessage
-          ? `<div class="profile-status-banner" style="margin-bottom:8px;">${escapeHtml(state.profileStatusMessage)}</div>`
+          ? `<div class="${renderBannerClass(state.profileStatusMessage)}">${escapeHtml(state.profileStatusMessage)}</div>`
           : ""
       }
       ${
         profilesList.length > 0
           ? `
-            <div class="muted" style="margin-bottom:6px;">select your profile and enter its 6-digit PIN:</div>
-            <div class="vault-form-row" style="margin-bottom:12px;">
-              <select id="profile-modal-select" class="vault-input">
-                ${profilesList
-                  .map(
-                    (p) =>
-                      `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)} (${escapeHtml(p.id)})</option>`
-                  )
-                  .join("")}
-              </select>
-              <input
-                id="profile-modal-pin"
-                class="vault-input vault-pin-input"
-                type="password"
-                inputmode="numeric"
-                maxlength="6"
-                spellcheck="false"
-                autocorrect="off"
-                autocapitalize="off"
-                placeholder="6-digit PIN_"
-              />
-              <button id="profile-modal-unlock-btn" type="button">[unlock]</button>
+            <div class="section">
+              <div class="muted">Select your profile and enter its 6-digit PIN to load Brain, Mail &amp; Vault.</div>
+              <div class="form-row">
+                <select id="profile-modal-select" class="select">
+                  ${profilesList
+                    .map(
+                      (p) =>
+                        `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)} (${escapeHtml(p.id)})</option>`
+                    )
+                    .join("")}
+                </select>
+                <input
+                  id="profile-modal-pin"
+                  class="input pin"
+                  type="password"
+                  inputmode="numeric"
+                  maxlength="6"
+                  spellcheck="false"
+                  autocorrect="off"
+                  autocapitalize="off"
+                  placeholder="PIN"
+                />
+                <button id="profile-modal-unlock-btn" class="btn primary" type="button">Unlock</button>
+              </div>
             </div>
+            <div class="sep"></div>
           `
           : ""
       }
-      <div class="muted" style="margin-bottom:6px; border-top:1px solid #222222; padding-top:8px;">
-        ${profilesList.length > 0 ? "or create a new profile:" : "no profile found yet — create a profile with a 6-digit PIN:"}
-      </div>
-      <div class="vault-form-row">
-        <input
-          id="profile-modal-create-name"
-          class="vault-input"
-          type="text"
-          spellcheck="false"
-          autocorrect="off"
-          autocapitalize="off"
-          placeholder="profile name (e.g. Nikita)_"
-        />
-        <input
-          id="profile-modal-create-pin"
-          class="vault-input vault-pin-input"
-          type="password"
-          inputmode="numeric"
-          maxlength="6"
-          spellcheck="false"
-          autocorrect="off"
-          autocapitalize="off"
-          placeholder="6-digit PIN_"
-        />
-        <button id="profile-modal-create-btn" type="button">[+ create &amp; unlock]</button>
+      <div class="section">
+        <div class="muted">${profilesList.length > 0 ? "Or create a new profile" : "Create a profile with a 6-digit PIN"}</div>
+        <div class="form-row">
+          <input
+            id="profile-modal-create-name"
+            class="input"
+            type="text"
+            spellcheck="false"
+            autocorrect="off"
+            autocapitalize="off"
+            placeholder="Profile name (e.g. Nikita)"
+          />
+          <input
+            id="profile-modal-create-pin"
+            class="input pin"
+            type="password"
+            inputmode="numeric"
+            maxlength="6"
+            spellcheck="false"
+            autocorrect="off"
+            autocapitalize="off"
+            placeholder="6-digit PIN"
+          />
+          <button id="profile-modal-create-btn" class="btn" type="button">Create &amp; unlock</button>
+        </div>
       </div>
     </div>
   `;
