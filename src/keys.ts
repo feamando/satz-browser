@@ -1,6 +1,7 @@
 import { IS_MAC } from "./state";
 
 export interface ShortcutHandlers {
+  onOpenHome?: () => void;
   onNewConversation: () => void;
   onFilterConversations: () => void;
   onNewTab: () => void;
@@ -34,6 +35,12 @@ export function bindKeyboardShortcuts(handlers: ShortcutHandlers): void {
     if (e.shiftKey && key === "l") {
       e.preventDefault();
       handlers.onFillLogin?.();
+      return;
+    }
+
+    if (e.shiftKey && key === "h") {
+      e.preventDefault();
+      handlers.onOpenHome?.();
       return;
     }
 

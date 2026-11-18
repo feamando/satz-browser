@@ -130,6 +130,10 @@ export function renderKnowledgeView(
   const roleChat = modelCfg?.roles?.chat ?? state.selectedModel ?? "gemma-4-e4b";
   const roleWeb = modelCfg?.roles?.web_answer ?? "planck3 (web)";
   const roleReader = modelCfg?.roles?.reader ?? "hertz (reader)";
+  const roleNewsPlanner = modelCfg?.roles?.news_planner ?? "gemma-4-e4b";
+  const roleNewsCapture = modelCfg?.roles?.news_capture ?? "gemma-4-e4b";
+  const roleNewsReader = modelCfg?.roles?.news_reader ?? "hertz (reader)";
+  const roleNewsAnalyzer = modelCfg?.roles?.news_analyzer ?? roleChat;
   const cloudSummaryBadge =
     configuredCloudProviders.length > 0
       ? `[cloud: ${configuredCloudProviders.map((p) => `${p.id} (${(p.models ?? []).length})`).join(" · ")}]`
@@ -177,6 +181,32 @@ export function renderKnowledgeView(
                 ${renderCloudOptionsHtml(roleReader)}
               </select>
               <button id="kb-save-roles-btn">[apply role routing]</button>
+            </div>
+            <div class="vault-form-row" style="margin-top:6px;">
+              <label class="muted">news planner:</label>
+              <select id="kb-role-news-planner-select" class="vault-input">
+                <option value="gemma-4-e4b" ${roleNewsPlanner === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local · default)</option>
+                ${renderCloudOptionsHtml(roleNewsPlanner)}
+              </select>
+              <label class="muted">news capture/translate:</label>
+              <select id="kb-role-news-capture-select" class="vault-input">
+                <option value="gemma-4-e4b" ${roleNewsCapture === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local · default)</option>
+                ${renderCloudOptionsHtml(roleNewsCapture)}
+              </select>
+              <label class="muted">news reader (trust-blind):</label>
+              <select id="kb-role-news-reader-select" class="vault-input">
+                <option value="hertz (reader)" ${roleNewsReader === "hertz (reader)" ? "selected" : ""}>hertz 1.2 (local int8 · default)</option>
+                <option value="planck (reader)" ${roleNewsReader === "planck (reader)" ? "selected" : ""}>planck (local reader)</option>
+                <option value="heuristic" ${roleNewsReader === "heuristic" ? "selected" : ""}>heuristic lexical (0 model)</option>
+                <option value="gemma-4-e4b" ${roleNewsReader === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local)</option>
+                ${renderCloudOptionsHtml(roleNewsReader)}
+              </select>
+              <label class="muted">news analyzer:</label>
+              <select id="kb-role-news-analyzer-select" class="vault-input">
+                <option value="gemma-4-e4b" ${roleNewsAnalyzer === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local)</option>
+                <option value="template" ${roleNewsAnalyzer === "template" ? "selected" : ""}>template extractive (0 LLM)</option>
+                ${renderCloudOptionsHtml(roleNewsAnalyzer)}
+              </select>
             </div>
           </div>
 
@@ -584,10 +614,18 @@ export function renderKnowledgeView(
     const chatSel = (container.querySelector("#kb-role-chat-select") as HTMLSelectElement | null)?.value ?? "gemma-4-e4b";
     const webSel = (container.querySelector("#kb-role-web-select") as HTMLSelectElement | null)?.value ?? "planck3 (web)";
     const readerSel = (container.querySelector("#kb-role-reader-select") as HTMLSelectElement | null)?.value ?? "hertz (reader)";
+    const npSel = (container.querySelector("#kb-role-news-planner-select") as HTMLSelectElement | null)?.value ?? "gemma-4-e4b";
+    const ncSel = (container.querySelector("#kb-role-news-capture-select") as HTMLSelectElement | null)?.value ?? "gemma-4-e4b";
+    const nrSel = (container.querySelector("#kb-role-news-reader-select") as HTMLSelectElement | null)?.value ?? "hertz (reader)";
+    const naSel = (container.querySelector("#kb-role-news-analyzer-select") as HTMLSelectElement | null)?.value ?? chatSel;
     void actions.onSaveModelConfig({
       role_chat: chatSel,
       role_web_answer: webSel,
       role_reader: readerSel,
+      role_news_planner: npSel,
+      role_news_capture: ncSel,
+      role_news_reader: nrSel,
+      role_news_analyzer: naSel,
     });
   });
 

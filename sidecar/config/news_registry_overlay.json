@@ -1,0 +1,149 @@
+{
+  "_note": "Local Satz News overlay extending ../sgs/config/planck3/source_registry.json without modifying ../sgs. Adds wire syndication family collapse patterns and curated RSS/Atom starter feeds.",
+  "wire_markers": {
+    "ap": {
+      "family": "wire:ap",
+      "domains": ["apnews.com"],
+      "patterns": ["associated press", "(ap) —", "(ap) -", "ap photo/", "copyright associated press"]
+    },
+    "reuters": {
+      "family": "wire:reuters",
+      "domains": ["reuters.com"],
+      "patterns": ["reuters staff", "(reuters) -", "reporting by ", "editing by ", "thomson reuters"]
+    },
+    "afp": {
+      "family": "wire:afp",
+      "domains": ["afp.com"],
+      "patterns": ["agence france-presse", "(afp)", "afp/", "afp news"]
+    },
+    "dpa": {
+      "family": "wire:dpa",
+      "domains": ["dpa.com"],
+      "patterns": ["deutsche presse-agentur", "(dpa)", "dpa/"]
+    },
+    "dw": {
+      "family": "dw",
+      "domains": ["dw.com"],
+      "patterns": ["deutsche welle"]
+    }
+  },
+  "starter_feeds": [
+    {
+      "feed_id": "feed-dw-en",
+      "domain": "dw.com",
+      "feed_url": "https://rss.dw.com/xml/rss-en-all",
+      "title": "DW (English)",
+      "category": "independent",
+      "language": "en",
+      "default_enabled": true
+    },
+    {
+      "feed_id": "feed-tagesschau-de",
+      "domain": "tagesschau.de",
+      "feed_url": "https://www.tagesschau.de/infoservices/alle-meldungen-100~rss2.xml",
+      "title": "ARD Tagesschau",
+      "category": "independent",
+      "language": "de",
+      "default_enabled": true
+    },
+    {
+      "feed_id": "feed-meduza-en",
+      "domain": "meduza.io",
+      "feed_url": "https://meduza.io/rss/en/all",
+      "title": "Meduza (English)",
+      "category": "independent",
+      "language": "en",
+      "default_enabled": false
+    },
+    {
+      "feed_id": "feed-kyivindep-en",
+      "domain": "kyivindependent.com",
+      "feed_url": "https://kyivindependent.com/feed/",
+      "title": "Kyiv Independent",
+      "category": "independent",
+      "language": "en",
+      "default_enabled": false
+    },
+    {
+      "feed_id": "feed-lemonde-fr",
+      "domain": "lemonde.fr",
+      "feed_url": "https://www.lemonde.fr/rss/une.xml",
+      "title": "Le Monde",
+      "category": "news_eu",
+      "language": "fr",
+      "default_enabled": false
+    },
+    {
+      "feed_id": "feed-spiegel-de",
+      "domain": "spiegel.de",
+      "feed_url": "https://www.spiegel.de/schlagzeilen/tops/index.rss",
+      "title": "Der Spiegel",
+      "category": "news_eu",
+      "language": "de",
+      "default_enabled": false
+    },
+    {
+      "feed_id": "feed-euronews-en",
+      "domain": "euronews.com",
+      "feed_url": "https://www.euronews.com/rss",
+      "title": "Euronews",
+      "category": "news_eu",
+      "language": "en",
+      "default_enabled": true
+    },
+    {
+      "feed_id": "feed-bbc-world",
+      "domain": "bbc.com",
+      "feed_url": "https://feeds.bbci.co.uk/news/world/rss.xml",
+      "title": "BBC World News",
+      "category": "news_us_uk",
+      "language": "en",
+      "default_enabled": true
+    },
+    {
+      "feed_id": "feed-guardian-world",
+      "domain": "theguardian.com",
+      "feed_url": "https://www.theguardian.com/world/rss",
+      "title": "The Guardian World",
+      "category": "news_us_uk",
+      "language": "en",
+      "default_enabled": true
+    },
+    {
+      "feed_id": "feed-npr-news",
+      "domain": "npr.org",
+      "feed_url": "https://feeds.npr.org/1001/rss.xml",
+      "title": "NPR News",
+      "category": "news_us_uk",
+      "language": "en",
+      "default_enabled": false
+    },
+    {
+      "feed_id": "feed-abc-au",
+      "domain": "abc.net.au",
+      "feed_url": "https://www.abc.net.au/news/feed/2942460/rss.xml",
+      "title": "ABC Australia Top Stories",
+      "category": "public_broadcaster",
+      "language": "en",
+      "default_enabled": false
+    },
+    {
+      "feed_id": "feed-cbc-ca",
+      "domain": "cbc.ca",
+      "feed_url": "https://www.cbc.ca/webfeed/rss/rss-world",
+      "title": "CBC World",
+      "category": "public_broadcaster",
+      "language": "en",
+      "default_enabled": false
+    },
+    {
+      "feed_id": "feed-arxiv-ai",
+      "domain": "arxiv.org",
+      "feed_url": "https://export.arxiv.org/rss/cs.AI",
+      "title": "arXiv cs.AI",
+      "category": "science",
+      "language": "en",
+      "default_enabled": false
+    }
+  ]
+}

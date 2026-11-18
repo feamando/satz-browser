@@ -10,6 +10,7 @@ import {
   apiCreateConversation,
   apiDeleteConversation,
   apiEnsureMailConversation,
+  apiEnsureNewsConversation,
   apiGetConversation,
   apiListBookmarks,
   apiListConversations,
@@ -44,8 +45,11 @@ import {
   sidecarListWatches,
   sidecarLockProfile,
   sidecarMatchPasswordForUrl,
+  sidecarNewsChatAnswer,
+  sidecarRefreshNews,
   sidecarRejectBrainProposal,
   sidecarRevealPassword,
+  sidecarReweighNewsMeta,
   sidecarRunAnswer,
   sidecarRunComparer,
   sidecarRunRead,
@@ -58,6 +62,7 @@ import {
   sidecarStreamChat,
   sidecarSummarizeConversation,
   sidecarSyncBookmarks,
+  sidecarSyncMail,
   sidecarUnlockProfile,
   sidecarUnlockProfileKeychain,
   sidecarUpdateModelConfig,
@@ -86,68 +91,287 @@ import {
   sidecarSaveMailAttachment,
   sidecarUpdateMailSettings,
 } from "./mail";
+import { refreshNewsState, renderNewsLaneView } from "./news";
 import { renderRail } from "./rail";
 import { renderSourcesPanel } from "./sources";
 import {
   renderCommandBarOverlay,
   renderProfileUnlockOverlay,
   renderStartScreen,
+  updateOverlayDigestInPlace,
+  updateStartDigestInPlace,
 } from "./start";
 import {
   classifyStartInput,
   escapeHtml,
   extractDomain,
   getActiveTabSources,
+  hasAnyActiveStream,
+  isConvStreaming,
   MOD_LABEL,
   normalizeUrl,
   resolveLiveNavigationTarget,
   state,
+  syncConfiguredChatModel,
 } from "./state";
 import { renderStatusLine } from "./status";
 import { renderTabStrip, scheduleWebviewLayoutSync } from "./tabs";
-import type { CommandBarRoute, LocalModelId, TabPageEvent } from "./types";
+import type { CommandBarRoute, LocalModelId, NewsLane, TabPageEvent } from "./types";
 
 let resizeObserver: ResizeObserver | null = null;
 let streamingTimerId: number | null = null;
+let sidecarPollTimerId: number | null = null;
+let sidecarPollInFlight = false;
+let digestFetchPromise: Promise<void> | null = null;
+let startupSyncKey = "";
+const sidecarBootStartedAt = Date.now();
 
-function startStreamingProgress(initialStatus: string, phase: string): void {
-  state.isStreaming = true;
-  state.streamingText = "";
-  state.streamingStatus = initialStatus;
-  state.streamingPhase = phase;
-  state.streamingStartedAt = Date.now();
-  state.streamingSteps = [initialStatus];
-  if (streamingTimerId !== null) {
-    window.clearInterval(streamingTimerId);
+function scheduleSidecarPoll(delayMs: number): void {
+  if (sidecarPollTimerId !== null) {
+    window.clearTimeout(sidecarPollTimerId);
   }
-  streamingTimerId = window.setInterval(() => {
-    tickStreamingElapsed();
-  }, 200);
+  sidecarPollTimerId = window.setTimeout(() => {
+    void pollSidecarState();
+  }, delayMs);
 }
 
-function stopStreamingProgress(): void {
-  if (streamingTimerId !== null) {
+function startStreamingProgress(
+  convId: string,
+  model: LocalModelId,
+  initialStatus: string,
+  phase: string,
+  userPrompt: string
+): void {
+  state.lastPromptByConv[convId] = userPrompt;
+  state.streamsByConv[convId] = {
+    convId,
+    model,
+    text: "",
+    status: initialStatus,
+    phase,
+    startedAt: Date.now(),
+    steps: [initialStatus],
+    lastUserPrompt: userPrompt,
+  };
+  if (streamingTimerId === null) {
+    streamingTimerId = window.setInterval(() => {
+      tickStreamingElapsed();
+    }, 200);
+  }
+  renderRailRegion();
+}
+
+function stopStreamingProgress(convId: string): string {
+  const streamedText = state.streamsByConv[convId]?.text ?? "";
+  delete state.streamsByConv[convId];
+  if (!hasAnyActiveStream() && streamingTimerId !== null) {
     window.clearInterval(streamingTimerId);
     streamingTimerId = null;
   }
-  state.isStreaming = false;
-  state.streamingText = "";
-  state.streamingStatus = "";
-  state.streamingPhase = "";
-  state.streamingStartedAt = 0;
-  state.streamingSteps = [];
+  renderRailRegion();
+  return streamedText;
+}
+
+async function refreshCompletedConversation(
+  convId: string,
+  savedMsgId?: string
+): Promise<void> {
+  const latest = await apiGetConversation(convId);
+  if (state.activeDetail?.conversation.id === convId) {
+    state.chatPinToBottom = true;
+    state.activeDetail = latest;
+    if (state.activeDetail) {
+      await hydrateConversationPreviews(state.activeDetail);
+      if (savedMsgId) {
+        const msgObj = state.activeDetail.messages.find(
+          (m) => m.id === savedMsgId
+        );
+        if (msgObj) {
+          if (state.messageProposals[savedMsgId]) {
+            msgObj.proposals = state.messageProposals[savedMsgId];
+          }
+          if (state.messageFindings[savedMsgId]) {
+            msgObj.findings = state.messageFindings[savedMsgId];
+          }
+          if (state.messageBrainSources[savedMsgId]) {
+            msgObj.brain_sources = state.messageBrainSources[savedMsgId];
+          }
+          if (state.messageEmailCards[savedMsgId]) {
+            msgObj.email_cards = state.messageEmailCards[savedMsgId];
+          }
+          if (state.messageCitedSources[savedMsgId]) {
+            msgObj.cited_sources = state.messageCitedSources[savedMsgId];
+          }
+          if (state.messageAnswerMeta[savedMsgId]) {
+            msgObj.answer_meta = state.messageAnswerMeta[savedMsgId];
+          }
+        }
+      }
+    }
+    renderAllRegions();
+  } else {
+    await refreshLists();
+    renderRailRegion();
+  }
+}
+
+function applyDigestUiUpdate(): void {
+  const actions = getStartScreenActions();
+  if (!state.activeDetail && !state.showKnowledgeView && !state.showBrainView) {
+    if (!updateStartDigestInPlace(actions)) {
+      renderViewportRegion();
+    }
+  }
+  if (state.commandBarOpen) {
+    if (!updateOverlayDigestInPlace(actions)) {
+      renderCommandBarOverlay(actions);
+    }
+  }
+}
+
+async function refreshDigest(revisionSnapshot?: string | null): Promise<void> {
+  if (!state.sidecar.online) return;
+  if (digestFetchPromise) {
+    await digestFetchPromise;
+    return;
+  }
+  state.digestRefreshing = true;
+  applyDigestUiUpdate();
+  digestFetchPromise = (async () => {
+    try {
+      const items = await sidecarFetchDigest();
+      state.digestItems = items;
+      state.digestUpdatedAt = Date.now();
+      if (revisionSnapshot !== undefined) {
+        state.digestRevision = revisionSnapshot;
+      } else if (state.sidecar.digest_revision) {
+        state.digestRevision = state.sidecar.digest_revision;
+      }
+    } finally {
+      state.digestRefreshing = false;
+      digestFetchPromise = null;
+      applyDigestUiUpdate();
+    }
+  })();
+  await digestFetchPromise;
+}
+
+async function refreshLiveDigestSources(): Promise<void> {
+  if (!state.sidecar.online) return;
+  await refreshDigest(null);
+  state.digestRefreshing = true;
+  applyDigestUiUpdate();
+  try {
+    const tasks: Array<Promise<unknown>> = [];
+    if (state.knowledge.profile?.unlocked) {
+      tasks.push(
+        sidecarSyncMail().then(async () => {
+          await refreshMailState();
+        })
+      );
+    }
+    tasks.push(
+      sidecarRefreshNews(false, false).then(async () => {
+        await refreshNewsState("stories");
+      })
+    );
+    await Promise.allSettled(tasks);
+    const nextHealth = await sidecarFetchHealth();
+    if (nextHealth.online) {
+      state.sidecar = nextHealth;
+      if (nextHealth.mail?.counts) {
+        state.mailCounts = nextHealth.mail.counts;
+      }
+    }
+    await refreshDigest(nextHealth.digest_revision ?? state.sidecar.digest_revision ?? null);
+    renderRailRegion();
+    renderStatusLine();
+  } finally {
+    state.digestRefreshing = false;
+    applyDigestUiUpdate();
+  }
+}
+
+function triggerStartupSyncIfNeeded(syncKey: string): void {
+  if (!state.sidecar.online || startupSyncKey === syncKey) return;
+  startupSyncKey = syncKey;
+  void refreshLiveDigestSources();
+}
+
+async function syncAfterProfileAuthChange(unlocked: boolean): Promise<void> {
+  const [kb, mCfg] = await Promise.all([
+    sidecarFetchKnowledge(),
+    sidecarGetModelConfig(),
+  ]);
+  if (kb) state.knowledge = kb;
+  if (mCfg) syncConfiguredChatModel(mCfg, true);
+  state.digestRevision = null;
+  startupSyncKey = "";
+  await refreshMailState();
+  await refreshLists();
+  if (unlocked) {
+    const syncKey = `unlocked:${state.knowledge.profile?.active_profile?.id ?? "default"}`;
+    triggerStartupSyncIfNeeded(syncKey);
+  } else {
+    await refreshDigest(null);
+  }
+}
+
+async function handleOpenDigestUrl(
+  url: string,
+  _title?: string,
+  convId?: string
+): Promise<void> {
+  if (url.startsWith("satzmail://message/")) {
+    const mid = url.replace("satzmail://message/", "").split("/")[0].trim();
+    const mailConv =
+      state.conversations.find((c) => c.origin === "mail") ??
+      (await apiEnsureMailConversation());
+    if (mailConv && mid) {
+      await selectConversation(mailConv.id);
+      await openEmailMessageTab(mid, "mail");
+    }
+    return;
+  }
+  if (url.startsWith("satzbrain://entity/")) {
+    const slug = url.replace("satzbrain://entity/", "").split("/")[0].trim();
+    state.highlightedBrainSlug = slug || null;
+    state.showBrainView = true;
+    state.showKnowledgeView = false;
+    const kb = await sidecarFetchKnowledge();
+    if (kb) state.knowledge = kb;
+    renderAllRegions();
+    return;
+  }
+  if (url.startsWith("satzwatch://")) {
+    if (convId) {
+      await selectConversation(convId);
+    }
+    return;
+  }
+  await startDirectBrowsing(url);
+}
+
+function resetToNewConversation(): void {
+  state.activeDetail = null;
+  state.showKnowledgeView = false;
+  state.showBrainView = false;
+  state.compareMode = false;
+  state.commandBarOpen = false;
+  syncConfiguredChatModel(null, true);
+  renderAllRegions();
+  void refreshDigest();
 }
 
 async function initApp(): Promise<void> {
   mountShellSkeleton();
 
   bindKeyboardShortcuts({
+    onOpenHome: () => {
+      resetToNewConversation();
+    },
     onNewConversation: () => {
-      state.activeDetail = null;
-      state.showKnowledgeView = false;
-      state.showBrainView = false;
-      state.compareMode = false;
-      renderAllRegions();
+      resetToNewConversation();
     },
     onFilterConversations: () => {
       handleToggleCommandBar();
@@ -294,21 +518,21 @@ async function initApp(): Promise<void> {
   });
 
   await refreshLists();
+  try {
+    await apiEnsureNewsConversation();
+  } catch {
+    // Non-fatal if DB call fails in browser-only Vite dev preview
+  }
   renderAllRegions();
 
   void pollSidecarState();
-  window.setInterval(() => {
-    void pollSidecarState();
-  }, 6000);
 }
 
 function handleMenuShortcut(cmd: string): void {
-  if (cmd === "new_conversation") {
-    state.activeDetail = null;
-    state.showKnowledgeView = false;
-    state.showBrainView = false;
-    state.compareMode = false;
-    renderAllRegions();
+  if (cmd === "open_home") {
+    resetToNewConversation();
+  } else if (cmd === "new_conversation") {
+    resetToNewConversation();
   } else if (cmd === "toggle_brain") {
     void handleToggleBrainView();
   } else if (cmd === "filter_conversations") {
@@ -357,24 +581,18 @@ function handleMenuShortcut(cmd: string): void {
 }
 
 async function pollSidecarState(): Promise<void> {
-  state.sidecar = await sidecarFetchHealth();
-  if (state.sidecar.online) {
-    if (state.doctorRoles.length === 0) {
-      state.doctorRoles = await sidecarFetchDoctor();
-    }
-    if (state.sidecar.mail?.counts) {
-      state.mailCounts = state.sidecar.mail.counts;
-    }
-    void sidecarSyncBookmarks(state.bookmarks);
+  if (sidecarPollInFlight) return;
+  sidecarPollInFlight = true;
+  let modelChanged = false;
+  try {
+    // Fast-path startup: /knowledge reads SQLite in <5 ms without triggering PyTorch/CUDA init,
+    // so probing /knowledge with a short connect timeout surfaces the Unlock Profile modal immediately.
+    let earlyKb = null;
     if (!state.knowledge.profile) {
-      const kb = await sidecarFetchKnowledge();
-      if (kb) {
-        state.knowledge = kb;
-        if (kb.profile?.unlocked) {
-          state.profilePromptOpen = false;
-          await refreshMailState();
-          await refreshLists();
-        } else if (!state.profilePromptDismissed) {
+      earlyKb = await sidecarFetchKnowledge(!state.sidecar.online ? 450 : undefined);
+      if (earlyKb) {
+        state.knowledge = earlyKb;
+        if (!earlyKb.profile?.unlocked && !state.profilePromptDismissed) {
           state.profilePromptOpen = true;
           renderProfileUnlockOverlay(getProfilePromptActions());
           scheduleWebviewLayoutSync();
@@ -383,20 +601,103 @@ async function pollSidecarState(): Promise<void> {
         if (!state.activeDetail && !state.showKnowledgeView && !state.showBrainView) {
           renderViewportRegion();
         }
-      }
-    } else if (state.knowledge.profile.unlocked && state.profilePromptOpen) {
-      state.profilePromptOpen = false;
-      renderProfileUnlockOverlay(getProfilePromptActions());
-      scheduleWebviewLayoutSync();
-    }
-    if (!state.activeDetail && state.digestItems.length === 0) {
-      state.digestItems = await sidecarFetchDigest();
-      if (!state.activeDetail && !state.showKnowledgeView) {
-        renderViewportRegion();
+      } else if (!state.sidecar.online) {
+        renderStatusLine();
+        return;
       }
     }
+
+    // Once /knowledge responds (or after initial boot), allow full /health completion for cold torch probe.
+    const healthTimeout = !state.sidecar.online && !earlyKb ? 2000 : undefined;
+    state.sidecar = await sidecarFetchHealth(healthTimeout);
+    if (state.sidecar.online) {
+      if (syncConfiguredChatModel(state.sidecar.model_config ?? null)) {
+        modelChanged = true;
+      }
+      if (state.doctorRoles.length === 0) {
+        state.doctorRoles = await sidecarFetchDoctor();
+      }
+      if (state.sidecar.mail?.counts) {
+        state.mailCounts = state.sidecar.mail.counts;
+      }
+      void sidecarSyncBookmarks(state.bookmarks);
+
+      const kb = earlyKb ?? state.knowledge;
+      if (!kb.profile) {
+        const [freshKb, mCfg] = await Promise.all([
+          sidecarFetchKnowledge(),
+          sidecarGetModelConfig(),
+        ]);
+        if (mCfg && syncConfiguredChatModel(mCfg, Boolean(freshKb?.profile?.unlocked))) {
+          modelChanged = true;
+        }
+        if (freshKb) {
+          state.knowledge = freshKb;
+          if (freshKb.profile?.unlocked) {
+            state.profilePromptOpen = false;
+            await refreshMailState();
+            await refreshNewsState("stories");
+            await refreshLists();
+          } else if (!state.profilePromptDismissed) {
+            state.profilePromptOpen = true;
+            renderProfileUnlockOverlay(getProfilePromptActions());
+            scheduleWebviewLayoutSync();
+          }
+          renderRailRegion();
+          if (!state.activeDetail && !state.showKnowledgeView && !state.showBrainView) {
+            renderViewportRegion();
+          }
+        }
+      } else if (earlyKb) {
+        if (earlyKb.profile?.unlocked) {
+          state.profilePromptOpen = false;
+          const mCfg = await sidecarGetModelConfig();
+          if (mCfg && syncConfiguredChatModel(mCfg, true)) {
+            modelChanged = true;
+          }
+          await refreshMailState();
+          await refreshNewsState("stories");
+          await refreshLists();
+        }
+      } else if (state.knowledge.profile?.unlocked && state.profilePromptOpen) {
+        state.profilePromptOpen = false;
+        const mCfg = await sidecarGetModelConfig();
+        if (mCfg && syncConfiguredChatModel(mCfg, true)) {
+          modelChanged = true;
+        }
+        renderProfileUnlockOverlay(getProfilePromptActions());
+        scheduleWebviewLayoutSync();
+      }
+
+      const curRev = state.sidecar.digest_revision ?? null;
+      const activeUnlocked = Boolean(state.knowledge.profile?.unlocked);
+      const syncKey = activeUnlocked
+        ? `unlocked:${state.knowledge.profile?.active_profile?.id ?? "default"}`
+        : "locked";
+      if (startupSyncKey !== syncKey) {
+        triggerStartupSyncIfNeeded(syncKey);
+      } else if (
+        !state.digestRefreshing &&
+        (state.digestUpdatedAt === 0 ||
+          (curRev !== null && curRev !== state.digestRevision))
+      ) {
+        await refreshDigest(curRev);
+      }
+    }
+    if (modelChanged && !isConvStreaming(state.activeDetail?.conversation.id)) {
+      renderViewportRegion();
+    }
+    renderStatusLine();
+  } finally {
+    sidecarPollInFlight = false;
+    const elapsedMs = Date.now() - sidecarBootStartedAt;
+    const nextDelayMs = state.sidecar.online
+      ? 6000
+      : elapsedMs < 15000
+        ? 120
+        : 1500;
+    scheduleSidecarPoll(nextDelayMs);
   }
-  renderStatusLine();
 }
 
 function mountShellSkeleton(): void {
@@ -479,7 +780,7 @@ async function handleTabPageEvent(payload: TabPageEvent): Promise<void> {
 }
 
 function refreshChatContextIfVisible(): void {
-  if (state.isStreaming) return;
+  if (isConvStreaming(state.activeDetail?.conversation.id)) return;
   const chatEl =
     document.getElementById("chat-main-container") ??
     document.getElementById("site-tab-agent-rail") ??
@@ -516,6 +817,9 @@ async function handleToggleBrainView(): Promise<void> {
 
 function renderRailRegion(): void {
   renderRail({
+    onOpenHome: () => {
+      resetToNewConversation();
+    },
     onSelectConversation: (id) => {
       void selectConversation(id);
     },
@@ -525,11 +829,7 @@ function renderRailRegion(): void {
       void selectConversation(convId);
     },
     onNewConversation: () => {
-      state.activeDetail = null;
-      state.showKnowledgeView = false;
-      state.showBrainView = false;
-      state.compareMode = false;
-      renderAllRegions();
+      resetToNewConversation();
     },
     onTogglePin: async (id) => {
       await apiPinConversation(id);
@@ -591,7 +891,7 @@ function renderRailRegion(): void {
         ]);
         if (kb) state.knowledge = kb;
         state.doctorRoles = docRoles;
-        if (mCfg) state.modelConfig = mCfg;
+        if (mCfg) syncConfiguredChatModel(mCfg, false);
         await refreshMailState();
       }
       renderAllRegions();
@@ -613,6 +913,15 @@ function renderTabStripRegion(): void {
         state.mailActiveLane = laneName;
         void (async () => {
           await refreshMailState();
+          renderWorkspaceRegions();
+        })();
+        return;
+      }
+      if (tabId.startsWith("news-lane:")) {
+        const nLane = tabId.slice(10) as NewsLane;
+        state.newsActiveLane = nLane;
+        void (async () => {
+          await refreshNewsState(nLane);
           renderWorkspaceRegions();
         })();
         return;
@@ -641,7 +950,7 @@ function renderTabStripRegion(): void {
       ]);
       if (kb) state.knowledge = kb;
       state.doctorRoles = docRoles;
-      if (mCfg) state.modelConfig = mCfg;
+      if (mCfg) syncConfiguredChatModel(mCfg, false);
       await refreshMailState();
       renderAllRegions();
     },
@@ -742,7 +1051,7 @@ function renderViewportRegion(): void {
         ]);
         if (kb) state.knowledge = kb;
         state.doctorRoles = docRoles;
-        if (mCfg) state.modelConfig = mCfg;
+        if (mCfg) syncConfiguredChatModel(mCfg, false);
         await refreshMailState();
         renderAllRegions();
       },
@@ -794,10 +1103,7 @@ function renderViewportRegion(): void {
         state.profileStatusMessage = res.ok
           ? `profile "${name}" created and unlocked.`
           : `error: ${res.error ?? "failed to create profile (ensure PIN is 6 digits)"}`;
-        const kb = await sidecarFetchKnowledge();
-        if (kb) state.knowledge = kb;
-        await refreshMailState();
-        await refreshLists();
+        await syncAfterProfileAuthChange(Boolean(res.ok));
         renderAllRegions();
       },
       onUnlockProfile: async (profileId, pin) => {
@@ -806,10 +1112,7 @@ function renderViewportRegion(): void {
         state.profileStatusMessage = res.ok
           ? `profile "${profileId}" unlocked.`
           : `error: ${res.error ?? "invalid 6-digit PIN"}`;
-        const kb = await sidecarFetchKnowledge();
-        if (kb) state.knowledge = kb;
-        await refreshMailState();
-        await refreshLists();
+        await syncAfterProfileAuthChange(Boolean(res.ok));
         renderAllRegions();
       },
       onUnlockProfileKeychain: async (profileId) => {
@@ -818,19 +1121,14 @@ function renderViewportRegion(): void {
         state.profileStatusMessage = res.ok
           ? `profile "${profileId}" unlocked via Touch ID / keychain.`
           : `error: ${res.error ?? "Touch ID / keychain unlock unavailable"}`;
-        const kb = await sidecarFetchKnowledge();
-        if (kb) state.knowledge = kb;
-        await refreshMailState();
-        await refreshLists();
+        await syncAfterProfileAuthChange(Boolean(res.ok));
         renderAllRegions();
       },
       onLockProfile: async () => {
         state.revealedPasswords = {};
         await sidecarLockProfile();
         state.profileStatusMessage = "profile locked. encrypted vault unloaded.";
-        const kb = await sidecarFetchKnowledge();
-        if (kb) state.knowledge = kb;
-        await refreshMailState();
+        await syncAfterProfileAuthChange(false);
         renderAllRegions();
       },
       onDeleteProfile: async (profileId, pin) => {
@@ -909,16 +1207,19 @@ function renderViewportRegion(): void {
       onSaveModelConfig: async (payload) => {
         const res = await sidecarUpdateModelConfig(payload);
         if (res.ok) {
-          state.modelConfig = res;
-          if (res.roles?.chat) {
-            state.selectedModel = res.roles.chat as LocalModelId;
-          }
+          syncConfiguredChatModel(
+            res,
+            "role_chat" in payload || Boolean(payload.clear_key)
+          );
           state.modelConfigStatusMsg =
             res.test_message || "saved model configuration.";
         } else {
           state.modelConfigStatusMsg = `error: ${res.error ?? "failed to update model configuration"}`;
         }
         state.sidecar = await sidecarFetchHealth();
+        if (state.sidecar.model_config) {
+          syncConfiguredChatModel(state.sidecar.model_config, false);
+        }
         renderAllRegions();
       },
       onCloseKnowledgeView: () => {
@@ -955,6 +1256,47 @@ function renderViewportRegion(): void {
       },
       onRefreshState: async () => {
         await refreshLists();
+        renderAllRegions();
+      },
+    });
+    scheduleWebviewLayoutSync();
+    return;
+  }
+
+  if (state.activeTabId.startsWith("news-lane:")) {
+    renderNewsLaneView(viewport, {
+      onOpenSiteUrl: (url, title) => {
+        void handleOpenUrlAsTab(url, title);
+      },
+      onCompareUrls: async (pairs) => {
+        if (!state.activeDetail) return;
+        const cid = state.activeDetail.conversation.id;
+        const compareIds: string[] = [];
+        for (const p of pairs.slice(0, 4)) {
+          const existing = state.activeDetail.tabs.find(
+            (t) => t.is_open && t.url === p.url
+          );
+          if (existing) {
+            compareIds.push(existing.id);
+          } else {
+            const tab = await apiOpenTab(cid, p.url, p.title);
+            compareIds.push(tab.id);
+          }
+        }
+        state.activeDetail = await apiGetConversation(cid);
+        if (compareIds.length >= 2) {
+          state.compareTabIds = compareIds;
+          state.compareMode = true;
+        }
+        renderAllRegions();
+      },
+      onAskInNewsChat: async (prompt) => {
+        state.activeTabId = "chat";
+        state.compareMode = false;
+        renderWorkspaceRegions();
+        await handleSendChatMessage(prompt);
+      },
+      onRefreshShell: () => {
         renderAllRegions();
       },
     });
@@ -1404,12 +1746,14 @@ function getChatActions() {
       void handleSendChatMessage(text);
     },
     onChangeModel: (model: LocalModelId) => {
+      state.userOverrodeModelInSession = true;
       state.selectedModel = model;
       renderViewportRegion();
       renderStatusLine();
     },
     onUsePlanckInstead: (text: string) => {
       const openTabs = getActiveTabSources(state.activeDetail);
+      state.userOverrodeModelInSession = true;
       state.selectedModel =
         openTabs.length > 0 && !state.webSearchEnabled
           ? "hertz (reader)"
@@ -1549,6 +1893,41 @@ function getChatActions() {
     onDownloadMailAttachment: (messageId: string, partId: string) => {
       void sidecarSaveMailAttachment(messageId, partId);
     },
+    onNewsTrustDelta: (msgId: string, domain: string, delta: number) => {
+      void (async () => {
+        const curMeta =
+          state.messageAnswerMeta[msgId] ??
+          state.activeDetail?.messages.find((m) => m.id === msgId)
+            ?.answer_meta;
+        const srcRow = curMeta?.sources?.find((s) => s.domain === domain);
+        const curPersonal =
+          srcRow?.trust.personal ?? srcRow?.trust.system ?? 5;
+        const nextScore = Math.max(0, Math.min(10, curPersonal + delta));
+        await sidecarSetDomainTrust(domain, nextScore);
+        const kb = await sidecarFetchKnowledge();
+        if (kb) state.knowledge = kb;
+        if (curMeta) {
+          const updatedMeta = await sidecarReweighNewsMeta(curMeta);
+          if (updatedMeta) {
+            state.messageAnswerMeta[msgId] = updatedMeta;
+            const targetMsg = state.activeDetail?.messages.find(
+              (m) => m.id === msgId
+            );
+            if (targetMsg) {
+              targetMsg.answer_meta = updatedMeta;
+            }
+          }
+        }
+        renderViewportRegion();
+      })();
+    },
+    onOpenNewsLane: (lane: string) => {
+      const nl = (lane || "stories") as NewsLane;
+      state.newsActiveLane = nl;
+      state.activeTabId = `news-lane:${nl}`;
+      void refreshNewsState(nl).then(() => renderAllRegions());
+      renderAllRegions();
+    },
   };
 }
 
@@ -1602,19 +1981,32 @@ async function handleWatchTarget(
 }
 
 async function handleRunComparer(goal = "compare these"): Promise<void> {
-  if (!state.activeDetail || state.isStreaming) return;
+  if (!state.activeDetail) return;
   const convId = state.activeDetail.conversation.id;
+  if (isConvStreaming(convId)) return;
+  const modelSnap = state.selectedModel;
+  const compareModeSnap = state.compareMode;
+  const compareTabsSnap = [...state.compareTabIds];
   state.agentRailOpen = true;
-  startStreamingProgress("running Comparer agent across open sources...", "comparing");
+  startStreamingProgress(
+    convId,
+    modelSnap,
+    "running Comparer agent across open sources...",
+    "comparing",
+    goal
+  );
   renderViewportRegion();
 
   try {
     await apiCaptureOpenTabs(convId);
-    state.activeDetail = await apiGetConversation(convId);
-    const activeTabSources = getActiveTabSources(state.activeDetail);
+    const curDetail = await apiGetConversation(convId);
+    if (state.activeDetail?.conversation.id === convId) {
+      state.activeDetail = curDetail;
+    }
+    const activeTabSources = getActiveTabSources(curDetail);
     const compareSources =
-      state.compareMode && state.compareTabIds.length >= 2
-        ? activeTabSources.filter((s) => state.compareTabIds.includes(s.tab.id))
+      compareModeSnap && compareTabsSnap.length >= 2
+        ? activeTabSources.filter((s) => compareTabsSnap.includes(s.tab.id))
         : activeTabSources;
     const chosen = (compareSources.length >= 2 ? compareSources : activeTabSources).map(
       (s) => ({
@@ -1626,7 +2018,7 @@ async function handleRunComparer(goal = "compare these"): Promise<void> {
     );
 
     const res = await sidecarRunComparer(convId, chosen, goal);
-    stopStreamingProgress();
+    stopStreamingProgress(convId);
 
     if (res.ok && res.table_md) {
       if (res.task) {
@@ -1643,23 +2035,29 @@ async function handleRunComparer(goal = "compare these"): Promise<void> {
         "comparer (agent)",
         JSON.stringify(res.source_ids ?? [])
       );
-      state.activeDetail = await apiGetConversation(convId);
-      if (state.activeDetail && res.cited_sources) {
-        const msgObj = state.activeDetail.messages.find((m) => m.id === savedMsg.id);
-        if (msgObj) {
-          msgObj.cited_sources = res.cited_sources;
-        }
+      if (res.cited_sources) {
+        state.messageCitedSources[savedMsg.id] = res.cited_sources;
       }
+      await refreshCompletedConversation(convId, savedMsg.id);
     }
   } finally {
-    stopStreamingProgress();
-    renderAllRegions();
+    stopStreamingProgress(convId);
+    if (state.activeDetail?.conversation.id === convId) {
+      renderAllRegions();
+    } else {
+      renderRailRegion();
+    }
   }
 }
 
 async function hydrateConversationPreviews(
   detail: NonNullable<typeof state.activeDetail>
 ): Promise<void> {
+  for (const m of detail.messages) {
+    if (m.answer_meta && !state.messageAnswerMeta[m.id]) {
+      state.messageAnswerMeta[m.id] = m.answer_meta;
+    }
+  }
   if (!state.sidecar.online || !detail.messages.length) return;
   const needsHydration = detail.messages.some((m) => {
     if (m.role !== "assistant" || !m.source_ids_json) return false;
@@ -1764,6 +2162,13 @@ async function selectConversation(conversationId: string): Promise<void> {
       await refreshMailState();
       state.activeTabId = "chat";
       state.agentRailOpen = true;
+    } else if (detail.conversation.origin === "news") {
+      await Promise.all([
+        refreshNewsState("stories"),
+        refreshNewsState("topics"),
+      ]);
+      state.activeTabId = "chat";
+      state.agentRailOpen = true;
     } else if (detail.conversation.origin === "direct" && openTabs.length > 0 && detail.messages.length === 0) {
       state.activeTabId = openTabs[0].id;
       state.agentRailOpen = true;
@@ -1794,6 +2199,9 @@ function handleToggleCommandBar(): void {
   state.commandBarOpen = !state.commandBarOpen;
   state.commandBarSelectedIdx = 0;
   renderCommandBarOverlay(getStartScreenActions());
+  if (state.commandBarOpen) {
+    void refreshDigest();
+  }
 }
 
 function getProfilePromptActions() {
@@ -1806,18 +2214,9 @@ function getProfilePromptActions() {
           state.profileStatusMessage = "";
           state.profilePromptOpen = false;
           state.profilePromptDismissed = false;
+          await syncAfterProfileAuthChange(true);
         } else {
           state.profileStatusMessage = `error: ${res.error ?? "invalid 6-digit PIN"}`;
-        }
-        const [kb, mCfg] = await Promise.all([
-          sidecarFetchKnowledge(),
-          sidecarGetModelConfig(),
-        ]);
-        if (kb) state.knowledge = kb;
-        if (mCfg) state.modelConfig = mCfg;
-        if (res.ok) {
-          await refreshMailState();
-          await refreshLists();
         }
         renderProfileUnlockOverlay(getProfilePromptActions());
         renderAllRegions();
@@ -1830,18 +2229,9 @@ function getProfilePromptActions() {
           state.profileStatusMessage = "";
           state.profilePromptOpen = false;
           state.profilePromptDismissed = false;
+          await syncAfterProfileAuthChange(true);
         } else {
           state.profileStatusMessage = `error: ${res.error ?? "failed to create profile (ensure PIN is 6 digits)"}`;
-        }
-        const [kb, mCfg] = await Promise.all([
-          sidecarFetchKnowledge(),
-          sidecarGetModelConfig(),
-        ]);
-        if (kb) state.knowledge = kb;
-        if (mCfg) state.modelConfig = mCfg;
-        if (res.ok) {
-          await refreshMailState();
-          await refreshLists();
         }
         renderProfileUnlockOverlay(getProfilePromptActions());
         renderAllRegions();
@@ -1867,21 +2257,11 @@ function getStartScreenActions() {
     onSelectConversation: (id: string) => {
       void selectConversation(id);
     },
-    onOpenDigestUrl: (url: string) => {
-      if (url.startsWith("satzmail://message/")) {
-        const mid = url.replace("satzmail://message/", "").split("/")[0].trim();
-        const mailConv = state.conversations.find((c) => c.origin === "mail");
-        if (mailConv && mid) {
-          void (async () => {
-            await selectConversation(mailConv.id);
-            await openEmailMessageTab(mid, "mail");
-          })();
-          return;
-        }
-      }
-      void startDirectBrowsing(url);
+    onOpenDigestUrl: (url: string, title: string, convId?: string) => {
+      void handleOpenDigestUrl(url, title, convId);
     },
     onChangeModel: (model: LocalModelId) => {
+      state.userOverrodeModelInSession = true;
       state.selectedModel = model;
       renderViewportRegion();
       renderStatusLine();
@@ -1894,20 +2274,19 @@ function getStartScreenActions() {
       state.commandBarOpen = false;
       renderCommandBarOverlay(getStartScreenActions());
     },
+    onGoHome: () => {
+      resetToNewConversation();
+    },
+    onRefreshDigest: () => {
+      void refreshLiveDigestSources();
+    },
     onUnlockProfile: async (profileId: string, pin: string) => {
       state.revealedPasswords = {};
       const res = await sidecarUnlockProfile(profileId, pin);
       state.profileStatusMessage = res.ok
         ? ""
         : `error: ${res.error ?? "invalid 6-digit PIN"}`;
-      const [kb, mCfg] = await Promise.all([
-        sidecarFetchKnowledge(),
-        sidecarGetModelConfig(),
-      ]);
-      if (kb) state.knowledge = kb;
-      if (mCfg) state.modelConfig = mCfg;
-      await refreshMailState();
-      await refreshLists();
+      await syncAfterProfileAuthChange(Boolean(res.ok));
       renderAllRegions();
     },
     onCreateProfile: async (name: string, pin: string) => {
@@ -1915,14 +2294,7 @@ function getStartScreenActions() {
       state.profileStatusMessage = res.ok
         ? ""
         : `error: ${res.error ?? "failed to create profile (ensure PIN is 6 digits)"}`;
-      const [kb, mCfg] = await Promise.all([
-        sidecarFetchKnowledge(),
-        sidecarGetModelConfig(),
-      ]);
-      if (kb) state.knowledge = kb;
-      if (mCfg) state.modelConfig = mCfg;
-      await refreshMailState();
-      await refreshLists();
+      await syncAfterProfileAuthChange(Boolean(res.ok));
       renderAllRegions();
     },
   };
@@ -1937,12 +2309,8 @@ async function handleExecuteCommandRoute(
 
   if (route.kind === "run_command") {
     const cid = route.command_id;
-    if (cid === "new_conversation") {
-      state.activeDetail = null;
-      state.showKnowledgeView = false;
-      state.showBrainView = false;
-      state.compareMode = false;
-      renderAllRegions();
+    if (cid === "home" || cid === "new_conversation") {
+      resetToNewConversation();
       return;
     }
     if (cid === "bookmark") {
@@ -1957,9 +2325,7 @@ async function handleExecuteCommandRoute(
       state.revealedPasswords = {};
       await sidecarLockProfile();
       state.profileStatusMessage = "profile locked. encrypted vault unloaded.";
-      const kb = await sidecarFetchKnowledge();
-      if (kb) state.knowledge = kb;
-      await refreshMailState();
+      await syncAfterProfileAuthChange(false);
       renderAllRegions();
       return;
     }
@@ -1974,12 +2340,14 @@ async function handleExecuteCommandRoute(
     if (cid === "settings") {
       state.showKnowledgeView = true;
       state.showBrainView = false;
-      const [kb, docRoles] = await Promise.all([
+      const [kb, docRoles, mCfg] = await Promise.all([
         sidecarFetchKnowledge(),
         sidecarFetchDoctor(),
+        sidecarGetModelConfig(),
       ]);
       if (kb) state.knowledge = kb;
       state.doctorRoles = docRoles;
+      if (mCfg) syncConfiguredChatModel(mCfg, false);
       await refreshMailState();
       renderAllRegions();
       return;
@@ -2018,6 +2386,25 @@ async function handleExecuteCommandRoute(
     return;
   }
 
+  if (route.kind === "search_news") {
+    const q = (route.query ?? "").trim();
+    const newsConv =
+      state.conversations.find((c) => c.origin === "news") ??
+      (await apiEnsureNewsConversation());
+    await selectConversation(newsConv.id);
+    if (q) {
+      state.activeTabId = "chat";
+      renderAllRegions();
+      await handleSendChatMessage(q);
+    } else {
+      state.newsActiveLane = "stories";
+      state.activeTabId = "news-lane:stories";
+      await refreshNewsState("stories");
+      renderAllRegions();
+    }
+    return;
+  }
+
   if (route.kind === "search_mail") {
     const q = (route.query ?? raw).trim();
     const mailConv =
@@ -2046,6 +2433,11 @@ async function handleExecuteCommandRoute(
   state.activeTabId = "chat";
   state.agentRailOpen = true;
   await refreshLists();
+  try {
+    await apiEnsureNewsConversation();
+  } catch {
+    // Non-fatal if DB call fails in browser-only Vite dev preview
+  }
   renderAllRegions();
   await handleSendChatMessage(question);
 }
@@ -2077,6 +2469,11 @@ async function handleStartSubmission(raw: string): Promise<void> {
   state.activeTabId = "chat";
   state.agentRailOpen = true;
   await refreshLists();
+  try {
+    await apiEnsureNewsConversation();
+  } catch {
+    // Non-fatal if DB call fails in browser-only Vite dev preview
+  }
   renderAllRegions();
   await handleSendChatMessage(question);
 }
@@ -2092,6 +2489,11 @@ async function startDirectBrowsing(rawUrl: string): Promise<void> {
   state.activeTabId = tab.id;
   state.agentRailOpen = true;
   await refreshLists();
+  try {
+    await apiEnsureNewsConversation();
+  } catch {
+    // Non-fatal if DB call fails in browser-only Vite dev preview
+  }
   renderAllRegions();
 }
 
@@ -2120,6 +2522,11 @@ async function handleCreateNewTab(): Promise<void> {
   state.compareMode = false;
   state.activeTabId = tab.id;
   await refreshLists();
+  try {
+    await apiEnsureNewsConversation();
+  } catch {
+    // Non-fatal if DB call fails in browser-only Vite dev preview
+  }
   renderAllRegions();
   window.setTimeout(() => {
     const input = document.getElementById(
@@ -2142,6 +2549,11 @@ async function handleCloseTab(tabId: string): Promise<void> {
     state.activeTabId = remaining.length > 0 ? remaining[0].id : "chat";
   }
   await refreshLists();
+  try {
+    await apiEnsureNewsConversation();
+  } catch {
+    // Non-fatal if DB call fails in browser-only Vite dev preview
+  }
   renderAllRegions();
 }
 
@@ -2197,6 +2609,11 @@ async function handleOpenUrlAsTab(url: string, title: string): Promise<void> {
   state.compareMode = false;
   state.activeTabId = tab.id;
   await refreshLists();
+  try {
+    await apiEnsureNewsConversation();
+  } catch {
+    // Non-fatal if DB call fails in browser-only Vite dev preview
+  }
   renderAllRegions();
 }
 
@@ -2285,24 +2702,35 @@ async function handleCitationClick(
 }
 
 async function handleSendChatMessage(text: string): Promise<void> {
-  if (!state.activeDetail || state.isStreaming) return;
-  const convId = state.activeDetail.conversation.id;
-  state.lastUserPrompt = text;
+  const detailSnap = state.activeDetail;
+  if (!detailSnap) return;
+  const convId = detailSnap.conversation.id;
+  if (isConvStreaming(convId)) return;
+
+  const chosenModel = state.selectedModel;
+  const useWebSearch = state.webSearchEnabled;
+  const convOrigin = detailSnap.conversation.origin;
+  const useMailContext = Boolean(convOrigin === "mail" || state.mailContextEnabled);
+  const activeTabSnap = state.activeTabId;
+
+  state.lastPromptByConv[convId] = text;
   state.chatPinToBottom = true;
 
   await apiAddMessage(convId, "user", text, null, null);
-  state.activeDetail = await apiGetConversation(convId);
+  let workDetail = await apiGetConversation(convId);
+  if (state.activeDetail?.conversation.id === convId) {
+    state.activeDetail = workDetail;
+  }
 
   if (!state.sidecar.online) {
     await apiAddMessage(
       convId,
       "assistant",
       "models [offline]: start the local sidecar service to run gemma, planck3, or hertz.",
-      state.selectedModel,
+      chosenModel,
       JSON.stringify([])
     );
-    state.activeDetail = await apiGetConversation(convId);
-    renderViewportRegion();
+    await refreshCompletedConversation(convId);
     return;
   }
 
@@ -2316,20 +2744,28 @@ async function handleSendChatMessage(text: string): Promise<void> {
     return;
   }
 
-  startStreamingProgress("capturing live open tab DOM...", "capturing");
-  renderViewportRegion();
+  startStreamingProgress(
+    convId,
+    chosenModel,
+    "capturing live open tab DOM...",
+    "capturing",
+    text
+  );
+  if (state.activeDetail?.conversation.id === convId) {
+    renderViewportRegion();
+  }
 
   try {
     // 1. Check if the user prompt requests finding/searching/browsing a site or web query.
-    // If so, actively navigate the live WebView2 tab (or open a tab if on [1 chat]) and capture its rendered DOM + images.
     const navTarget = resolveLiveNavigationTarget(
       text,
-      state.activeDetail?.tabs ?? [],
-      state.activeTabId,
-      state.webSearchEnabled
+      workDetail?.tabs ?? [],
+      activeTabSnap,
+      useWebSearch
     );
     if (navTarget) {
       updateStreamingStatus(
+        convId,
         `navigating live browser tab to ${navTarget.targetUrl}...`,
         "navigating"
       );
@@ -2346,38 +2782,110 @@ async function handleSendChatMessage(text: string): Promise<void> {
           2500
         );
       } else {
-        const prevActiveTabId = state.activeTabId;
         const openedTab = await apiOpenTab(
           convId,
           navTarget.targetUrl,
           navTarget.label
         );
-        state.activeDetail = await apiGetConversation(convId);
-        state.activeTabId = prevActiveTabId;
-        renderTabStripRegion();
+        workDetail = await apiGetConversation(convId);
+        if (state.activeDetail?.conversation.id === convId) {
+          state.activeDetail = workDetail;
+          state.activeTabId = activeTabSnap;
+          renderTabStripRegion();
+        }
         await apiNavigateAndCaptureTab(
           openedTab.id,
           navTarget.targetUrl,
           2600
         );
       }
-      state.activeDetail = await apiGetConversation(convId);
-      renderTabStripRegion();
+      workDetail = await apiGetConversation(convId);
+      if (state.activeDetail?.conversation.id === convId) {
+        state.activeDetail = workDetail;
+        renderTabStripRegion();
+      }
     }
 
     // 2. Capture live rendered DOM + visible_text from all open WebView2 tabs right before querying models
-    updateStreamingStatus("capturing live open tab DOM...", "capturing");
+    updateStreamingStatus(convId, "capturing live open tab DOM...", "capturing");
     await apiCaptureOpenTabs(convId);
-    state.activeDetail = await apiGetConversation(convId);
-    const activeTabSources = getActiveTabSources(state.activeDetail);
+    workDetail = await apiGetConversation(convId);
+    if (state.activeDetail?.conversation.id === convId) {
+      state.activeDetail = workDetail;
+    }
+    const activeTabSources = getActiveTabSources(workDetail);
 
-    if (state.selectedModel === "planck3 (web)") {
+    if (convOrigin === "news") {
       updateStreamingStatus(
+        convId,
+        "searching, reading, weighing & verifying news across clusters and registry...",
+        "news_weigh"
+      );
+      const rolesOverride =
+        chosenModel &&
+        chosenModel !== "hertz (reader)" &&
+        chosenModel !== "planck (reader)" &&
+        chosenModel !== "planck3 (web)"
+          ? { news_analyzer: chosenModel }
+          : undefined;
+      const res = await sidecarNewsChatAnswer(
+        text,
+        activeTabSources.map((s) => ({
+          id: s.sourceId,
+          url: s.url,
+          title: s.title,
+          domain: extractDomain(s.url),
+        })),
+        rolesOverride
+      );
+      stopStreamingProgress(convId);
+      if (res.source_stats) {
+        for (const st of res.source_stats) {
+          state.sourceStats[st.id] = st;
+        }
+      }
+      const usedModel = res.model || chosenModel;
+      const answerText = res.ok
+        ? res.answer
+        : `error: ${res.error || "failed to answer news query"}`;
+      const extrasObj = {
+        cited_sources: res.sources ?? [],
+        findings: res.findings ?? [],
+        answer_meta: res.answer_meta ?? undefined,
+      };
+      const savedMsg = await apiAddMessage(
+        convId,
+        "assistant",
+        answerText,
+        usedModel,
+        JSON.stringify((res.sources ?? []).map((s) => s.url)),
+        null,
+        null,
+        null,
+        JSON.stringify(extrasObj)
+      );
+      if (res.sources && res.sources.length > 0) {
+        state.messageCitedSources[savedMsg.id] = res.sources;
+      }
+      if (res.findings && res.findings.length > 0) {
+        state.messageFindings[savedMsg.id] = res.findings;
+      }
+      if (res.answer_meta) {
+        state.messageAnswerMeta[savedMsg.id] = res.answer_meta;
+      }
+      await refreshNewsState("topics");
+      await refreshCompletedConversation(convId, savedMsg.id);
+      return;
+    }
+
+    if (chosenModel === "planck3 (web)") {
+      updateStreamingStatus(
+        convId,
         "searching and weighing web sources via planck3...",
         "web_search"
       );
       const result = await sidecarRunAnswer(text, convId);
-      stopStreamingProgress();
+      stopStreamingProgress(convId);
       const extrasObj = {
         cited_sources: result.sources ?? [],
         findings: result.findings ?? [],
@@ -2386,7 +2894,7 @@ async function handleSendChatMessage(text: string): Promise<void> {
         convId,
         "assistant",
         `${result.answer}\n\nconfidence: ${result.band}`,
-        state.selectedModel,
+        chosenModel,
         JSON.stringify(result.sources.map((s) => s.url)),
         null,
         null,
@@ -2399,24 +2907,20 @@ async function handleSendChatMessage(text: string): Promise<void> {
       if (result.findings && result.findings.length > 0) {
         state.messageFindings[savedMsg.id] = result.findings;
       }
-      state.chatPinToBottom = true;
-      state.activeDetail = await apiGetConversation(convId);
-      renderViewportRegion();
+      await refreshCompletedConversation(convId, savedMsg.id);
       return;
     }
 
     const readableSources = activeTabSources.filter((s) => s.textChars > 0);
 
-    if (
-      state.selectedModel === "hertz (reader)" ||
-      state.selectedModel === "planck (reader)"
-    ) {
+    if (chosenModel === "hertz (reader)" || chosenModel === "planck (reader)") {
       updateStreamingStatus(
-        `reading ${readableSources.length} open tab source(s) with ${state.selectedModel}...`,
+        convId,
+        `reading ${readableSources.length} open tab source(s) with ${chosenModel}...`,
         "reading"
       );
       const res = await sidecarRunRead(
-        state.selectedModel,
+        chosenModel,
         text,
         readableSources.map((s) => ({
           id: s.sourceId,
@@ -2424,33 +2928,32 @@ async function handleSendChatMessage(text: string): Promise<void> {
           title: s.title,
         }))
       );
-      stopStreamingProgress();
-      await apiAddMessage(
+      stopStreamingProgress(convId);
+      const savedMsg = await apiAddMessage(
         convId,
         "assistant",
         res.answer,
-        state.selectedModel,
+        chosenModel,
         JSON.stringify(res.source_ids)
       );
-      state.activeDetail = await apiGetConversation(convId);
-      renderViewportRegion();
+      await refreshCompletedConversation(convId, savedMsg.id);
       return;
     }
 
-    // Default: gemma-4-e4b streaming over open tabs in context
+    // Default: selected local Gemma or cloud provider streaming over sources & web harness
     updateStreamingStatus(
-      `sending ${activeTabSources.length} open tab source(s) to ${state.selectedModel}...`,
+      convId,
+      `sending ${activeTabSources.length} open tab source(s) to ${chosenModel}...`,
       "connecting"
     );
 
-    const historyPayload = (state.activeDetail?.messages ?? []).map((m) => ({
+    const historyPayload = (workDetail?.messages ?? []).map((m) => ({
       role: m.role,
       content: m.content,
     }));
 
-    const convSummary = state.activeDetail?.conversation.summary ?? "";
-    const isMailConv = state.activeDetail?.conversation.origin === "mail";
-    const mailEnabled = Boolean(isMailConv || state.mailContextEnabled);
+    const convSummary = workDetail?.conversation.summary ?? "";
+    const isMailConv = convOrigin === "mail";
     const initialSources = activeTabSources.map((s) => ({
       id: s.sourceId,
       url: s.url,
@@ -2463,18 +2966,18 @@ async function handleSendChatMessage(text: string): Promise<void> {
     }
 
     const streamRes = await sidecarStreamChat(
-      state.selectedModel,
+      chosenModel,
       historyPayload,
       initialSources,
-      state.webSearchEnabled,
+      useWebSearch,
       (delta) => {
-        appendStreamingDelta(delta);
+        appendStreamingDelta(convId, delta);
       },
       (status, phase) => {
-        updateStreamingStatus(status, phase);
+        updateStreamingStatus(convId, status, phase);
       },
       (errText) => {
-        updateStreamingStatus(`error: ${errText}`, "error");
+        updateStreamingStatus(convId, `error: ${errText}`, "error");
       },
       convSummary,
       (stats) => {
@@ -2482,7 +2985,7 @@ async function handleSendChatMessage(text: string): Promise<void> {
           state.sourceStats[st.id] = st;
         }
       },
-      mailEnabled
+      useMailContext
     );
 
     if (streamRes.source_stats) {
@@ -2491,12 +2994,12 @@ async function handleSendChatMessage(text: string): Promise<void> {
       }
     }
 
+    const streamedSoFar = stopStreamingProgress(convId);
     const finalContent = streamRes.stalled
       ? "gemma stopped responding after 30 s."
       : streamRes.annotated_text ||
-        state.streamingText ||
+        streamedSoFar ||
         (streamRes.error ? `[err] ${streamRes.error}` : "(no response)");
-    stopStreamingProgress();
 
     const extrasPayload: Record<string, unknown> = {};
     if (streamRes.cited_sources && streamRes.cited_sources.length > 0) {
@@ -2523,7 +3026,7 @@ async function handleSendChatMessage(text: string): Promise<void> {
       convId,
       "assistant",
       finalContent,
-      state.selectedModel,
+      chosenModel,
       JSON.stringify(streamRes.source_ids),
       typeof streamRes.citations_ok === "number" ? streamRes.citations_ok : null,
       typeof streamRes.citations_flagged === "number"
@@ -2547,34 +3050,11 @@ async function handleSendChatMessage(text: string): Promise<void> {
     if (streamRes.cited_sources && streamRes.cited_sources.length > 0) {
       state.messageCitedSources[savedMsg.id] = streamRes.cited_sources;
     }
-    state.chatPinToBottom = true;
-    state.activeDetail = await apiGetConversation(convId);
-    if (state.activeDetail) {
-      await hydrateConversationPreviews(state.activeDetail);
-      const msgObj = state.activeDetail.messages.find(
-        (m) => m.id === savedMsg.id
-      );
-      if (msgObj) {
-        if (state.messageProposals[savedMsg.id]) {
-          msgObj.proposals = state.messageProposals[savedMsg.id];
-        }
-        if (state.messageFindings[savedMsg.id]) {
-          msgObj.findings = state.messageFindings[savedMsg.id];
-        }
-        if (state.messageBrainSources[savedMsg.id]) {
-          msgObj.brain_sources = state.messageBrainSources[savedMsg.id];
-        }
-        if (state.messageEmailCards[savedMsg.id]) {
-          msgObj.email_cards = state.messageEmailCards[savedMsg.id];
-        }
-        if (state.messageCitedSources[savedMsg.id]) {
-          msgObj.cited_sources = state.messageCitedSources[savedMsg.id];
-        }
-      }
-    }
+    await refreshCompletedConversation(convId, savedMsg.id);
 
     // Section 3.2 (M9): After every 6th assistant turn, write a rolling summary (max 600 chars) in background
-    const allMessages = state.activeDetail?.messages ?? [];
+    const refreshedNow = await apiGetConversation(convId);
+    const allMessages = refreshedNow?.messages ?? [];
     const assistantTurns = allMessages.filter((m) => m.role === "assistant").length;
     if (assistantTurns > 0 && assistantTurns % 6 === 0) {
       const msgsForSummary = allMessages.map((m) => ({
@@ -2594,19 +3074,16 @@ async function handleSendChatMessage(text: string): Promise<void> {
         }
       })();
     }
-
-    renderViewportRegion();
   } catch (err) {
-    stopStreamingProgress();
+    stopStreamingProgress(convId);
     await apiAddMessage(
       convId,
       "assistant",
       `[err] ${String(err)}`,
-      state.selectedModel,
+      chosenModel,
       JSON.stringify([])
     );
-    state.activeDetail = await apiGetConversation(convId);
-    renderViewportRegion();
+    await refreshCompletedConversation(convId);
   }
 }
 
@@ -2649,6 +3126,11 @@ async function openEmailMessageTab(
   state.activeTabId = tab.id;
   await refreshMailState();
   await refreshLists();
+  try {
+    await apiEnsureNewsConversation();
+  } catch {
+    // Non-fatal if DB call fails in browser-only Vite dev preview
+  }
   renderAllRegions();
 }
 
@@ -2685,6 +3167,11 @@ async function openComposeTab(seed?: {
   );
   state.activeTabId = tab.id;
   await refreshLists();
+  try {
+    await apiEnsureNewsConversation();
+  } catch {
+    // Non-fatal if DB call fails in browser-only Vite dev preview
+  }
   renderAllRegions();
 }
 

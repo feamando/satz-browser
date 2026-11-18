@@ -263,6 +263,8 @@ class SatzMailManager:
         self._account_wake_events: dict[str, threading.Event] = {}
         self._account_backoff: dict[str, dict[str, float]] = {}
         self._auth_stopped_accounts: set[str] = set()
+        self._account_sync_locks: dict[str, threading.Lock] = {}
+        self._sync_locks_guard = threading.Lock()
         self.sync_poll_interval_secs = 120.0
 
         # Pipeline reference (attached in M12)
@@ -1027,6 +1029,14 @@ class SatzMailManager:
             results[aid] = self.sync_account_once(aid)
         return {"ok": True, "results": results}
 
+    def _get_account_sync_lock(self, account_id: str) -> threading.Lock:
+        with self._sync_locks_guard:
+            lock = self._account_sync_locks.get(account_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._account_sync_locks[account_id] = lock
+            return lock
+
     def sync_account_once(self, account_id: str) -> dict[str, Any]:
         """
         Section 4.4 (M11): Runs one sync pass for `account_id`:
@@ -1036,6 +1046,12 @@ class SatzMailManager:
         - POP3: `UIDL` for dedupe, never `DELE` ("leave on server" forced).
         - Auth errors stop sync and set `[auth failed]`; network errors back off (doubling, max 30 min = 1800s).
         """
+        if not self.passwords.unlocked:
+            return {"ok": False, "error": "Profile is locked."}
+        with self._get_account_sync_lock(account_id):
+            return self._sync_account_once_inner(account_id)
+
+    def _sync_account_once_inner(self, account_id: str) -> dict[str, Any]:
         if not self.passwords.unlocked:
             return {"ok": False, "error": "Profile is locked."}
 
@@ -2087,11 +2103,16 @@ class SatzMailManager:
                 "processing_total": 0,
                 "model_version": "cold",
                 "labelled_count": 0,
+                "messages_count": 0,
+                "latest_message_ts": 0.0,
             }
         with self.db_lock:
             conn = self._ensure_connection()
             acct_cnt = conn.execute("SELECT COUNT(*) AS c FROM accounts").fetchone()["c"]
             labelled_cnt = conn.execute("SELECT COUNT(*) AS c FROM labels").fetchone()["c"]
+            msg_row = conn.execute(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(date), 0) AS max_d FROM messages WHERE hidden = 0"
+            ).fetchone()
             counts = self._compute_lane_counts(conn)
         pipe_status = self.pipeline.get_status() if self.pipeline is not None else {
             "processing_done": int(labelled_cnt),
@@ -2104,6 +2125,8 @@ class SatzMailManager:
             "unlocked": True,
             "accounts_count": int(acct_cnt),
             "inbox_unread": counts["inbox_unread"],
+            "messages_count": int(msg_row["c"] or 0) if msg_row else 0,
+            "latest_message_ts": float(msg_row["max_d"] or 0.0) if msg_row else 0.0,
             "counts": counts,
             **pipe_status,
         }

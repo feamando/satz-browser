@@ -1,5 +1,6 @@
 import type {
   AgentTaskCard,
+  AnswerMeta,
   BookmarkItem,
   BrainCitationItem,
   BrainProposalItem,
@@ -8,6 +9,7 @@ import type {
   ChatEmailCard,
   CommandBarActionId,
   CommandBarRoute,
+  ConvStreamState,
   Conversation,
   ConversationDetail,
   DigestEntry,
@@ -19,6 +21,12 @@ import type {
   MailLaneCounts,
   MailPreset,
   ModelManagementConfig,
+  NewsCategoryEntry,
+  NewsLane,
+  NewsPerspectiveMatrix,
+  NewsSourceEntry,
+  NewsStoryCluster,
+  NewsTopicItem,
   SidecarHealth,
   SourceStatEntry,
   WatchItem,
@@ -51,18 +59,17 @@ export interface AppState {
   openMenuConvId: string | null;
   renamingConvId: string | null;
   selectedModel: LocalModelId;
+  userOverrodeModelInSession: boolean;
   webSearchEnabled: boolean;
   mailContextEnabled: boolean;
-  isStreaming: boolean;
-  streamingText: string;
-  streamingStatus: string;
-  streamingPhase: string;
-  streamingStartedAt: number;
-  streamingSteps: string[];
-  lastUserPrompt: string;
+  streamsByConv: Record<string, ConvStreamState>;
+  lastPromptByConv: Record<string, string>;
   sidecar: SidecarHealth;
   doctorRoles: DoctorRoleEntry[];
   digestItems: DigestEntry[];
+  digestRevision: string | null;
+  digestUpdatedAt: number;
+  digestRefreshing: boolean;
   knowledge: KnowledgeSummary;
   bookmarkTooltipNotice: string;
   profileStatusMessage: string;
@@ -154,6 +161,29 @@ export interface AppState {
   modelConfigStatusMsg: string;
   profilePromptOpen: boolean;
   profilePromptDismissed: boolean;
+  newsActiveLane: NewsLane;
+  newsStories: NewsStoryCluster[];
+  newsForYouStories: NewsStoryCluster[];
+  newsPerspectivesStories: NewsStoryCluster[];
+  newsSelectedClusterId: string | null;
+  newsPerspectiveMatrix: NewsPerspectiveMatrix | null;
+  newsSources: NewsSourceEntry[];
+  newsCategories: NewsCategoryEntry[];
+  newsSourcesAsOf: string;
+  newsSourcesFilterQuery: string;
+  newsSourcesFilterCategory: string;
+  newsSourcesFilterBand: string;
+  newsSourcesConflictedOnly: boolean;
+  newsSourcesRssOnly: boolean;
+  newsTopics: NewsTopicItem[];
+  newsExploreMode: boolean;
+  newsLoading: boolean;
+  newsStatusMessage: string;
+  newsReaderArticleId: string | null;
+  newsReaderShowOriginal: boolean;
+  messageAnswerMeta: Record<string, AnswerMeta>;
+  expandedExplainMessages: Record<string, boolean>;
+  expandedInDepthMessages: Record<string, boolean>;
 }
 
 export const state: AppState = {
@@ -177,15 +207,11 @@ export const state: AppState = {
   openMenuConvId: null,
   renamingConvId: null,
   selectedModel: "gemma-4-e4b",
+  userOverrodeModelInSession: false,
   webSearchEnabled: false,
   mailContextEnabled: false,
-  isStreaming: false,
-  streamingText: "",
-  streamingStatus: "",
-  streamingPhase: "",
-  streamingStartedAt: 0,
-  streamingSteps: [],
-  lastUserPrompt: "",
+  streamsByConv: {},
+  lastPromptByConv: {},
   sidecar: {
     online: false,
     models: [
@@ -200,6 +226,9 @@ export const state: AppState = {
   },
   doctorRoles: [],
   digestItems: [],
+  digestRevision: null,
+  digestUpdatedAt: 0,
+  digestRefreshing: false,
   knowledge: {
     pause_learning: false,
     queue_len: 0,
@@ -271,6 +300,29 @@ export const state: AppState = {
   modelConfigStatusMsg: "",
   profilePromptOpen: false,
   profilePromptDismissed: false,
+  newsActiveLane: "stories",
+  newsStories: [],
+  newsForYouStories: [],
+  newsPerspectivesStories: [],
+  newsSelectedClusterId: null,
+  newsPerspectiveMatrix: null,
+  newsSources: [],
+  newsCategories: [],
+  newsSourcesAsOf: "",
+  newsSourcesFilterQuery: "",
+  newsSourcesFilterCategory: "",
+  newsSourcesFilterBand: "",
+  newsSourcesConflictedOnly: false,
+  newsSourcesRssOnly: false,
+  newsTopics: [],
+  newsExploreMode: false,
+  newsLoading: false,
+  newsStatusMessage: "",
+  newsReaderArticleId: null,
+  newsReaderShowOriginal: false,
+  messageAnswerMeta: {},
+  expandedExplainMessages: {},
+  expandedInDepthMessages: {},
 };
 
 export function escapeHtml(str: string): string {
@@ -362,6 +414,10 @@ export function classifyStartInput(raw: string): ParsedStartInput {
 }
 
 const COMMAND_ALIASES: Record<string, CommandBarActionId> = {
+  home: "home",
+  start: "home",
+  "start screen": "home",
+  "for you": "home",
   "new conversation": "new_conversation",
   "new chat": "new_conversation",
   new: "new_conversation",
@@ -462,6 +518,15 @@ export function rankCommandBarRoutes(
     query: q,
   });
 
+  const makeNewsRoute = (q: string): CommandBarRoute => ({
+    kind: "search_news",
+    label: `news intelligence · "${q}"`,
+    destination: "satz news (read -> weigh -> write)",
+    privacy: usesWeb ? "brave + trusted sources" : "local news cache + feeds",
+    leaves_machine: usesWeb,
+    query: q,
+  });
+
   // 1. Exact command match
   const cmdNorm = trimmed.toLowerCase().replace(/^\//, "").trim();
   const matchedCmd = COMMAND_ALIASES[cmdNorm];
@@ -528,7 +593,16 @@ export function rankCommandBarRoutes(
     ];
   }
 
-  // 3. Explicit mail prefix (`mail: ...`, `from: ...`, `inbox: ...`, `search mail ...`)
+  // 3. Explicit news prefix (`news: ...`, `breaking: ...`, `perspectives: ...`)
+  const newsPrefixMatch = trimmed.match(
+    /^(?:(?:news|breaking|perspectives|headlines)\s*:\s*|search\s+news\s+(?:for\s+)?)(.+)$/i
+  );
+  if (newsPrefixMatch) {
+    const q = newsPrefixMatch[1].trim();
+    return [makeNewsRoute(q), makeAskRoute(trimmed), makeBrainRoute(q)];
+  }
+
+  // 4. Explicit mail prefix (`mail: ...`, `from: ...`, `inbox: ...`, `search mail ...`)
   const mailPrefixMatch = trimmed.match(
     /^(?:(?:mail|inbox|from|to|subject)\s*:\s*|search\s+mail\s+(?:for\s+)?|in\s+mail\s+)(.+)$/i
   );
@@ -834,9 +908,13 @@ export function resolveLiveNavigationTarget(
   const trimmed = prompt.trim();
   if (!trimmed) return null;
 
-  // Never navigate away when asking about mail, inbox, brain, or summarizing the current page as-is
+  // Never navigate away when asking about mail, inbox, brain, summarizing the current page,
+  // or requesting an open web search handled by the sidecar Web Search Harness.
   if (
     /\b(my\s+(?:latest\s+)?(?:email|emails|inbox|mail|account|calendar|messages|address|order|package)|(?:summarize|summary\s+of|explain|translate)\s+(?:this|the)\s+(?:page|tab|article|email|site)|what\s+do\s+i\s+need\s+to\s+deal\s+with|draft\s+a\s+reply|store\s+(?:this|the)|save\s+(?:this|the)|in\s+my\s+brain)\b/i.test(
+      trimmed
+    ) ||
+    /\b(?:do\s+(?:a\s+)?(?:quick\s+)?web\s+search|web\s+search|search\s+(?:on\s+)?the\s+web|search\s+online|look\s+(?:that|it|this)?\s*up\s+online|google\s+(?:that|it|this))\b/i.test(
       trimmed
     )
   ) {
@@ -903,7 +981,17 @@ export function resolveLiveNavigationTarget(
   if (discoveryMatch) {
     let rawQuery = discoveryMatch[1]
       .replace(/^(?:some|any|a\s+few)\s+/i, "")
+      .replace(/\s+(?:then|please)[?.!]*$/i, "")
       .trim();
+
+    if (
+      !rawQuery ||
+      /^(?:that|this|it|them|those|these|the\s+same)(?:\s+(?:then|now|please))?$/i.test(
+        rawQuery
+      )
+    ) {
+      return null;
+    }
 
     // Check if a known brand/site is mentioned anywhere inside rawQuery
     const knownSites = [
@@ -946,23 +1034,21 @@ export function resolveLiveNavigationTarget(
 
     if (activeSiteTab) {
       const dom = extractDomain(activeSiteTab.url);
-      const origin = getOriginFromUrl(activeSiteTab.url);
-      const targetUrl = buildSiteSearchUrl(dom, rawQuery, origin);
-      return {
-        targetUrl,
-        existingTabId: activeSiteTab.id,
-        label: `${dom}: ${rawQuery}`,
-      };
+      if (!/^(?:duckduckgo\.com|google\.[a-z.]+|bing\.com)$/i.test(dom)) {
+        const origin = getOriginFromUrl(activeSiteTab.url);
+        const targetUrl = buildSiteSearchUrl(dom, rawQuery, origin);
+        return {
+          targetUrl,
+          existingTabId: activeSiteTab.id,
+          label: `${dom}: ${rawQuery}`,
+        };
+      }
     }
 
-    if (webSearchEnabled || siteTabs.length === 0) {
-      const targetUrl = `https://duckduckgo.com/?q=${encodeURIComponent(rawQuery)}`;
-      return {
-        targetUrl,
-        existingTabId: null,
-        label: `search: ${rawQuery}`,
-      };
-    }
+    // For general open-web queries with no named site, let the sidecar Web Search Harness
+    // fetch sources and render clickable page previews without hijacking a DuckDuckGo SERP tab.
+    void webSearchEnabled;
+    return null;
   }
 
   return null;
@@ -996,6 +1082,48 @@ export function getAvailableModelsForPicker(): Array<{
     base.push({ id: state.selectedModel, label: state.selectedModel });
   }
   return base;
+}
+
+/**
+ * Syncs `state.selectedModel` to Settings' configured `roles.chat` unless the user
+ * manually picked a different model for the current chat session (`force = true`
+ * overrides that on profile switches, `[+ new conversation]`, or Settings updates).
+ */
+export function syncConfiguredChatModel(
+  cfg?: ModelManagementConfig | null,
+  force = false
+): boolean {
+  const effectiveCfg = cfg ?? state.modelConfig ?? state.sidecar.model_config ?? null;
+  if (effectiveCfg) {
+    state.modelConfig = effectiveCfg;
+    if (state.sidecar) {
+      state.sidecar.model_config = effectiveCfg;
+    }
+  }
+  if (force) {
+    state.userOverrodeModelInSession = false;
+  }
+  const configuredChat = effectiveCfg?.roles?.chat?.trim();
+  if (!configuredChat) return false;
+  if (!state.userOverrodeModelInSession && state.selectedModel !== configuredChat) {
+    state.selectedModel = configuredChat as LocalModelId;
+    return true;
+  }
+  return false;
+}
+
+export function getActiveStream(convId?: string | null): ConvStreamState | null {
+  const cid = convId ?? state.activeDetail?.conversation.id ?? "";
+  if (!cid) return null;
+  return state.streamsByConv[cid] ?? null;
+}
+
+export function isConvStreaming(convId?: string | null): boolean {
+  return Boolean(getActiveStream(convId));
+}
+
+export function hasAnyActiveStream(): boolean {
+  return Object.keys(state.streamsByConv).length > 0;
 }
 
 export function getModelPrivacySummary(modelId: string): string {

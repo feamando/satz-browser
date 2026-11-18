@@ -181,10 +181,12 @@ impl DbState {
         }
         let conn = Connection::open(&db_path)?;
         Self::init_connection(&conn)?;
-        Ok(Self {
+        let state = Self {
             conn: Mutex::new(conn),
             db_path,
-        })
+        };
+        let _ = state.ensure_news_conversation();
+        Ok(state)
     }
 
     pub fn init_connection(conn: &Connection) -> SqlResult<()> {
@@ -549,7 +551,11 @@ impl DbState {
                     (SELECT COUNT(*) FROM tabs t WHERE t.conversation_id = c.id AND t.is_open = 1) AS src_cnt,
                     c.summary
              FROM conversations c
-             ORDER BY CASE WHEN c.origin = 'mail' THEN 1 ELSE 0 END DESC,
+             ORDER BY CASE c.origin
+                        WHEN 'mail' THEN 2
+                        WHEN 'news' THEN 1
+                        ELSE 0
+                      END DESC,
                       c.pinned DESC,
                       c.last_active_at DESC,
                       c.created_at DESC",
@@ -571,13 +577,18 @@ impl DbState {
         rows.collect()
     }
 
-    pub fn ensure_mail_conversation(&self) -> SqlResult<Conversation> {
-        {
+    fn ensure_pinned_origin_conversation(
+        &self,
+        origin: &str,
+        default_id: &str,
+        default_title: &str,
+    ) -> SqlResult<Conversation> {
+        let target_id = {
             let conn = self.conn.lock().unwrap();
             let existing_id: Option<String> = conn
                 .query_row(
-                    "SELECT id FROM conversations WHERE origin = 'mail' LIMIT 1",
-                    [],
+                    "SELECT id FROM conversations WHERE origin = ?1 LIMIT 1",
+                    params![origin],
                     |r| r.get(0),
                 )
                 .optional()?;
@@ -586,18 +597,26 @@ impl DbState {
                     "UPDATE conversations SET pinned = 1, status = 'active' WHERE id = ?1",
                     params![cid],
                 )?;
-                drop(conn);
-                return Ok(self.get_conversation(&cid)?.conversation);
+                cid
+            } else {
+                let ts = now_epoch_secs_str();
+                conn.execute(
+                    "INSERT OR REPLACE INTO conversations (id, title, status, pinned, origin, created_at, last_active_at)
+                     VALUES (?1, ?2, 'active', 1, ?3, ?4, ?4)",
+                    params![default_id, default_title, origin, ts],
+                )?;
+                default_id.to_string()
             }
-            let ts = now_epoch_secs_str();
-            let cid = "conv-mail";
-            conn.execute(
-                "INSERT OR REPLACE INTO conversations (id, title, status, pinned, origin, created_at, last_active_at)
-                 VALUES (?1, 'mail', 'active', 1, 'mail', ?2, ?2)",
-                params![cid, ts],
-            )?;
-        }
-        Ok(self.get_conversation("conv-mail")?.conversation)
+        };
+        Ok(self.get_conversation(&target_id)?.conversation)
+    }
+
+    pub fn ensure_mail_conversation(&self) -> SqlResult<Conversation> {
+        self.ensure_pinned_origin_conversation("mail", "conv-mail", "mail")
+    }
+
+    pub fn ensure_news_conversation(&self) -> SqlResult<Conversation> {
+        self.ensure_pinned_origin_conversation("news", "conv-news", "news")
     }
 
     pub fn get_conversation(&self, conversation_id: &str) -> SqlResult<ConversationDetail> {
@@ -782,7 +801,7 @@ impl DbState {
         {
             let conn = self.conn.lock().unwrap();
             conn.execute(
-                "UPDATE conversations SET pinned = CASE WHEN origin = 'mail' THEN 1 WHEN pinned = 1 THEN 0 ELSE 1 END WHERE id = ?1",
+                "UPDATE conversations SET pinned = CASE WHEN origin IN ('mail', 'news') THEN 1 WHEN pinned = 1 THEN 0 ELSE 1 END WHERE id = ?1",
                 params![conversation_id],
             )?;
         }
@@ -798,7 +817,7 @@ impl DbState {
         {
             let conn = self.conn.lock().unwrap();
             conn.execute(
-                "UPDATE conversations SET status = CASE WHEN origin = 'mail' THEN 'active' ELSE ?2 END WHERE id = ?1",
+                "UPDATE conversations SET status = CASE WHEN origin IN ('mail', 'news') THEN 'active' ELSE ?2 END WHERE id = ?1",
                 params![conversation_id, status],
             )?;
         }
@@ -814,13 +833,13 @@ impl DbState {
                 |r| r.get(0),
             )
             .optional()?;
-        if origin.as_deref() == Some("mail") {
+        if matches!(origin.as_deref(), Some("mail") | Some("news")) {
             return Err(rusqlite::Error::InvalidParameterName(
-                "Pinned Mail conversation cannot be deleted".to_string(),
+                "Pinned system conversation cannot be deleted".to_string(),
             ));
         }
         conn.execute(
-            "DELETE FROM conversations WHERE id = ?1 AND origin != 'mail'",
+            "DELETE FROM conversations WHERE id = ?1 AND origin NOT IN ('mail', 'news')",
             params![conversation_id],
         )?;
         Ok(())
@@ -1823,5 +1842,41 @@ mod tests {
         );
         assert_eq!(detail.sources[0].id, src1.id);
         assert_eq!(detail.sources[0].text_chars, Some(4210));
+    }
+
+    #[test]
+    fn test_pinned_news_conversation_ordering_and_protections() {
+        let conn = Connection::open_in_memory().unwrap();
+        DbState::init_connection(&conn).unwrap();
+        let state = DbState {
+            conn: Mutex::new(conn),
+            db_path: PathBuf::from(":memory:"),
+        };
+
+        let _chat = state.create_conversation("General chat", "chat").unwrap();
+        let news_conv = state.ensure_news_conversation().unwrap();
+        assert_eq!(news_conv.id, "conv-news");
+        assert_eq!(news_conv.origin, "news");
+        assert!(news_conv.pinned);
+        assert_eq!(news_conv.status, "active");
+
+        let mail_conv = state.ensure_mail_conversation().unwrap();
+        assert_eq!(mail_conv.origin, "mail");
+
+        let after_unpin = state.pin_conversation(&news_conv.id).unwrap();
+        assert!(after_unpin.pinned, "News conversation must stay pinned");
+
+        let after_archive = state.archive_conversation(&news_conv.id, true).unwrap();
+        assert_eq!(after_archive.status, "active", "News conversation cannot be archived");
+
+        assert!(
+            state.delete_conversation(&news_conv.id).is_err(),
+            "News conversation cannot be deleted"
+        );
+
+        let list = state.list_conversations().unwrap();
+        assert!(list.len() >= 3);
+        assert_eq!(list[0].origin, "mail");
+        assert_eq!(list[1].origin, "news");
     }
 }

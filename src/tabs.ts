@@ -30,6 +30,7 @@ export function renderTabStrip(actions: TabStripActions): void {
 
   const openTabs = detail.tabs.filter((t) => t.is_open);
   const isMailConv = detail.conversation.origin === "mail";
+  const isNewsConv = detail.conversation.origin === "news";
   const isChatActive = state.activeTabId === "chat" && !state.compareMode;
   const counts = state.mailCounts;
   const totalUnreadAll =
@@ -86,12 +87,35 @@ export function renderTabStrip(actions: TabStripActions): void {
     `
     : "";
 
+  const newsClusterCount = state.newsStories.length || state.sidecar.news?.clusters || 0;
+  const newsTopicCount = state.newsTopics.length || state.sidecar.news?.topics || 0;
+  const newsLaneTabsHtml = isNewsConv
+    ? `
+      <div class="tab-item ${!state.compareMode && state.activeTabId === "news-lane:stories" ? "active" : ""}" data-news-lane-tab="stories" title="Clustered stories ranked by source family independence & recency">
+        <span>[ top stories${newsClusterCount > 0 ? ` ${newsClusterCount}` : ""} ]</span>
+      </div>
+      <div class="tab-item ${!state.compareMode && state.activeTabId === "news-lane:foryou" ? "active" : ""}" data-news-lane-tab="foryou" title="Personalized from your Brain & Mail topics (local PII-scrubbed) + 25% trusted explore">
+        <span>[ for you ]</span>
+      </div>
+      <div class="tab-item ${!state.compareMode && state.activeTabId === "news-lane:perspectives" ? "active" : ""}" data-news-lane-tab="perspectives" title="Side-by-side conflicting source families & blind spots">
+        <span>[ perspectives ]</span>
+      </div>
+      <div class="tab-item ${!state.compareMode && state.activeTabId === "news-lane:topics" ? "active" : ""}" data-news-lane-tab="topics" title="Tracked news beats and story watches">
+        <span>[ topics${newsTopicCount > 0 ? ` ${newsTopicCount}` : ""} ]</span>
+      </div>
+      <div class="tab-item ${!state.compareMode && state.activeTabId === "news-lane:sources" ? "active" : ""}" data-news-lane-tab="sources" title="222+ hand-scored sources, 31 categories, wire families & RSS feeds (30% cap)">
+        <span>[ sources ]</span>
+      </div>
+    `
+    : "";
+
   container.innerHTML = `
     <div class="tab-strip-left">
       <div class="tab-item ${isChatActive ? "active" : ""}" data-tab-id="chat">
         <span>[ chat ]</span>
       </div>
       ${mailLaneTabsHtml}
+      ${newsLaneTabsHtml}
       ${openTabs
         .map((tab, idx) => {
           const isActive =
@@ -139,6 +163,15 @@ export function renderTabStrip(actions: TabStripActions): void {
       const lane = (el as HTMLElement).getAttribute("data-lane-tab");
       if (lane) {
         actions.onSelectTab(`lane:${lane}`);
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-news-lane-tab]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const lane = (el as HTMLElement).getAttribute("data-news-lane-tab");
+      if (lane) {
+        actions.onSelectTab(`news-lane:${lane}`);
       }
     });
   });

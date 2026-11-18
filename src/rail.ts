@@ -2,12 +2,14 @@ import {
   escapeHtml,
   extractDomain,
   formatRelativeTime,
+  isConvStreaming,
   MOD_LABEL,
   state,
 } from "./state";
 import type { Conversation } from "./types";
 
 export interface RailActions {
+  onOpenHome?: () => void;
   onSelectConversation: (id: string) => void;
   onSelectMailAccount?: (convId: string, accountId: string | null) => void;
   onNewConversation: () => void;
@@ -39,14 +41,24 @@ export function renderRail(actions: RailActions): void {
   const archived = visibleConvs.filter((c) => c.status === "archived");
 
   const activeId = state.activeDetail?.conversation.id ?? null;
+  const isHomeActive =
+    !activeId && !state.showKnowledgeView && !state.showBrainView;
 
   container.innerHTML = `
     <div class="rail-header">
-      <span>satz</span>
+      <span id="rail-brand-home-btn" style="cursor:pointer;" title="Go to Home / Start Screen">satz</span>
       <span class="muted">[${MOD_LABEL}+k]</span>
     </div>
 
     <div class="rail-controls">
+      <button
+        id="rail-home-btn"
+        class="rail-btn-full ${isHomeActive ? "active" : ""}"
+        title="Return to Start Screen &amp; For You feed (${MOD_LABEL}+Shift+H)"
+      >
+        <span>[~ home]</span>
+        <span class="muted">[${MOD_LABEL}+shift+h]</span>
+      </button>
       <button id="rail-open-command-bar-btn" class="rail-btn-full">
         <span>[&gt; command bar]</span>
         <span class="muted">[${MOD_LABEL}+k]</span>
@@ -179,11 +191,13 @@ function renderConversationRow(
   isPinned: boolean
 ): string {
   const isMail = c.origin === "mail";
-  const prefix = isPinned || isMail ? "* " : "  ";
+  const isNews = c.origin === "news";
+  const isPinnedSystem = isMail || isNews;
+  const prefix = isPinned || isPinnedSystem ? "* " : "  ";
   const srcCount = c.source_count ?? 0;
   const relTime = formatRelativeTime(c.last_active_at || c.created_at);
-  const menuOpen = !isMail && state.openMenuConvId === c.id;
-  const isRenaming = !isMail && state.renamingConvId === c.id;
+  const menuOpen = !isPinnedSystem && state.openMenuConvId === c.id;
+  const isRenaming = !isPinnedSystem && state.renamingConvId === c.id;
   const totalUnread =
     state.mailAccounts.length > 0
       ? state.mailAccounts.reduce((acc, a) => acc + (a.inbox_unread ?? 0), 0) ||
@@ -191,11 +205,15 @@ function renderConversationRow(
         state.sidecar.mail?.inbox_unread ||
         0
       : state.mailCounts.inbox_unread || state.sidecar.mail?.inbox_unread || 0;
+  const newsCount =
+    state.newsStories.length || state.sidecar.news?.clusters || 0;
   const displayTitle = isMail
     ? state.mailAccounts.length > 0
       ? `all mail (${totalUnread})`
       : `mail (${totalUnread})`
-    : c.title;
+    : isNews
+      ? `news (${newsCount})`
+      : c.title;
   const hasWatchBadge =
     state.watchBadgeConvIds.includes(c.id) ||
     Boolean(state.sidecar.watch_badges?.includes(c.id));
@@ -209,10 +227,15 @@ function renderConversationRow(
   const isNormalConvActive =
     !isMail && isActive && !state.showKnowledgeView && !state.showBrainView;
 
+  const convRunning = isConvStreaming(c.id);
+  const runningBadgeHtml = convRunning
+    ? `<span class="rail-row-meta rail-running-badge" title="generation in progress">[...]</span>`
+    : "";
+
   const mailAccountSubrowsHtml =
     isMail && state.mailAccounts.length > 0
-      ? state.mailAccounts
-          .map((acct) => {
+      ? `<div class="rail-mail-tree">${state.mailAccounts
+          .map((acct, idx) => {
             const acctActive =
               isActive &&
               !state.showKnowledgeView &&
@@ -220,19 +243,22 @@ function renderConversationRow(
               state.mailActiveAccountId === acct.id;
             const acctUnread = acct.inbox_unread ?? 0;
             const acctName = acct.email || acct.label;
+            const branchGlyph =
+              idx === state.mailAccounts.length - 1 ? "└─" : "├─";
             return `
               <div
-                class="rail-row ${acctActive ? "active" : ""}"
+                class="rail-row rail-row-sub ${acctActive ? "active" : ""}"
                 data-mail-rail-conv="${escapeHtml(c.id)}"
                 data-mail-rail-acct="${escapeHtml(acct.id)}"
                 title="View mail for ${escapeHtml(acctName)} (${acct.message_count ?? 0} messages)"
               >
-                <span class="rail-row-title">  * ${escapeHtml(acctName)} (${acctUnread})</span>
+                <span class="rail-sub-branch muted" aria-hidden="true">${branchGlyph}</span>
+                <span class="rail-row-title">${escapeHtml(acctName)} (${acctUnread})</span>
                 <span class="rail-row-meta muted">${acct.message_count ?? 0} msg</span>
               </div>
             `;
           })
-          .join("")
+          .join("")}</div>`
       : "";
 
   return `
@@ -243,11 +269,12 @@ function renderConversationRow(
             ? `<input id="rail-rename-input-${escapeHtml(c.id)}" class="rail-rename-input" type="text" value="${escapeHtml(c.title)}" />`
             : `<span class="rail-row-title">${prefix}${escapeHtml(displayTitle)}</span>`
         }
+        ${runningBadgeHtml}
         ${hasWatchBadge ? `<span class="rail-row-meta" title="watched value changed">[watch !]</span>` : ""}
         <span class="rail-row-meta rail-row-src-count">${srcCount} src</span>
         <span class="rail-row-time">${escapeHtml(relTime)}</span>
         ${
-          isMail
+          isPinnedSystem
             ? `<span class="rail-row-meta muted">pin</span>`
             : `<button class="rail-menu-btn" data-menu-conv-id="${escapeHtml(c.id)}">...</button>`
         }
@@ -287,6 +314,18 @@ function bindRailEvents(container: HTMLElement, actions: RailActions): void {
       }
     });
   }
+
+  container
+    .querySelector("#rail-brand-home-btn")
+    ?.addEventListener("click", () => {
+      (actions.onOpenHome ?? actions.onNewConversation)();
+    });
+
+  container
+    .querySelector("#rail-home-btn")
+    ?.addEventListener("click", () => {
+      (actions.onOpenHome ?? actions.onNewConversation)();
+    });
 
   container
     .querySelector("#rail-open-command-bar-btn")

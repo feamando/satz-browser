@@ -1,6 +1,7 @@
-export type ConversationOrigin = "chat" | "direct" | "mail";
+export type ConversationOrigin = "chat" | "direct" | "mail" | "news";
 export type ConversationStatus = "active" | "archived";
 export type TabKind = "site" | "mail" | "compose";
+export type NewsLane = "stories" | "foryou" | "perspectives" | "topics" | "sources";
 
 export interface Conversation {
   id: string;
@@ -120,6 +121,181 @@ export interface ChatMessage {
   proposals?: BrainProposalItem[];
   findings?: FindingItem[];
   email_cards?: ChatEmailCard[];
+  answer_meta?: AnswerMeta;
+}
+
+export interface AnswerMetaSourceTrust {
+  system: number;
+  personal: number | null;
+  effective: number;
+  category: string;
+  family: string;
+  why: string;
+  conflict: boolean;
+}
+
+export interface AnswerMetaSource {
+  idx: number;
+  role: string;
+  domain: string;
+  url: string;
+  title: string;
+  snippet?: string;
+  image_url?: string;
+  trust: AnswerMetaSourceTrust;
+}
+
+export interface AnswerMeta {
+  pipeline: string;
+  question: string;
+  scrubbed_query?: string;
+  value?: string | null;
+  confidence10: number | null;
+  band: string;
+  band_label: string;
+  qtype: string;
+  items: Array<[string, number]>;
+  candidates?: Array<{ value: string; r: number; top_trust?: number; sources?: string[] }>;
+  conflicts?: Array<{ value: string; domain: string; url: string; r?: number }>;
+  divergence?: { system_value: string; system_confidence: number; system_band: string } | null;
+  steps: string[];
+  sources: AnswerMetaSource[];
+  passages?: Array<{ domain: string; url: string; title: string; trust: number; text: string }>;
+  models_used?: { planner: string; reader: string; analyzer: string };
+  writer_fallback?: boolean;
+  writer_problems?: string[];
+  privacy_disclosure?: string;
+  ms?: number;
+}
+
+export interface NewsArticleItem {
+  article_id: string;
+  url: string;
+  domain: string;
+  family: string;
+  title: string;
+  snippet: string;
+  body_text: string;
+  translated_text?: string | null;
+  language: string;
+  image_url: string;
+  author: string;
+  published_at: number;
+  trust_system: number;
+  trust_effective: number;
+  category: string;
+  conflict: boolean;
+  wire_origin?: string | null;
+}
+
+export interface NewsFamilyBadge {
+  family: string;
+  domain: string;
+  url: string;
+  trust_system: number;
+  trust_effective: number;
+  category: string;
+  conflict: boolean;
+  language: string;
+}
+
+export interface NewsStoryCluster {
+  cluster_id: string;
+  headline: string;
+  summary_md: string;
+  confidence10: number;
+  band: string;
+  band_label: string;
+  independent_families: number;
+  collapsed_mirrors: number;
+  topic_tags: string[];
+  brain_match_reasons: string[];
+  outside_usual: boolean;
+  story_rank: number;
+  updated_at: number;
+  is_read: boolean;
+  has_conflict: boolean;
+  lead_image: string;
+  families: NewsFamilyBadge[];
+  articles: NewsArticleItem[];
+}
+
+export interface NewsPerspectiveFraming {
+  label: string;
+  sources: Array<{
+    url: string;
+    domain: string;
+    family: string;
+    title: string;
+    snippet: string;
+    category: string;
+    why: string;
+    trust_system: number;
+    trust_effective: number;
+    conflict: boolean;
+  }>;
+  claims: string[];
+}
+
+export interface NewsPerspectiveMatrix {
+  ok: boolean;
+  cluster_id: string;
+  headline: string;
+  agreed: string[];
+  framings: NewsPerspectiveFraming[];
+  blind_spots: string[];
+  syndicated_collapsed: number;
+  system_counterfactual: string;
+  analyzer_model: string;
+  privacy_disclosure: string;
+  cached?: boolean;
+  error?: string;
+}
+
+export interface NewsSourceFeedItem {
+  feed_id: string;
+  feed_url: string;
+  title: string;
+  language: string;
+  enabled: boolean;
+  last_fetched_at: number;
+  error_count: number;
+}
+
+export interface NewsSourceEntry {
+  domain: string;
+  category: string;
+  rubric: string;
+  family: string;
+  system: number;
+  personal: number | null;
+  effective: number;
+  band: string;
+  band_label: string;
+  why: string;
+  scored: boolean;
+  conflict: boolean;
+  visits: number;
+  feeds: NewsSourceFeedItem[];
+}
+
+export interface NewsCategoryEntry {
+  id: string;
+  score: number;
+  rubric: string;
+  what: string;
+}
+
+export interface NewsTopicItem {
+  topic_id: string;
+  name: string;
+  keywords: string[];
+  suppressed: boolean;
+  watch_id?: string | null;
+  last_checked_at: number;
+  changed_at: number;
+  badge_unread: boolean;
+  last_value: string;
 }
 
 export interface BrainProposalItem {
@@ -223,6 +399,10 @@ export interface ModelManagementConfig {
     chat: string;
     web_answer: string;
     reader: string;
+    news_planner?: string;
+    news_capture?: string;
+    news_reader?: string;
+    news_analyzer?: string;
     mail_classifier: string;
     brain_encoder: string;
   };
@@ -240,8 +420,10 @@ export interface SidecarHealth {
   pause_learning: boolean;
   errors?: SidecarErrorEntry[];
   mail?: MailStatusSummary | null;
+  news?: { articles: number; clusters: number; feeds_enabled: number; topics: number } | null;
   watch_badges?: string[];
   model_config?: ModelManagementConfig;
+  digest_revision?: string;
 }
 
 export interface MailPreset {
@@ -343,6 +525,13 @@ export interface DigestEntry {
   domain: string;
   summary: string;
   kind: string;
+  entity?: string;
+  reason?: string;
+  image_url?: string;
+  images?: string[];
+  ts?: number;
+  watch_id?: string;
+  conversation_id?: string;
 }
 
 export interface BrainEntityItem {
@@ -488,10 +677,12 @@ export type CommandRouteKind =
   | "url_and_question"
   | "ask_model"
   | "search_mail"
+  | "search_news"
   | "search_brain"
   | "run_command";
 
 export type CommandBarActionId =
+  | "home"
   | "new_conversation"
   | "bookmark"
   | "compare"
@@ -546,4 +737,15 @@ export interface WatchItem {
   last_checked_at: number;
   changed_at: number;
   badge_unread: boolean;
+}
+
+export interface ConvStreamState {
+  convId: string;
+  model: LocalModelId;
+  text: string;
+  status: string;
+  phase: string;
+  startedAt: number;
+  steps: string[];
+  lastUserPrompt: string;
 }

@@ -1,22 +1,189 @@
 import {
   escapeHtml,
+  formatRelativeTime,
   getAvailableModelsForPicker,
   MOD_LABEL,
   rankCommandBarRoutes,
   state,
 } from "./state";
-import type { CommandBarRoute, LocalModelId } from "./types";
+import type { CommandBarRoute, DigestEntry, LocalModelId } from "./types";
 
 export interface StartScreenActions {
   onSubmitStartInput: (raw: string) => void;
   onExecuteCommandRoute?: (route: CommandBarRoute, raw: string) => void;
   onSelectConversation: (id: string) => void;
-  onOpenDigestUrl: (url: string, title: string) => void;
+  onOpenDigestUrl: (url: string, title: string, convId?: string) => void;
   onChangeModel: (model: LocalModelId) => void;
   onToggleWeb: () => void;
   onCloseCommandBar?: () => void;
+  onGoHome?: () => void;
+  onRefreshDigest?: () => void;
   onUnlockProfile?: (profileId: string, pin: string) => void;
   onCreateProfile?: (name: string, pin: string) => void;
+}
+
+function digestKindTag(kind?: string): string {
+  switch (kind) {
+    case "watch_triggered":
+      return "[watch]";
+    case "bookmark_changed":
+      return "[changed]";
+    case "mail_reply":
+      return "[reply]";
+    case "mail_recent":
+      return "[mail]";
+    case "mail_ping":
+      return "[ping]";
+    case "mail_order":
+      return "[order]";
+    case "mail_promo":
+      return "[promo]";
+    case "news_story":
+      return "[news]";
+    case "brain_entity":
+      return "[brain]";
+    case "digest_adjacent":
+      return "[related]";
+    case "source_capture":
+      return "[captured]";
+    default:
+      return "[web]";
+  }
+}
+
+function formatDigestTime(ts?: number): string {
+  if (!ts || !Number.isFinite(ts) || ts <= 0) return "";
+  return formatRelativeTime(String(Math.floor(ts)));
+}
+
+function renderDigestItemsHtml(
+  items: DigestEntry[],
+  mode: "start" | "overlay"
+): string {
+  if (items.length === 0) {
+    return `<div class="muted">unlock profile, receive mail, browse pages, or refresh news to populate your feed</div>`;
+  }
+  const visible = mode === "overlay" ? items.slice(0, 6) : items;
+  return visible
+    .map((item) => {
+      const tag = digestKindTag(item.kind);
+      const relTime = formatDigestTime(item.ts);
+      const leadImg = (item.image_url || "").trim();
+      const extraImgs =
+        mode === "start" && Array.isArray(item.images)
+          ? item.images.filter((u) => u && u !== leadImg).slice(0, 2)
+          : [];
+      const snippetText = (item.summary || "").trim();
+      const reasonText = (item.reason || "").trim();
+      return `
+        <div
+          class="start-digest-card ${mode === "overlay" ? "compact" : ""}"
+          data-digest-url="${escapeHtml(item.url)}"
+          data-digest-title="${escapeHtml(item.title)}"
+          ${item.conversation_id ? `data-digest-conv-id="${escapeHtml(item.conversation_id)}"` : ""}
+        >
+          <div class="start-digest-card-top">
+            <span class="start-digest-title-wrap">
+              <span class="start-digest-kind">${escapeHtml(tag)}</span>
+              <strong>${escapeHtml(item.title)}</strong>
+            </span>
+            <span class="muted start-digest-right-meta">
+              ${escapeHtml(item.domain)}${relTime ? ` · ${escapeHtml(relTime)}` : ""}
+            </span>
+          </div>
+          ${
+            leadImg || snippetText || reasonText
+              ? `
+                <div class="start-digest-media">
+                  ${
+                    leadImg
+                      ? `<img class="start-digest-thumb ${mode === "overlay" ? "compact" : ""}" src="${escapeHtml(leadImg)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
+                      : ""
+                  }
+                  <div class="start-digest-body">
+                    ${
+                      snippetText
+                        ? `<div class="start-digest-snippet">${escapeHtml(snippetText)}</div>`
+                        : ""
+                    }
+                    ${
+                      reasonText
+                        ? `<div class="start-digest-meta muted">${escapeHtml(reasonText)}</div>`
+                        : ""
+                    }
+                    ${
+                      extraImgs.length > 0
+                        ? `<div class="start-digest-extra-thumbs">${extraImgs
+                            .map(
+                              (iu) =>
+                                `<img class="start-digest-extra-thumb" src="${escapeHtml(iu)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
+                            )
+                            .join("")}</div>`
+                        : ""
+                    }
+                  </div>
+                </div>
+              `
+              : ""
+          }
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function bindDigestItemEvents(
+  root: HTMLElement,
+  actions: StartScreenActions,
+  closeCommandBarOnClick = false
+): void {
+  root.querySelectorAll("[data-digest-url]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const node = el as HTMLElement;
+      const url = node.getAttribute("data-digest-url");
+      const title = node.getAttribute("data-digest-title") ?? url ?? "";
+      const convId = node.getAttribute("data-digest-conv-id") ?? undefined;
+      if (closeCommandBarOnClick) {
+        actions.onCloseCommandBar?.();
+      }
+      if (url) actions.onOpenDigestUrl(url, title, convId);
+    });
+  });
+
+  root
+    .querySelectorAll("img.start-digest-thumb, img.start-digest-extra-thumb")
+    .forEach((imgEl) => {
+      imgEl.addEventListener("error", () => {
+        imgEl.remove();
+      });
+    });
+}
+
+export function updateStartDigestInPlace(actions: StartScreenActions): boolean {
+  const slot = document.getElementById("start-foryou-slot");
+  if (!slot) return false;
+  slot.innerHTML = renderDigestItemsHtml(state.digestItems, "start");
+  const meta = document.getElementById("start-foryou-meta");
+  if (meta) {
+    const updatedLbl = state.digestUpdatedAt
+      ? `updated ${formatRelativeTime(String(Math.floor(state.digestUpdatedAt / 1000)))}`
+      : "";
+    meta.textContent = `${state.digestItems.length} item${state.digestItems.length === 1 ? "" : "s"}${state.digestRefreshing ? " · updating..." : updatedLbl ? ` · ${updatedLbl}` : ""}`;
+  }
+  bindDigestItemEvents(slot, actions, false);
+  return true;
+}
+
+export function updateOverlayDigestInPlace(actions: StartScreenActions): boolean {
+  const slot = document.getElementById("overlay-foryou-slot");
+  if (!slot) return false;
+  slot.innerHTML = renderDigestItemsHtml(state.digestItems, "overlay");
+  const countEl = document.getElementById("overlay-foryou-count");
+  if (countEl) {
+    countEl.textContent = `(${state.digestItems.length}${state.digestRefreshing ? " · updating..." : ""})`;
+  }
+  bindDigestItemEvents(slot, actions, true);
+  return true;
 }
 
 function renderRoutesListHtml(
@@ -156,7 +323,7 @@ export function renderStartScreen(
               spellcheck="false"
               autocorrect="off"
               autocapitalize="off"
-              placeholder="url, question, mail: term, brain: term, or command (new, bookmark, compare, lock)_"
+              placeholder="url, question, mail: term, brain: term, or command (home, new, bookmark, compare, lock)_"
               value="${escapeHtml(state.commandBarInput)}"
             />
             <span class="caret-blink">▌</span>
@@ -187,35 +354,36 @@ export function renderStartScreen(
         </div>
 
         <div class="start-columns">
-          <div class="start-col">
-            <div class="start-col-header">for you</div>
-            ${
-              state.digestItems.length === 0
-                ? `<div class="muted">browse or bookmark pages to build your digest</div>`
-                : state.digestItems
-                    .map(
-                      (item) => `
-                  <div class="start-list-item" data-digest-url="${escapeHtml(item.url)}" data-digest-title="${escapeHtml(item.title)}">
-                    <span class="truncate">${escapeHtml(item.title)}</span>
-                    <span class="muted">${escapeHtml(item.domain)}</span>
-                  </div>
-                `
-                    )
-                    .join("")
-            }
+          <div class="start-col start-col-foryou">
+            <div class="start-col-header">
+              <span>for you</span>
+              <span class="composer-controls">
+                <span class="muted" id="start-foryou-meta">${state.digestItems.length} item${state.digestItems.length === 1 ? "" : "s"}${state.digestRefreshing ? " · updating..." : state.digestUpdatedAt ? ` · updated ${escapeHtml(formatRelativeTime(String(Math.floor(state.digestUpdatedAt / 1000))))}` : ""}</span>
+                <button id="start-refresh-digest-btn" type="button">[refresh]</button>
+              </span>
+            </div>
+            <div id="start-foryou-slot" class="start-foryou-list">
+              ${renderDigestItemsHtml(state.digestItems, "start")}
+            </div>
           </div>
 
-          <div class="start-col">
-            <div class="start-col-header">resume</div>
+          <div class="start-col start-col-resume">
+            <div class="start-col-header">
+              <span>resume</span>
+              <span class="muted">${resumeConvs.length} conversation${resumeConvs.length === 1 ? "" : "s"}</span>
+            </div>
             ${
               resumeConvs.length === 0
                 ? `<div class="muted">no recent conversations</div>`
                 : resumeConvs
                     .map(
                       (c) => `
-                  <div class="start-list-item" data-resume-id="${escapeHtml(c.id)}">
-                    <span class="truncate">${escapeHtml(c.title)}</span>
-                    <span class="muted">${c.source_count ?? 0} src</span>
+                  <div class="start-list-item start-resume-item" data-resume-id="${escapeHtml(c.id)}">
+                    <div class="start-resume-main truncate">
+                      <span class="muted">[${escapeHtml(c.origin)}]</span>
+                      <span>${escapeHtml(c.title)}</span>
+                    </div>
+                    <span class="muted start-digest-right-meta">${c.source_count ?? 0} src · ${escapeHtml(formatRelativeTime(c.last_active_at))}</span>
                   </div>
                 `
                     )
@@ -303,6 +471,12 @@ export function renderStartScreen(
       actions.onToggleWeb();
     });
 
+  container
+    .querySelector("#start-refresh-digest-btn")
+    ?.addEventListener("click", () => {
+      actions.onRefreshDigest?.();
+    });
+
   container.querySelectorAll("[data-resume-id]").forEach((el) => {
     el.addEventListener("click", () => {
       const id = (el as HTMLElement).getAttribute("data-resume-id");
@@ -310,14 +484,7 @@ export function renderStartScreen(
     });
   });
 
-  container.querySelectorAll("[data-digest-url]").forEach((el) => {
-    el.addEventListener("click", () => {
-      const url = (el as HTMLElement).getAttribute("data-digest-url");
-      const title =
-        (el as HTMLElement).getAttribute("data-digest-title") ?? url ?? "";
-      if (url) actions.onOpenDigestUrl(url, title);
-    });
-  });
+  bindDigestItemEvents(container, actions, false);
 }
 
 export function renderCommandBarOverlay(actions: StartScreenActions): void {
@@ -333,7 +500,7 @@ export function renderCommandBarOverlay(actions: StartScreenActions): void {
     overlay = document.createElement("div");
     overlay.id = "command-bar-overlay";
     overlay.style.cssText =
-      "position:fixed; inset:0; background:rgba(0,0,0,0.82); z-index:9000; display:flex; align-items:flex-start; justify-content:center; padding-top:72px;";
+      "position:fixed; inset:0; background:rgba(0,0,0,0.82); z-index:9000; display:flex; align-items:flex-start; justify-content:center; padding-top:48px;";
     document.body.appendChild(overlay);
   }
 
@@ -344,10 +511,14 @@ export function renderCommandBarOverlay(actions: StartScreenActions): void {
   );
 
   overlay.innerHTML = `
-    <div id="command-bar-modal" class="start-input-box" style="width:680px; max-width:94vw; background:#000000; border:1px solid #e8e8e8; padding:12px;">
+    <div id="command-bar-modal" class="start-input-box" style="width:720px; max-width:94vw; max-height:84vh; overflow-y:auto; background:#000000; border:1px solid #e8e8e8; padding:12px;">
       <div class="rail-row" style="justify-content:space-between; margin-bottom:6px;">
         <span>command bar <span class="muted">[${MOD_LABEL}+k]</span></span>
-        <button id="command-bar-close-btn">[close · esc]</button>
+        <span class="composer-controls">
+          <button id="command-bar-home-btn" type="button">[~ home / start]</button>
+          <button id="command-bar-refresh-btn" type="button">[refresh]</button>
+          <button id="command-bar-close-btn" type="button">[close · esc]</button>
+        </span>
       </div>
       <div class="start-input-row">
         <span class="muted">&gt;</span>
@@ -358,7 +529,7 @@ export function renderCommandBarOverlay(actions: StartScreenActions): void {
           spellcheck="false"
           autocorrect="off"
           autocapitalize="off"
-          placeholder="url, question, mail: term, brain: term, or command (new, bookmark, compare, lock)_"
+          placeholder="url, question, mail: term, brain: term, or command (home, new, bookmark, compare, lock)_"
           value="${escapeHtml(state.commandBarInput)}"
         />
       </div>
@@ -383,6 +554,15 @@ export function renderCommandBarOverlay(actions: StartScreenActions): void {
       <div id="overlay-routes-slot">
         ${renderRoutesListHtml(routes, clampedIdx, "overlay")}
       </div>
+      <div class="cmd-foryou-section">
+        <div class="start-col-header">
+          <span>for you <span class="muted" id="overlay-foryou-count">(${state.digestItems.length}${state.digestRefreshing ? " · updating..." : ""})</span></span>
+          <button id="overlay-open-home-foryou-btn" type="button">[view all on start screen]</button>
+        </div>
+        <div id="overlay-foryou-slot" class="start-foryou-list">
+          ${renderDigestItemsHtml(state.digestItems, "overlay")}
+        </div>
+      </div>
     </div>
   `;
 
@@ -391,6 +571,26 @@ export function renderCommandBarOverlay(actions: StartScreenActions): void {
       actions.onCloseCommandBar?.();
     }
   });
+
+  overlay
+    .querySelector("#command-bar-home-btn")
+    ?.addEventListener("click", () => {
+      actions.onCloseCommandBar?.();
+      actions.onGoHome?.();
+    });
+
+  overlay
+    .querySelector("#overlay-open-home-foryou-btn")
+    ?.addEventListener("click", () => {
+      actions.onCloseCommandBar?.();
+      actions.onGoHome?.();
+    });
+
+  overlay
+    .querySelector("#command-bar-refresh-btn")
+    ?.addEventListener("click", () => {
+      actions.onRefreshDigest?.();
+    });
 
   overlay
     .querySelector("#command-bar-close-btn")
@@ -412,6 +612,8 @@ export function renderCommandBarOverlay(actions: StartScreenActions): void {
       actions.onToggleWeb();
       renderCommandBarOverlay(actions);
     });
+
+  bindDigestItemEvents(overlay, actions, true);
 
   bindUnifiedCommandBox(
     overlay,

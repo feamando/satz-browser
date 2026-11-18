@@ -96,8 +96,9 @@ class TestM21CommandBar(unittest.TestCase):
             self.assertEqual(r_brain[0]["privacy"], "local only")
             self.assertFalse(r_brain[0]["leaves_machine"])
 
-        # 6. Command: "new conversation", "bookmark", "compare", "lock" -> default route is run_command
+        # 6. Command: "home", "new conversation", "bookmark", "compare", "lock" -> default route is run_command
         expected_cmds = {
+            "home": "home",
             "new conversation": "new_conversation",
             "bookmark": "bookmark",
             "compare": "compare",

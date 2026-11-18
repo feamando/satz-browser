@@ -385,6 +385,78 @@ class TestM18BrainIntegrity(unittest.TestCase):
             except Exception:
                 pass
 
+    def test_rich_digest_snippets_pictures_mail_and_revision(self) -> None:
+        tmp = Path(tempfile.mkdtemp(prefix="satz_digest_rich_"))
+        rt = SatzSidecarRuntime(sgs_root=SGS_ROOT, store_path=tmp / "planck_store.sqlite")
+        try:
+            rt.mail.pipeline.stop_worker()
+            rt.passwords.create_profile("nikita", "123456")
+
+            rev_initial = rt.get_health()["digest_revision"]
+
+            # 1. Ingest a webpage with reverse-ordered og:image meta tag -> appears with snippet & picture
+            rt.ingest_page(
+                conversation_id="conv-rich",
+                source_id="src-rich-1",
+                url="https://example.org/rail-report",
+                title="European High-Speed Rail Report 2026",
+                html=(
+                    "<html><head>"
+                    '<meta content="https://cdn.example.org/rail-map.jpg" property="og:image">'
+                    "</head><body><article>"
+                    "<p>Passenger traffic across cross-border night trains grew by 24 percent in 2026.</p>"
+                    "</article></body></html>"
+                ),
+            )
+            rt.ingest_queue.join()
+            rev_after_page = rt.get_health()["digest_revision"]
+            self.assertNotEqual(rev_after_page, rev_initial)
+
+            # 2. Deliver an unread inbox email without reply-needed phrasing -> appears in For you with snippet & bumps revision
+            with rt.mail.db_lock:
+                mconn = rt.mail._ensure_connection()
+                mconn.execute(
+                    """
+                    INSERT OR REPLACE INTO accounts (
+                        id, label, email, protocol, in_host, in_port, in_security,
+                        smtp_host, smtp_port, smtp_security, vault_prefix, sync_days
+                    ) VALUES ('acc-test', 'Test Mail', 'nikita@example.org', 'imap', '127.0.0.1', 1993, 'none', '127.0.0.1', 1587, 'none', 'MAIL_TEST', 30)
+                    """
+                )
+                mconn.commit()
+            raw_mail = (
+                b"From: Clara Lind <clara@example.org>\r\n"
+                b"To: nikita@example.org\r\n"
+                b"Subject: Updated Q4 Workshop Schedule\r\n"
+                b"Message-ID: <msg-rich-1@example.org>\r\n"
+                b"Date: Wed, 18 Nov 2026 14:00:00 +0100\r\n"
+                b"\r\n"
+                b"Session rooms changed to Building B Room 204 starting Thursday morning.\r\n"
+            )
+            mid = rt.mail._store_parsed_raw_email("acc-test", "INBOX", "inbox", 101, "", raw_mail, 0, 0, 0)
+            assert mid is not None
+            rt.mail.pipeline.process_single_message(mid)
+
+            rev_after_mail = rt.get_health()["digest_revision"]
+            self.assertNotEqual(rev_after_mail, rev_after_page)
+
+            # 3. Verify /digest includes both the new mail snippet and the page picture + snippet
+            digest_items = rt.get_digest()["items"]
+            mail_items = [it for it in digest_items if it.get("domain") == "mail"]
+            self.assertGreaterEqual(len(mail_items), 1)
+            self.assertIn("Building B", mail_items[0]["summary"])
+
+            page_items = [it for it in digest_items if it.get("url") == "https://example.org/rail-report"]
+            self.assertEqual(len(page_items), 1)
+            self.assertEqual(page_items[0]["image_url"], "https://cdn.example.org/rail-map.jpg")
+            self.assertIn("24 percent", page_items[0]["summary"])
+        finally:
+            try:
+                rt.close()
+            except Exception:
+                pass
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

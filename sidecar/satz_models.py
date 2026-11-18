@@ -388,6 +388,7 @@ class SatzSidecarRuntime:
 
         from satz_brain import SatzBrain
         from satz_mail import SatzMailManager
+        from satz_news import SatzNewsEngine
         from satz_passwords import ProfilePasswordManager
 
         # Import SGS modules after adding sgs_root to sys.path
@@ -404,7 +405,9 @@ class SatzSidecarRuntime:
 
         self.store_lock = threading.RLock()
         self.model_lock = threading.RLock()
+        self.gemma_infer_lock = threading.Lock()
         self.tasks_lock = threading.RLock()
+        self.web_lock = threading.RLock()
         self.tasks: dict[str, dict[str, Any]] = {}
 
         self.passwords = ProfilePasswordManager(self.legacy_store_path.parent)
@@ -421,6 +424,7 @@ class SatzSidecarRuntime:
         )
         self.passwords.on_profile_change = self._refresh_active_profile_brain
         self.mail = SatzMailManager(self)
+        self.news = SatzNewsEngine(self)
         self._init_satz_tables()
 
         sgs_cache_dir = self.sgs_root / "data" / "planck3_cache"
@@ -430,11 +434,11 @@ class SatzSidecarRuntime:
             self.web.backend = "brave"
             self.web.secondary = ["ddgs"]
 
-        # Model states and lazy instances
+        # Model states and lazy instances (defer `import torch` / CUDA probe until after HTTP port binds)
         self.gemma_tok = None
         self.gemma_model = None
         self.gemma_loading = False
-        self.gemma_device = self._detect_gemma_device()
+        self.gemma_device = None
 
         self.answerer = None
         self.answer_sessions: collections.OrderedDict[str, Any] = collections.OrderedDict()
@@ -753,14 +757,19 @@ class SatzSidecarRuntime:
                         tuple(br),
                     )
 
+            from satz_news import SatzNewsEngine
+
             for st in target_stores.values():
                 self._repair_bookmark_entities_in_store(st.db)
+                SatzNewsEngine.ensure_news_tables_on_conn(st.db)
                 st.db.commit()
         finally:
             try:
                 src_conn.close()
             except Exception:
                 pass
+            from satz_news import SatzNewsEngine
+
             for st in target_stores.values():
                 try:
                     st.close()
@@ -807,6 +816,8 @@ class SatzSidecarRuntime:
                 self.store_path = target_store_path
                 self._current_store_key = pid
                 self._init_satz_tables()
+                if hasattr(self, "news") and self.news is not None:
+                    self.news.seed_starter_feeds(self.store.db)
                 if carried_meta:
                     for mk, mv in carried_meta:
                         existing = self.store.db.execute(
@@ -850,6 +861,8 @@ class SatzSidecarRuntime:
             self._init_satz_tables_on_conn(self.store.db)
 
     def _init_satz_tables_on_conn(self, db_conn: sqlite3.Connection):
+        from satz_news import SatzNewsEngine
+
         if True:
             db_conn.executescript(
                 """
@@ -945,6 +958,9 @@ class SatzSidecarRuntime:
             }
             if "findings_json" not in existing_src_cols:
                 db_conn.execute("ALTER TABLE satz_sources ADD COLUMN findings_json TEXT")
+            SatzNewsEngine.ensure_news_tables_on_conn(db_conn)
+            if hasattr(self, "news") and self.news is not None:
+                self.news.seed_starter_feeds(db_conn)
             # Purge any historical source rows where unclosed <style> blocks polluted trafilatura fallback with raw CSS
             db_conn.execute(
                 "DELETE FROM satz_sources WHERE text LIKE '%.J-J5-Ji{%' OR text LIKE '%{position:relative;display:%'"
@@ -1165,6 +1181,8 @@ class SatzSidecarRuntime:
                 return {"id": model_id, "state": "not_loaded", "device": "cpu", "detail": f"{ckpt.parent.name}/reader.pt"}
             return {"id": model_id, "state": "missing", "device": "cpu", "detail": f"missing {model_id} checkpoint"}
 
+        mail_status = self.mail.get_status() if hasattr(self, "mail") and self.mail else None
+        news_status = self.news.get_status() if hasattr(self, "news") and self.news else None
         return {
             "online": True,
             "version": SATZ_SIDECAR_VERSION,
@@ -1178,10 +1196,57 @@ class SatzSidecarRuntime:
             "ingest_queue_len": self.ingest_queue.qsize(),
             "pause_learning": self.pause_learning,
             "errors": self.get_errors(),
-            "mail": self.mail.get_status() if hasattr(self, "mail") and self.mail else None,
+            "mail": mail_status,
+            "news": news_status,
             "watch_badges": self.get_unread_watch_conversations(),
             "model_config": self.get_model_management_config(),
+            "digest_revision": self._compute_digest_revision(mail_status, news_status),
         }
+
+    def _compute_digest_revision(
+        self,
+        mail_status: dict[str, Any] | None = None,
+        news_status: dict[str, Any] | None = None,
+    ) -> str:
+        unlocked = bool(getattr(self.passwords, "unlocked", False))
+        pid = str(getattr(self.passwords, "active_profile_id", "") or "")
+        with self.store_lock:
+            db = self.store.db
+            p_row = db.execute("SELECT COUNT(*), COALESCE(MAX(ts), 0) FROM passages").fetchone()
+            s_row = db.execute("SELECT COUNT(*), COALESCE(MAX(updated_at), 0) FROM satz_sources").fetchone()
+            bm_max = db.execute("SELECT COALESCE(MAX(changed_at), 0) FROM satz_bookmarks").fetchone()[0]
+            w_max = db.execute("SELECT COALESCE(MAX(changed_at), 0) FROM satz_watches").fetchone()[0]
+            cl_row = db.execute(
+                "SELECT COUNT(*), COALESCE(MAX(updated_at), 0) FROM satz_news_clusters WHERE is_hidden = 0"
+            ).fetchone()
+        brain_sig = "0"
+        if unlocked and not getattr(self.brain, "locked", True):
+            try:
+                reg_path = self.brain.registry_path
+                if reg_path.exists():
+                    st = reg_path.stat()
+                    brain_sig = f"{int(st.st_mtime_ns)}:{st.st_size}"
+            except Exception:
+                pass
+        m = mail_status or {}
+        m_sig = (
+            f"{int(bool(m.get('unlocked')))}:"
+            f"{int(m.get('messages_count') or 0)}:"
+            f"{round(float(m.get('latest_message_ts') or 0.0), 3)}:"
+            f"{int(m.get('labelled_count') or 0)}:"
+            f"{int(m.get('processing_done') or 0)}:"
+            f"{int(m.get('inbox_unread') or 0)}"
+        )
+        n = news_status or {}
+        return (
+            f"u{int(unlocked)}:{pid}:"
+            f"p{int(p_row[0])}/{round(float(p_row[1]), 3)}:"
+            f"s{int(s_row[0])}/{round(float(s_row[1]), 3)}:"
+            f"bm{round(float(bm_max or 0.0), 3)}:"
+            f"w{round(float(w_max or 0.0), 3)}:"
+            f"cl{int(cl_row[0])}/{round(float(cl_row[1]), 3)}/{int(n.get('articles') or 0)}:"
+            f"m{m_sig}:b{brain_sig}"
+        )
 
     # ── Cloud Model Discovery & Role Management (Gemini, Anthropic, OpenAI, Mistral) ──
     CLOUD_PROVIDERS_SPEC: list[dict[str, str]] = [
@@ -1479,6 +1544,10 @@ class SatzSidecarRuntime:
         role_chat = meta.get("model_role_chat") or "gemma-4-e4b"
         role_web = meta.get("model_role_web_answer") or "planck3 (web)"
         role_reader = meta.get("model_role_reader") or "hertz (reader)"
+        role_news_planner = meta.get("model_role_news_planner") or "gemma-4-e4b"
+        role_news_capture = meta.get("model_role_news_capture") or "gemma-4-e4b"
+        role_news_reader = meta.get("model_role_news_reader") or "hertz (reader)"
+        role_news_analyzer = meta.get("model_role_news_analyzer") or role_chat
 
         providers_out: list[dict[str, Any]] = []
         for spec in self.CLOUD_PROVIDERS_SPEC:
@@ -1513,6 +1582,10 @@ class SatzSidecarRuntime:
                 "chat": role_chat,
                 "web_answer": role_web,
                 "reader": role_reader,
+                "news_planner": role_news_planner,
+                "news_capture": role_news_capture,
+                "news_reader": role_news_reader,
+                "news_analyzer": role_news_analyzer,
                 "mail_classifier": "local heuristic + distilbert + gemma",
                 "brain_encoder": "planck13 (local)",
             },
@@ -1544,6 +1617,11 @@ class SatzSidecarRuntime:
                     "DELETE FROM satz_meta WHERE key IN (?, ?)",
                     (f"cloud_models_{provider_id}", f"cloud_api_key_{provider_id}"),
                 )
+                if not self._resolve_provider_api_key(provider_id)[0]:
+                    self.store.db.execute(
+                        "DELETE FROM satz_meta WHERE key LIKE 'model_role_%' AND lower(value) LIKE ?",
+                        (f"{provider_id}:%",),
+                    )
                 self.store.db.commit()
             return {
                 **self.get_model_management_config(),
@@ -1566,6 +1644,10 @@ class SatzSidecarRuntime:
                 ("model_role_chat", "role_chat"),
                 ("model_role_web_answer", "role_web_answer"),
                 ("model_role_reader", "role_reader"),
+                ("model_role_news_planner", "role_news_planner"),
+                ("model_role_news_capture", "role_news_capture"),
+                ("model_role_news_reader", "role_news_reader"),
+                ("model_role_news_analyzer", "role_news_analyzer"),
             ):
                 if param_name in data and data[param_name]:
                     self.store.db.execute(
@@ -1760,6 +1842,46 @@ class SatzSidecarRuntime:
             return str(((choices[0].get("message") or {}).get("content")) or "").strip()
 
         raise RuntimeError(f"Unsupported cloud provider: {provider_id}")
+
+    def _complete_role_prompt(
+        self,
+        model_id: str,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.15,
+        max_tokens: int = 800,
+    ) -> str:
+        """
+        Unified single-turn completion helper for structured News roles
+        (`news_planner`, `news_capture`, `news_reader`, `news_analyzer`) across
+        all configured cloud providers (`gemini`, `anthropic`, `openai`, `mistral`)
+        and local `gemma-4-e4b`.
+        """
+        msgs = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        if self._parse_cloud_model_id(model_id) is not None:
+            return self._generate_with_cloud_provider(model_id, msgs).replace("\u2014", "-")
+
+        tok, model = self.ensure_gemma()
+        import torch
+
+        inputs = tok.apply_chat_template(
+            msgs,
+            add_generation_prompt=True,
+            return_tensors="pt",
+            return_dict=True,
+        ).to(model.device)
+        with self.gemma_infer_lock, torch.no_grad():
+            out_ids = model.generate(
+                **inputs,
+                max_new_tokens=max_tokens,
+                do_sample=temperature > 0.05,
+                temperature=temperature if temperature > 0.05 else None,
+            )
+        gen_ids = out_ids[0][inputs["input_ids"].shape[1] :]
+        return tok.decode(gen_ids, skip_special_tokens=True).replace("\u2014", "-").strip()
 
     # ── Lazy Model Loaders ───────────────────────────────────────────────
     def ensure_gemma(self):
@@ -1961,7 +2083,8 @@ class SatzSidecarRuntime:
         ):
             effective_mode = "fetch"
             try:
-                page = self.web.fetch(url)
+                with self.web_lock:
+                    page = self.web.fetch(url)
                 if page.get("html"):
                     text = extract_main_text(page["html"], url)
                     extra_lines = extract_jsonld(page["html"])
@@ -2102,25 +2225,31 @@ class SatzSidecarRuntime:
                 }
             )
 
-        # 1. Check meta og:image / twitter:image
-        for meta_m in re.finditer(
-            r'<meta\b[^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\'][^>]*content=["\']([^"\']+)["\']',
-            html,
-            re.IGNORECASE,
-        ):
-            _add_finding(meta_m.group(1), page_title or page_url)
-            if len(findings) >= 8:
-                return findings
+        # 1. Check meta og:image / twitter:image (attribute order agnostic)
+        for meta_m in re.finditer(r"<meta\b([^>]+)>", html, re.IGNORECASE):
+            attrs = meta_m.group(1)
+            prop_m = re.search(
+                r'\b(?:property|name)=["\'](?:og:image|og:image:secure_url|twitter:image|twitter:image:src)["\']',
+                attrs,
+                re.IGNORECASE,
+            )
+            if not prop_m:
+                continue
+            cnt_m = re.search(r'\bcontent=["\']([^"\']+)["\']', attrs, re.IGNORECASE)
+            if cnt_m:
+                _add_finding(cnt_m.group(1), page_title or page_url)
+                if len(findings) >= 8:
+                    return findings
 
-        # 2. Check <img ...> tags with alt text
+        # 2. Check <img ...> tags with alt text (or general images as fallback)
         for img_m in re.finditer(r"<img\b([^>]+)>", html, re.IGNORECASE):
             attrs = img_m.group(1)
             src_m = re.search(r'\b(?:src|data-src)=["\']([^"\']+)["\']', attrs, re.IGNORECASE)
-            alt_m = re.search(r'\balt=["\']([^"\']+)["\']', attrs, re.IGNORECASE)
+            alt_m = re.search(r'\balt=["\']([^"\']*)["\']', attrs, re.IGNORECASE)
             if not src_m:
                 continue
             alt_txt = (alt_m.group(1).strip() if alt_m else "")
-            if len(alt_txt) < 4 and not findings:
+            if len(alt_txt) < 4 and findings:
                 continue
             _add_finding(src_m.group(1), alt_txt or page_title or page_url)
             if len(findings) >= 8:
@@ -3246,6 +3375,18 @@ class SatzSidecarRuntime:
                         }
                     )
 
+        from satz_web_harness import (
+            WebSearchSessionHarness,
+            is_explicit_web_search_request,
+            resolve_web_search_query,
+            stream_cloud_chat,
+        )
+
+        prior = [m for m in messages[:-1] if m.get("role") in ("user", "assistant")]
+        explicit_web_req = is_explicit_web_search_request(user_msg, prior)
+        cloud_parsed = self._parse_cloud_model_id(model_id)
+        resolved_search_q = resolve_web_search_query(user_msg, prior) if (explicit_web_req or web_enabled) else user_msg
+
         # Detect when the user is asking to find/search items on a site or for fresh web news
         is_site_discovery_query = bool(
             re.search(
@@ -3268,7 +3409,7 @@ class SatzSidecarRuntime:
                         has_live_search_tab = True
                         break
 
-        should_run_web = (web_enabled and not (is_personal_or_tab_query and len(combined_sources) > 0)) or (
+        should_run_web = explicit_web_req or (web_enabled and not (is_personal_or_tab_query and len(combined_sources) > 0)) or (
             is_site_discovery_query and not is_personal_or_tab_query and not has_live_search_tab
         )
 
@@ -3277,33 +3418,47 @@ class SatzSidecarRuntime:
             "phase": "context",
         }
 
-        if should_run_web and user_msg:
+        if should_run_web and user_msg and cloud_parsed is None:
             try:
-                search_q = user_msg
-                if is_site_discovery_query and combined_sources:
+                search_q = resolved_search_q or user_msg
+                if is_site_discovery_query and not explicit_web_req and combined_sources:
                     open_dom = str(combined_sources[0].get("domain") or domain_of(str(combined_sources[0].get("url") or "")) or "")
-                    if open_dom and open_dom.split(".")[0].lower() not in user_msg.lower():
-                        search_q = f"{open_dom} {user_msg}"
+                    if (
+                        open_dom
+                        and open_dom.split(".")[0].lower() not in search_q.lower()
+                        and not any(skip in open_dom.lower() for skip in ("duckduckgo", "google.", "mail", "satzmail", "bing."))
+                    ):
+                        search_q = f"{open_dom} {search_q}"
                 yield {
                     "status": f"searching web sources for '{search_q[:48]}'...",
                     "phase": "web_search",
                 }
-                ans = self.run_answer(search_q, session_id="chat-web")
-                existing_urls = {s.get("url") for s in combined_sources}
-                for ws in ans.get("sources", [])[:3]:
-                    wurl = ws.get("url")
-                    if wurl and wurl not in existing_urls:
-                        existing_urls.add(wurl)
-                        combined_sources.append(
-                            {
-                                "id": wurl,
-                                "url": wurl,
-                                "title": ws.get("title") or wurl,
-                                "domain": ws.get("domain") or "",
-                                "is_open_tab": False,
-                            }
-                        )
-                        cited_web_sources.append({"url": wurl, "title": ws.get("title") or wurl})
+                local_web_harness = WebSearchSessionHarness(
+                    self,
+                    combined_sources=combined_sources,
+                    hydrated_sources=[],
+                    used_source_ids=[],
+                    cited_web_sources=cited_web_sources,
+                    source_stats_list=[],
+                )
+                search_res = local_web_harness.execute_web_search(search_q, max_results=4)
+                if not search_res.get("results"):
+                    ans = self.run_answer(search_q, session_id="chat-web")
+                    existing_urls = {s.get("url") for s in combined_sources}
+                    for ws in ans.get("sources", [])[:3]:
+                        wurl = ws.get("url")
+                        if wurl and wurl not in existing_urls:
+                            existing_urls.add(wurl)
+                            combined_sources.append(
+                                {
+                                    "id": wurl,
+                                    "url": wurl,
+                                    "title": ws.get("title") or wurl,
+                                    "domain": ws.get("domain") or "",
+                                    "is_open_tab": False,
+                                }
+                            )
+                            cited_web_sources.append({"url": wurl, "title": ws.get("title") or wurl})
             except Exception as e:
                 self.record_error("web_presearch", e)
                 yield {
@@ -3311,9 +3466,10 @@ class SatzSidecarRuntime:
                     "phase": "warning",
                 }
 
-        context_str, used_source_ids, hydrated_sources = self.assemble_chat_context(user_msg, combined_sources)
+        context_rank_q = resolved_search_q if (explicit_web_req and resolved_search_q) else user_msg
+        context_str, used_source_ids, hydrated_sources = self.assemble_chat_context(context_rank_q, combined_sources)
         brain_context, brain_sources = self.brain.build_model_context_with_citations(
-            user_msg,
+            context_rank_q,
             hydrated_sources or combined_sources,
         )
 
@@ -3348,6 +3504,33 @@ class SatzSidecarRuntime:
                 }
             )
 
+        cloud_harness: WebSearchSessionHarness | None = None
+        if cloud_parsed is not None:
+            cloud_harness = WebSearchSessionHarness(
+                self,
+                combined_sources=combined_sources,
+                hydrated_sources=hydrated_sources,
+                used_source_ids=used_source_ids,
+                cited_web_sources=cited_web_sources,
+                source_stats_list=source_stats_list,
+            )
+            if explicit_web_req and (resolved_search_q or user_msg):
+                q_init = resolved_search_q or user_msg
+                yield {
+                    "status": f"searching web sources for '{q_init[:48]}'...",
+                    "phase": "web_search",
+                }
+                init_res = cloud_harness.execute_web_search(q_init, max_results=5)
+                if init_res.get("results"):
+                    extra_blocks = [
+                        f"[{idx_i}] (WEB SOURCE) {hs['domain']} ({hs['title']}) - {hs['url']}\n{hs['text']}"
+                        for idx_i, hs in enumerate(hydrated_sources, 1)
+                        if hs.get("id") not in hydrated_by_id
+                    ]
+                    if extra_blocks:
+                        joined_extra = "\n\n".join(extra_blocks)
+                        context_str = f"{context_str}\n\n{joined_extra}".strip() if context_str else joined_extra
+
         yield {
             "status": f"assembled {len(used_source_ids)} source(s) ({len(context_str):,} chars) + {len(brain_sources)} brain item(s)",
             "phase": "context_ready",
@@ -3355,7 +3538,6 @@ class SatzSidecarRuntime:
             "brain_sources": brain_sources,
         }
 
-        prior = [m for m in messages[:-1] if m.get("role") in ("user", "assistant")]
         chat_msgs = self.build_ordered_chat_messages(
             user_msg=user_msg,
             brain_context=brain_context,
@@ -3368,15 +3550,31 @@ class SatzSidecarRuntime:
         emitted_len = 0
         in_brain_tag = False
 
-        cloud_parsed = self._parse_cloud_model_id(model_id)
-        if cloud_parsed is not None:
+        if cloud_parsed is not None and cloud_harness is not None:
             prov_id, prov_slug = cloud_parsed
+            web_note = " + web_search harness" if should_run_web else " (web: off)"
             yield {
-                "status": f"calling {prov_id}:{prov_slug} over HTTPS ({len(used_source_ids)} source(s), {len(context_str):,} chars)...",
+                "status": f"calling {prov_id}:{prov_slug}{web_note} ({len(used_source_ids)} source(s), {len(context_str):,} chars)...",
                 "phase": "generating",
             }
-            cloud_raw = self._generate_with_cloud_provider(model_id, chat_msgs).replace("\u2014", "-")
-            full_raw = cloud_raw
+            pre_stat_count = len(source_stats_list)
+            for ev in stream_cloud_chat(
+                cloud_harness,
+                model_id=model_id,
+                chat_msgs=chat_msgs,
+                allow_web_tools=bool(should_run_web),
+            ):
+                if "__full_raw" in ev:
+                    full_raw = str(ev["__full_raw"] or "")
+                else:
+                    yield ev
+            if len(source_stats_list) > pre_stat_count:
+                yield {
+                    "status": f"retrieved {len(source_stats_list) - pre_stat_count} web source(s)...",
+                    "phase": "context_ready",
+                    "source_stats": source_stats_list,
+                    "brain_sources": brain_sources,
+                }
             fence_or_tag = re.search(
                 r"(?:```(?:xml|json|html)?\s*)?<brain_store\b",
                 full_raw,
@@ -3441,7 +3639,7 @@ class SatzSidecarRuntime:
 
             def _generate():
                 try:
-                    with torch.no_grad():
+                    with self.gemma_infer_lock, torch.no_grad():
                         model.generate(**gen_kwargs)
                 except Exception as exc:
                     gen_errors.append(str(exc))
@@ -3712,6 +3910,95 @@ class SatzSidecarRuntime:
             u = u[:-1]
         return u.lower()
 
+    @staticmethod
+    def _clean_digest_snippet(raw_text: str, max_len: int = 260) -> str:
+        s = re.sub(r"^\s*[-*•]+\s+", "", str(raw_text or ""), flags=re.M)
+        s = re.sub(r"\s+", " ", s).strip()
+        if not s:
+            return ""
+        if len(s) <= max_len:
+            return s
+        cut = s[:max_len].rsplit(" ", 1)[0].strip()
+        return (cut or s[:max_len].strip()) + "..."
+
+    def _load_digest_visuals_map(self) -> dict[str, dict[str, Any]]:
+        """Maps normalized URL -> {image_url, images, text, ts} from captured sources & news."""
+        meta_by_url: dict[str, dict[str, Any]] = {}
+
+        def _is_valid_img(url_s: str) -> bool:
+            low = (url_s or "").strip().lower()
+            if not low.startswith(("http://", "https://")):
+                return False
+            return not any(b in low for b in ("sprite", "favicon", "1x1", "pixel", ".svg"))
+
+        src_rows = self.store.db.execute(
+            """
+            SELECT url, domain, title, text, findings_json, updated_at
+            FROM satz_sources
+            WHERE url IS NOT NULL AND url != ''
+            ORDER BY updated_at DESC
+            LIMIT 120
+            """
+        ).fetchall()
+        for r in src_rows:
+            norm_u = self._norm_digest_url(str(r["url"] or ""))
+            if not norm_u or norm_u in meta_by_url:
+                continue
+            imgs: list[str] = []
+            fjson = r["findings_json"]
+            if fjson:
+                try:
+                    parsed = json.loads(fjson)
+                    if isinstance(parsed, list):
+                        for fd in parsed:
+                            if not isinstance(fd, dict):
+                                continue
+                            iu = str(fd.get("image_url") or "").strip()
+                            if _is_valid_img(iu) and iu not in imgs:
+                                imgs.append(iu)
+                                if len(imgs) >= 3:
+                                    break
+                except Exception:
+                    pass
+            meta_by_url[norm_u] = {
+                "image_url": imgs[0] if imgs else "",
+                "images": imgs,
+                "snippet": self._clean_digest_snippet(str(r["text"] or ""), 260),
+                "ts": float(r["updated_at"] or 0.0),
+            }
+
+        try:
+            news_rows = self.store.db.execute(
+                """
+                SELECT url, snippet, body_text, image_url, published_at
+                FROM satz_news_articles
+                WHERE url IS NOT NULL AND url != ''
+                ORDER BY published_at DESC
+                LIMIT 120
+                """
+            ).fetchall()
+            for nr in news_rows:
+                norm_u = self._norm_digest_url(str(nr["url"] or ""))
+                if not norm_u:
+                    continue
+                img = str(nr["image_url"] or "").strip()
+                existing = meta_by_url.get(norm_u)
+                if existing is None:
+                    meta_by_url[norm_u] = {
+                        "image_url": img if _is_valid_img(img) else "",
+                        "images": [img] if _is_valid_img(img) else [],
+                        "snippet": self._clean_digest_snippet(
+                            str(nr["snippet"] or nr["body_text"] or ""), 260
+                        ),
+                        "ts": float(nr["published_at"] or 0.0),
+                    }
+                elif not existing.get("image_url") and _is_valid_img(img):
+                    existing["image_url"] = img
+                    existing["images"] = [img, *(existing.get("images") or [])][:3]
+        except Exception:
+            pass
+        return meta_by_url
+
     def get_digest(self) -> dict[str, Any]:
         from src.planck3.digest import build_digest
         from src.planck3.web import domain_of
@@ -3719,7 +4006,22 @@ class SatzSidecarRuntime:
         with self.store_lock:
             self._repair_bookmark_entities_in_store(self.store.db)
             raw = build_digest(self.store)
+            visual_map = self._load_digest_visuals_map()
             candidates: list[dict[str, Any]] = []
+
+            def _attach_visuals(cand: dict[str, Any]) -> dict[str, Any]:
+                norm_u = self._norm_digest_url(str(cand.get("url") or ""))
+                vmeta = visual_map.get(norm_u) if norm_u else None
+                if vmeta:
+                    if not cand.get("image_url") and vmeta.get("image_url"):
+                        cand["image_url"] = vmeta["image_url"]
+                    if not cand.get("images") and vmeta.get("images"):
+                        cand["images"] = list(vmeta["images"])
+                    if not cand.get("summary") and vmeta.get("snippet"):
+                        cand["summary"] = vmeta["snippet"]
+                    if not cand.get("ts") and vmeta.get("ts"):
+                        cand["ts"] = vmeta["ts"]
+                return cand
 
             # Section 8.3 (M22): Include triggered watches in `For you` (/digest)
             changed_watch_rows = self.store.db.execute(
@@ -3728,7 +4030,7 @@ class SatzSidecarRuntime:
                 FROM satz_watches
                 WHERE changed_at IS NOT NULL AND changed_at > 0
                 ORDER BY changed_at DESC
-                LIMIT 4
+                LIMIT 2
                 """
             ).fetchall()
             for wr in changed_watch_rows:
@@ -3738,17 +4040,25 @@ class SatzSidecarRuntime:
                 w_val = str(wr["last_value"] or "").strip()
                 w_prev = str(wr["previous_value"] or "").strip()
                 diff_str = f"{w_prev} -> {w_val}" if (w_prev and w_val and w_prev != w_val) else (w_val or "updated")
+                w_url = w_target if w_target.startswith(("http://", "https://")) else f"satzwatch://{wr['watch_id']}"
+                vmeta = visual_map.get(self._norm_digest_url(w_url), {})
+                src_snip = str(vmeta.get("snippet") or "")
+                w_summary = f"Change detected: {diff_str}" + (f" · {src_snip}" if src_snip else "")
                 candidates.append(
-                    {
-                        "entity": self._extract_clean_entity(w_title, w_dom, w_target),
-                        "reason": f"watch ({diff_str})",
-                        "title": f"watch: {w_title} ({diff_str})",
-                        "url": w_target if w_target.startswith(("http://", "https://")) else f"satzwatch://{wr['watch_id']}",
-                        "domain": w_dom or "watch",
-                        "kind": "watch_triggered",
-                        "watch_id": wr["watch_id"],
-                        "conversation_id": wr["conversation_id"],
-                    }
+                    _attach_visuals(
+                        {
+                            "entity": self._extract_clean_entity(w_title, w_dom, w_target),
+                            "reason": f"watch ({diff_str})",
+                            "title": f"watch: {w_title} ({diff_str})",
+                            "url": w_url,
+                            "domain": w_dom or "watch",
+                            "kind": "watch_triggered",
+                            "summary": self._clean_digest_snippet(w_summary, 260),
+                            "ts": float(wr["changed_at"] or 0.0),
+                            "watch_id": wr["watch_id"],
+                            "conversation_id": wr["conversation_id"],
+                        }
+                    )
                 )
 
             # Section 3.4 (M10): Include recently changed bookmarks in /digest
@@ -3758,63 +4068,287 @@ class SatzSidecarRuntime:
                 FROM satz_bookmarks
                 WHERE changed_at IS NOT NULL AND changed_at > 0
                 ORDER BY changed_at DESC
-                LIMIT 4
+                LIMIT 2
                 """
             ).fetchall()
             for cbm in changed_bm_rows:
-                bm_title = re.sub(r"^\s*\[bookmark\]\s*", "", str(cbm["title"] or ""), flags=re.I).strip() or cbm["domain"] or cbm["url"]
+                bm_title = (
+                    re.sub(r"^\s*\[bookmark\]\s*", "", str(cbm["title"] or ""), flags=re.I).strip()
+                    or cbm["domain"]
+                    or cbm["url"]
+                )
+                bm_p = self.store.db.execute(
+                    "SELECT text FROM passages WHERE url = ? ORDER BY ts DESC LIMIT 1",
+                    (cbm["url"],),
+                ).fetchone()
+                bm_snip = self._clean_digest_snippet(str(bm_p["text"] or ""), 260) if bm_p else ""
                 candidates.append(
-                    {
-                        "entity": self._extract_clean_entity(bm_title, str(cbm["domain"] or ""), str(cbm["url"] or "")),
-                        "reason": "bookmark updated",
-                        "title": f"changed: {bm_title}",
-                        "url": cbm["url"],
-                        "domain": cbm["domain"],
-                        "kind": "bookmark_changed",
-                    }
+                    _attach_visuals(
+                        {
+                            "entity": self._extract_clean_entity(bm_title, str(cbm["domain"] or ""), str(cbm["url"] or "")),
+                            "reason": "bookmark updated",
+                            "title": f"changed: {bm_title}",
+                            "url": cbm["url"],
+                            "domain": cbm["domain"],
+                            "kind": "bookmark_changed",
+                            "summary": bm_snip or "Bookmarked page content updated since last check.",
+                            "ts": float(cbm["changed_at"] or 0.0),
+                        }
+                    )
                 )
 
-            # Section 4.1 (M14): Include Mail triage items in `For you` (/digest)
+            # Section 4.1 (M14): Include Mail triage & newly arrived messages in `For you` (/digest)
             if getattr(self, "mail", None) is not None and self.passwords.unlocked:
                 try:
                     triage = self.mail.get_triage_set()
-                    for em in (triage.get("emails_needing_attention") or [])[:2]:
-                        if em.get("needs_reply"):
-                            candidates.append(
-                                {
-                                    "entity": em.get("from_name") or em.get("from_addr") or "mail",
-                                    "reason": "mail action",
-                                    "title": f"reply waiting: {em.get('subject')}",
-                                    "url": f"satzmail://message/{em['id']}",
-                                    "domain": "mail",
-                                    "kind": "mail_reply",
-                                }
-                            )
+                    seen_mail_ids: set[str] = set()
+                    mail_added = 0
+
+                    def _mail_snippet(em_obj: dict[str, Any]) -> str:
+                        ask = str(em_obj.get("ask") or "").strip()
+                        due = str(em_obj.get("due_date") or "").strip()
+                        body_preview = str(em_obj.get("snippet") or em_obj.get("new_text") or "").strip()
+                        prefix = ""
+                        if ask:
+                            prefix = f"Action: {ask}" + (f" (due {due})" if due else "")
+                        combined = f"{prefix} · {body_preview}" if (prefix and body_preview) else (prefix or body_preview)
+                        return self._clean_digest_snippet(combined, 260)
+
+                    attn = triage.get("emails_needing_attention") or []
+                    for em in [e for e in attn if e.get("needs_reply")][:2]:
+                        mid = str(em["id"])
+                        seen_mail_ids.add(mid)
+                        sender = str(em.get("from_name") or em.get("from_addr") or "mail")
+                        mail_added += 1
+                        candidates.append(
+                            {
+                                "entity": sender,
+                                "reason": f"reply waiting · {sender}",
+                                "title": f"reply waiting: {em.get('subject')}",
+                                "url": f"satzmail://message/{mid}",
+                                "domain": "mail",
+                                "kind": "mail_reply",
+                                "summary": _mail_snippet(em),
+                                "ts": float(em.get("date") or 0.0),
+                            }
+                        )
+
                     for ord_item in (triage.get("order_updates") or [])[:2]:
+                        mid = str(ord_item["id"])
+                        seen_mail_ids.add(mid)
+                        mail_added += 1
+                        o_parts = [f"Order #{ord_item['order_number']}" if ord_item.get("order_number") else ""]
+                        if ord_item.get("total"):
+                            o_parts.append(str(ord_item["total"]))
+                        if ord_item.get("tracking_number"):
+                            o_parts.append(f"tracking {ord_item['tracking_number']}")
+                        if ord_item.get("subject"):
+                            o_parts.append(str(ord_item["subject"]))
+                        if ord_item.get("snippet"):
+                            o_parts.append(str(ord_item["snippet"]))
+                        o_snip = self._clean_digest_snippet(" · ".join(p for p in o_parts if p), 260)
                         candidates.append(
                             {
                                 "entity": ord_item.get("merchant") or "orders",
                                 "reason": f"order {ord_item.get('status') or 'update'}",
                                 "title": f"order {ord_item.get('status') or 'shipped'}: {ord_item.get('merchant')}",
-                                "url": f"satzmail://message/{ord_item['id']}",
+                                "url": f"satzmail://message/{mid}",
                                 "domain": "mail",
                                 "kind": "mail_order",
+                                "summary": o_snip,
+                                "ts": float(ord_item.get("date") or 0.0),
                             }
                         )
+
                     for pr_item in (triage.get("expiring_promos") or [])[:2]:
+                        mid = str(pr_item["id"])
+                        seen_mail_ids.add(mid)
+                        mail_added += 1
                         exp_lbl = pr_item.get("expiry") or "soon"
+                        val_str = f" ({pr_item['discount_value']})" if pr_item.get("discount_value") else ""
+                        p_snip = self._clean_digest_snippet(
+                            f"Code: {pr_item.get('voucher_code')}{val_str} · {pr_item.get('subject') or ''} · {pr_item.get('snippet') or ''}",
+                            260,
+                        )
                         candidates.append(
                             {
                                 "entity": pr_item.get("company") or "promos",
                                 "reason": f"code {pr_item.get('voucher_code')}",
                                 "title": f"code expires {exp_lbl}: {pr_item.get('company')}",
-                                "url": f"satzmail://message/{pr_item['id']}",
+                                "url": f"satzmail://message/{mid}",
                                 "domain": "mail",
                                 "kind": "mail_promo",
+                                "summary": p_snip,
+                                "ts": float(pr_item.get("date") or 0.0),
                             }
                         )
+
+                    # Recent unread INBOX emails (even if needs_reply wasn't triggered)
+                    for em in [e for e in attn if not e.get("needs_reply") and str(e["id"]) not in seen_mail_ids][:2]:
+                        mid = str(em["id"])
+                        seen_mail_ids.add(mid)
+                        sender = str(em.get("from_name") or em.get("from_addr") or "mail")
+                        mail_added += 1
+                        candidates.append(
+                            {
+                                "entity": sender,
+                                "reason": f"unread email · {sender}",
+                                "title": f"mail: {em.get('subject') or '(no subject)'}",
+                                "url": f"satzmail://message/{mid}",
+                                "domain": "mail",
+                                "kind": "mail_recent",
+                                "summary": _mail_snippet(em),
+                                "ts": float(em.get("date") or 0.0),
+                            }
+                        )
+
+                    # Fallback: most recent unseen ping or latest inbox messages if fewer than 3 mail items added
+                    if mail_added < 3:
+                        with self.mail.db_lock:
+                            mconn = self.mail._ensure_connection()
+                            recent_rows = mconn.execute(
+                                """
+                                SELECT m.id, m.from_name, m.from_addr, m.subject, m.snippet, m.body_text, m.date, m.seen,
+                                       COALESCE(l.label, 'email') AS label,
+                                       COALESCE(p.text, m.body_text) AS new_text
+                                FROM messages m
+                                LEFT JOIN labels l ON l.message_id = m.id
+                                LEFT JOIN parts p ON p.message_id = m.id AND p.kind = 'new'
+                                WHERE m.hidden = 0 AND UPPER(m.folder) = 'INBOX'
+                                  AND COALESCE(l.label, 'email') IN ('email', 'ping')
+                                ORDER BY m.seen ASC, m.date DESC
+                                LIMIT 6
+                                """
+                            ).fetchall()
+                        for rr in recent_rows:
+                            mid = str(rr["id"])
+                            if mid in seen_mail_ids:
+                                continue
+                            seen_mail_ids.add(mid)
+                            lbl = str(rr["label"] or "email")
+                            sender = str(rr["from_name"] or rr["from_addr"] or "mail")
+                            prefix = "ping" if lbl == "ping" else "mail"
+                            state_tag = "unread" if not rr["seen"] else "received"
+                            candidates.append(
+                                {
+                                    "entity": sender,
+                                    "reason": f"{state_tag} {lbl} · {sender}",
+                                    "title": f"{prefix}: {rr['subject'] or '(no subject)'}",
+                                    "url": f"satzmail://message/{mid}",
+                                    "domain": "mail",
+                                    "kind": "mail_ping" if lbl == "ping" else "mail_recent",
+                                    "summary": self._clean_digest_snippet(
+                                        str(rr["snippet"] or rr["new_text"] or ""), 260
+                                    ),
+                                    "ts": float(rr["date"] or 0.0),
+                                }
+                            )
+                            mail_added += 1
+                            if mail_added >= 4:
+                                break
                 except Exception as me:
                     self.record_error("digest_mail", me)
+
+            # Personalized & corroborated Satz News clusters (with images + summaries)
+            if getattr(self, "news", None) is not None:
+                try:
+                    seen_cids: set[str] = set()
+                    news_pool: list[dict[str, Any]] = []
+                    for st in (self.news.get_stories(lane="foryou", limit=5).get("stories") or []):
+                        cid = str(st.get("cluster_id") or "")
+                        if cid and cid not in seen_cids:
+                            seen_cids.add(cid)
+                            news_pool.append(st)
+                    if len(news_pool) < 3:
+                        for st in (self.news.get_stories(lane="top", limit=5).get("stories") or []):
+                            cid = str(st.get("cluster_id") or "")
+                            if cid and cid not in seen_cids:
+                                seen_cids.add(cid)
+                                news_pool.append(st)
+                    for st in news_pool[:3]:
+                        arts = st.get("articles") or []
+                        if not arts:
+                            continue
+                        lead_art = next((a for a in arts if a.get("image_url")), arts[0])
+                        art_url = str(lead_art.get("url") or "")
+                        art_dom = str(lead_art.get("domain") or domain_of(art_url) or "news")
+                        img_list = [
+                            str(a["image_url"]).strip()
+                            for a in arts
+                            if str(a.get("image_url") or "").strip().startswith(("http://", "https://"))
+                        ][:3]
+                        lead_img = str(st.get("lead_image") or (img_list[0] if img_list else "")).strip()
+                        if lead_img and lead_img not in img_list:
+                            img_list.insert(0, lead_img)
+                        tags = [str(t) for t in (st.get("topic_tags") or [])[:2] if t]
+                        reasons = [str(r) for r in (st.get("brain_match_reasons") or [])[:1] if r]
+                        reason_txt = (
+                            f"news · {st.get('band_label') or st.get('band')} "
+                            f"({float(st.get('confidence10') or 0.0):.1f}/10 · {int(st.get('independent_families') or 1)} fam)"
+                        )
+                        if reasons:
+                            reason_txt = f"{reason_txt} · {reasons[0]}"
+                        candidates.append(
+                            {
+                                "entity": ", ".join(tags) if tags else art_dom,
+                                "reason": reason_txt,
+                                "title": str(st.get("headline") or lead_art.get("title") or "news story"),
+                                "url": art_url,
+                                "domain": art_dom,
+                                "kind": "news_story",
+                                "summary": self._clean_digest_snippet(
+                                    str(st.get("summary_md") or lead_art.get("snippet") or ""), 260
+                                ),
+                                "image_url": lead_img,
+                                "images": img_list[:3],
+                                "ts": float(st.get("updated_at") or 0.0),
+                            }
+                        )
+                except Exception as ne:
+                    self.record_error("digest_news", ne)
+
+            # Recently generated / updated Brain entities when unlocked
+            if getattr(self, "brain", None) is not None and not getattr(self.brain, "locked", True):
+                try:
+                    reg = self.brain._load_registry()
+                    ents_sorted = sorted(
+                        (reg.get("entities") or {}).items(),
+                        key=lambda kv: str(kv[1].get("updated") or ""),
+                        reverse=True,
+                    )
+                    added_brain = 0
+                    for slug, meta in ents_sorted:
+                        ename = str(meta.get("name") or slug).strip()
+                        etype = str(meta.get("$type") or "note").strip()
+                        esum = str(meta.get("summary") or "").strip()
+                        if len(esum) < 16 or ename.lower() in self._BAD_BOOKMARK_ENTITIES:
+                            continue
+                        attrs = meta.get("attributes") or {}
+                        raw_src = str(attrs.get("source_url") or attrs.get("$source") or "").strip()
+                        target_url = (
+                            raw_src
+                            if raw_src.startswith(("http://", "https://", "satzmail://"))
+                            else f"satzbrain://entity/{slug}"
+                        )
+                        dom = domain_of(target_url) if target_url.startswith(("http://", "https://")) else "brain"
+                        candidates.append(
+                            _attach_visuals(
+                                {
+                                    "entity": etype,
+                                    "reason": f"brain · {etype}",
+                                    "title": ename,
+                                    "url": target_url,
+                                    "domain": dom or "brain",
+                                    "kind": "brain_entity",
+                                    "summary": self._clean_digest_snippet(esum, 260),
+                                }
+                            )
+                        )
+                        added_brain += 1
+                        if added_brain >= 2:
+                            break
+                except Exception as be:
+                    self.record_error("digest_brain", be)
 
             for sec in raw.get("interests", []):
                 ent = str(sec["entity"] or "")
@@ -3823,13 +4357,18 @@ class SatzSidecarRuntime:
                 for p in sec.get("recent", [])[:2]:
                     clean_t = re.sub(r"^\s*\[bookmark\]\s*", "", str(p.get("title") or ""), flags=re.I).strip()
                     candidates.append(
-                        {
-                            "entity": ent,
-                            "reason": f"recent ({p.get('domain', 'local')})",
-                            "title": clean_t or p.get("text", "")[:80],
-                            "url": p.get("url", ""),
-                            "domain": p.get("domain", ""),
-                        }
+                        _attach_visuals(
+                            {
+                                "entity": ent,
+                                "reason": f"recent ({p.get('domain', 'local')})",
+                                "title": clean_t or str(p.get("text") or "")[:80],
+                                "url": p.get("url", ""),
+                                "domain": p.get("domain", ""),
+                                "kind": "digest_recent",
+                                "summary": self._clean_digest_snippet(str(p.get("text") or ""), 260),
+                                "ts": float(p.get("ts") or 0.0),
+                            }
+                        )
                     )
                 for adj in sec.get("adjacent", [])[:2]:
                     ap = adj.get("passage")
@@ -3837,17 +4376,22 @@ class SatzSidecarRuntime:
                     if ap and adj_ent.lower() not in ("bookmark", "bookmarks"):
                         clean_t = re.sub(r"^\s*\[bookmark\]\s*", "", str(ap.get("title") or ""), flags=re.I).strip()
                         candidates.append(
-                            {
-                                "entity": adj_ent,
-                                "reason": f"adjacent to {ent}",
-                                "title": clean_t or ap.get("text", "")[:80],
-                                "url": ap.get("url", ""),
-                                "domain": ap.get("domain", ""),
-                            }
+                            _attach_visuals(
+                                {
+                                    "entity": adj_ent,
+                                    "reason": f"adjacent to {ent}",
+                                    "title": clean_t or str(ap.get("text") or "")[:80],
+                                    "url": ap.get("url", ""),
+                                    "domain": ap.get("domain", ""),
+                                    "kind": "digest_adjacent",
+                                    "summary": self._clean_digest_snippet(str(ap.get("text") or ""), 260),
+                                    "ts": float(ap.get("ts") or 0.0),
+                                }
+                            )
                         )
 
             rows = self.store.db.execute(
-                "SELECT id, url, domain, title, text, entity FROM passages ORDER BY ts DESC LIMIT 24"
+                "SELECT id, url, domain, title, text, entity, ts FROM passages ORDER BY ts DESC LIMIT 24"
             ).fetchall()
             for r in rows:
                 clean_t = re.sub(r"^\s*\[bookmark\]\s*", "", str(r["title"] or ""), flags=re.I).strip()
@@ -3855,13 +4399,45 @@ class SatzSidecarRuntime:
                 if ent_val.lower() in ("bookmark", "bookmarks"):
                     ent_val = self._extract_clean_entity(clean_t, str(r["domain"] or ""), str(r["url"] or ""))
                 candidates.append(
-                    {
-                        "entity": ent_val or r["domain"] or "recent",
-                        "reason": f"browsed on {r['domain']}",
-                        "title": clean_t or r["text"][:80],
-                        "url": r["url"],
-                        "domain": r["domain"],
-                    }
+                    _attach_visuals(
+                        {
+                            "entity": ent_val or r["domain"] or "recent",
+                            "reason": f"browsed on {r['domain']}",
+                            "title": clean_t or str(r["text"] or "")[:80],
+                            "url": r["url"],
+                            "domain": r["domain"],
+                            "kind": "passage",
+                            "summary": self._clean_digest_snippet(str(r["text"] or ""), 260),
+                            "ts": float(r["ts"] or 0.0),
+                        }
+                    )
+                )
+
+            src_recent_rows = self.store.db.execute(
+                """
+                SELECT url, domain, title, text, updated_at
+                FROM satz_sources
+                WHERE url LIKE 'http%' AND LENGTH(TRIM(COALESCE(text, ''))) >= 40
+                ORDER BY updated_at DESC
+                LIMIT 16
+                """
+            ).fetchall()
+            for sr in src_recent_rows:
+                clean_t = re.sub(r"^\s*\[bookmark\]\s*", "", str(sr["title"] or ""), flags=re.I).strip()
+                dom_s = str(sr["domain"] or domain_of(str(sr["url"] or "")) or "")
+                candidates.append(
+                    _attach_visuals(
+                        {
+                            "entity": self._extract_clean_entity(clean_t, dom_s, str(sr["url"] or "")),
+                            "reason": f"captured ({dom_s})",
+                            "title": clean_t or dom_s or str(sr["url"] or ""),
+                            "url": sr["url"],
+                            "domain": dom_s,
+                            "kind": "source_capture",
+                            "summary": self._clean_digest_snippet(str(sr["text"] or ""), 260),
+                            "ts": float(sr["updated_at"] or 0.0),
+                        }
+                    )
                 )
 
             # Section 4 (M18): Digest dedupe: at most 1 item per URL per digest build,
@@ -3888,18 +4464,18 @@ class SatzSidecarRuntime:
                         items[existing_idx] = cand
                     continue
 
-                if dom and dom != "mail" and domain_counts[dom] >= 2:
+                if dom and dom not in ("mail", "brain") and domain_counts[dom] >= 2:
                     continue
 
                 if norm_u:
                     url_to_idx[norm_u] = len(items)
-                if dom and dom != "mail":
+                if dom and dom not in ("mail", "brain"):
                     domain_counts[dom] += 1
                 items.append(cand)
-                if len(items) >= 8:
+                if len(items) >= 12:
                     break
 
-            return {"items": items[:8], "digest": raw}
+            return {"items": items[:12], "digest": raw}
 
     def get_knowledge_summary(self) -> dict[str, Any]:
         with self.store_lock:
@@ -4105,6 +4681,11 @@ class SatzSidecarRuntime:
             )
             self.store.db.commit()
             t_rec = self.store.trust(dom)
+        if hasattr(self, "news") and self.news is not None:
+            try:
+                self.news.recluster_and_rank()
+            except Exception:
+                pass
         return {
             "ok": True,
             "domain": dom,
@@ -4285,6 +4866,14 @@ class SatzSidecarRuntime:
                     "query": "",
                 },
                 {
+                    "kind": "search_news",
+                    "label": "open news · top stories, for you, perspectives & sources",
+                    "destination": "satz news",
+                    "privacy": "local only",
+                    "leaves_machine": False,
+                    "query": "",
+                },
+                {
                     "kind": "run_command",
                     "label": "run command · lock",
                     "destination": "command: lock",
@@ -4324,7 +4913,22 @@ class SatzSidecarRuntime:
                 "query": q,
             }
 
+        def make_news_route(q: str) -> dict[str, Any]:
+            label = f'ask news · "{q}"' if q else "open news · top stories, for you, perspectives & sources"
+            return {
+                "kind": "search_news",
+                "label": label,
+                "destination": "satz news",
+                "privacy": "local + RSS/registry",
+                "leaves_machine": False,
+                "query": q,
+            }
+
         command_aliases = {
+            "home": "home",
+            "start": "home",
+            "start screen": "home",
+            "for you": "home",
             "new conversation": "new_conversation",
             "new chat": "new_conversation",
             "new": "new_conversation",
@@ -4427,6 +5031,18 @@ class SatzSidecarRuntime:
                 make_ask_route(trimmed),
                 make_brain_route(q_part),
             ]
+
+        news_prefix = re.match(
+            r"^(?:(?:news|headlines|perspectives)\s*:\s*|search\s+news\s+(?:for\s+)?|in\s+news\s+)(.+)$",
+            trimmed,
+            flags=re.I,
+        )
+        if news_prefix:
+            q_n = news_prefix.group(1).strip()
+            return [make_news_route(q_n), make_brain_route(q_n), make_ask_route(trimmed)]
+
+        if trimmed.lower() in ("news", "open news", "top stories", "satz news"):
+            return [make_news_route(""), make_brain_route(trimmed), make_ask_route(trimmed)]
 
         mail_prefix = re.match(
             r"^(?:(?:mail|inbox|from|to|subject)\s*:\s*|search\s+mail\s+(?:for\s+)?|in\s+mail\s+)(.+)$",
@@ -5544,6 +6160,30 @@ def make_sidecar_server(
                 return self._json(runtime.get_model_management_config())
             if route_path == "/digest":
                 return self._json(runtime.get_digest())
+            if route_path == "/news/status":
+                return self._json({"ok": True, **runtime.news.get_status()})
+            if route_path == "/news/stories":
+                lane = query_params.get("lane", "top")
+                topic = query_params.get("topic", "")
+                explore = query_params.get("explore", "0") in ("1", "true")
+                lim = int(query_params.get("limit", "30") or 30)
+                return self._json(runtime.news.get_stories(lane=lane, topic=topic, explore=explore, limit=lim))
+            if route_path == "/news/perspectives":
+                cid = query_params.get("cluster_id", "")
+                refresh = query_params.get("refresh", "0") in ("1", "true")
+                try:
+                    return self._json(runtime.news.get_perspectives(cid, refresh=refresh))
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 404)
+            if route_path == "/news/sources":
+                q = query_params.get("q", "")
+                cat = query_params.get("category", "")
+                band_f = query_params.get("band", "")
+                conf_only = query_params.get("conflicted", "0") in ("1", "true")
+                rss_only = query_params.get("with_rss", "0") in ("1", "true")
+                return self._json(runtime.news.list_sources(q, cat, band_f, conf_only, rss_only))
+            if route_path == "/news/topics":
+                return self._json(runtime.news.list_topics())
             if route_path == "/sources/previews":
                 cid = query_params.get("conversation_id", "")
                 return self._json(runtime.get_conversation_source_previews(cid))
@@ -5990,6 +6630,67 @@ def make_sidecar_server(
                 ext_ok = data.get("extract_ok")
                 return self._json(runtime.mail.record_eval_label(mid, lbl, extract_ok=ext_ok))
 
+            if self.path == "/news/refresh":
+                try:
+                    force = bool(data.get("force", True))
+                    include_search = bool(data.get("include_search", False))
+                    return self._json(runtime.news.refresh_news_feeds(force=force, include_topic_search=include_search))
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 500)
+
+            if self.path == "/news/chat_answer":
+                q = str(data.get("question") or "").strip()
+                if not q:
+                    return self._json({"ok": False, "error": "question required"}, 400)
+                try:
+                    open_srcs = data.get("sources") if isinstance(data.get("sources"), list) else None
+                    roles_ovr = data.get("roles") if isinstance(data.get("roles"), dict) else None
+                    return self._json(runtime.news.answer_news_question(q, open_sources=open_srcs, roles_override=roles_ovr))
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 500)
+
+            if self.path == "/news/reweigh":
+                meta = data.get("answer_meta")
+                if not isinstance(meta, dict):
+                    return self._json({"ok": False, "error": "answer_meta required"}, 400)
+                return self._json({"ok": True, "answer_meta": runtime.news.reweigh_answer_meta(meta)})
+
+            if self.path == "/news/translate":
+                aid = str(data.get("article_id") or "")
+                tlang = str(data.get("target_lang") or "en")
+                try:
+                    return self._json(runtime.news.translate_article(aid, target_lang=tlang))
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/news/sources/feed":
+                try:
+                    return self._json(runtime.news.add_or_toggle_feed(data))
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/news/topics":
+                try:
+                    return self._json(runtime.news.manage_topic(data))
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/news/save_to_brain":
+                cid = str(data.get("cluster_id") or "")
+                try:
+                    return self._json(runtime.news.save_cluster_to_brain(cid))
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/news/cluster/hide":
+                cid = str(data.get("cluster_id") or "")
+                with runtime.store_lock:
+                    runtime.store.db.execute("UPDATE satz_news_clusters SET is_hidden = 1 WHERE cluster_id = ?", (cid,))
+                    runtime.store.db.commit()
+                return self._json({"ok": True, "cluster_id": cid})
+
             if self.path == "/chat/summarize":
                 messages = data.get("messages") or []
                 prev_summary = str(data.get("summary") or "")
@@ -6112,12 +6813,19 @@ def main():
         f"[satz-sidecar] listening on http://{args.host}:{args.port} (sgs={runtime.sgs_root}, store={runtime.store_path}, parent_pid={args.parent_pid})",
         flush=True,
     )
+    # Give the initial /knowledge + /health UI poll a clean ~0.6 s head start before torch/Gemma preload hits disk/GIL.
+    time.sleep(0.6)
     if args.preload_gemma:
         try:
             runtime.ensure_gemma()
             print("[satz-sidecar] gemma [warm] - preload complete", flush=True)
         except Exception as e:
             runtime.record_error("gemma_preload", e)
+    elif runtime.gemma_device is None:
+        try:
+            runtime.gemma_device = runtime._detect_gemma_device()
+        except Exception:
+            pass
     try:
         while True:
             time.sleep(1.5)

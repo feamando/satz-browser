@@ -2,13 +2,16 @@ import {
   escapeHtml,
   extractDomain,
   formatPlainErrorMessage,
+  getActiveStream,
   getActiveTabSources,
   getAvailableModelsForPicker,
   getModelPrivacySummary,
+  isConvStreaming,
   state,
 } from "./state";
 import type {
   AgentTaskCard,
+  AnswerMeta,
   BrainCitationItem,
   BrainProposalItem,
   ChatEmailCard,
@@ -23,6 +26,8 @@ export interface ChatActions {
   onUsePlanckInstead?: (text: string) => void;
   onToggleWeb: () => void;
   onToggleMail?: () => void;
+  onNewsTrustDelta?: (msgId: string, domain: string, delta: number) => void;
+  onOpenNewsLane?: (lane: string) => void;
   onClickCitation: (citationIndex: number, sourceId: string | null) => void;
   onClickBrainCitation?: (slug: string, citeLabel: string) => void;
   onOpenUrlAsTab: (url: string, title: string) => void;
@@ -53,18 +58,22 @@ export function renderChatPanel(
     return;
   }
 
+  const convId = detail.conversation.id;
+  const convStream = getActiveStream(convId);
+  const isStreamingHere = Boolean(convStream);
+
   const prevListEl = container.querySelector(
     "#chat-messages-list"
   ) as HTMLElement | null;
-  const isSameConv = state.chatLastRenderedConvId === detail.conversation.id;
+  const isSameConv = state.chatLastRenderedConvId === convId;
   const prevScrollTop = prevListEl?.scrollTop ?? 0;
   const prevWasNearBottom =
     !prevListEl ||
     prevListEl.scrollHeight - prevListEl.scrollTop - prevListEl.clientHeight <=
       140;
   const shouldStickToBottom =
-    !isSameConv || !prevListEl || state.isStreaming || state.chatPinToBottom || prevWasNearBottom;
-  state.chatLastRenderedConvId = detail.conversation.id;
+    !isSameConv || !prevListEl || isStreamingHere || state.chatPinToBottom || prevWasNearBottom;
+  state.chatLastRenderedConvId = convId;
 
   const existingInput = container.querySelector(
     "#chat-composer-input"
@@ -78,16 +87,16 @@ export function renderChatPanel(
   const messages = detail.messages;
   const activeTabSources = getActiveTabSources(detail);
   const elapsedSec =
-    state.isStreaming && state.streamingStartedAt > 0
-      ? ((Date.now() - state.streamingStartedAt) / 1000).toFixed(1)
+    convStream && convStream.startedAt > 0
+      ? ((Date.now() - convStream.startedAt) / 1000).toFixed(1)
       : "0.0";
-  const phaseLabel = state.streamingPhase || "processing";
+  const phaseLabel = convStream?.phase || "processing";
   const statusLineText =
-    state.streamingStatus || "request in progress...";
+    convStream?.status || "request in progress...";
 
   const offlineNotice = !state.sidecar.online
     ? "models [offline] - browser tabs work normally; start sidecar for local chat"
-    : state.isStreaming
+    : isStreamingHere
       ? `[in progress: ${statusLineText}]`
       : activeTabSources.length > 0
         ? `ask over ${activeTabSources.length} open tab${activeTabSources.length === 1 ? "" : "s"} in context or type a question_`
@@ -98,7 +107,7 @@ export function renderChatPanel(
     activeTabSources.length > 0 && readableTabSources.length === 0;
 
   const emptyContextBannerHtml =
-    allOpenTabsEmpty && !state.webSearchEnabled && !state.isStreaming
+    allOpenTabsEmpty && !state.webSearchEnabled && !isStreamingHere
       ? `
         <div class="composer-context-row">
           <span class="muted">no readable page in context ·</span>
@@ -186,18 +195,19 @@ export function renderChatPanel(
         ${emptyContextBannerHtml}
       `;
 
-  const stepsHtml = state.streamingSteps
+  const stepsHtml = (convStream?.steps ?? [])
     .map(
       (step, idx) =>
-        `<div class="streaming-step-line">${idx === state.streamingSteps.length - 1 ? "&gt;" : "ok"} ${escapeHtml(step)}</div>`
+        `<div class="streaming-step-line">${idx === (convStream?.steps.length ?? 0) - 1 ? "&gt;" : "ok"} ${escapeHtml(step)}</div>`
     )
     .join("");
 
   const isMailConv = detail.conversation.origin === "mail";
+  const isNewsConv = detail.conversation.origin === "news";
   const mailEffectiveOn = isMailConv || state.mailContextEnabled;
   const triageSourceIds = state.mailTriageSources.map((s) => s.id);
   const mailSuggestionsHtml =
-    isMailConv && !state.isStreaming
+    isMailConv && !isStreamingHere
       ? `
         <div class="composer-controls">
           <span class="muted">suggestions:</span>
@@ -206,7 +216,17 @@ export function renderChatPanel(
           <button class="citation-link" data-chat-suggest="draft a reply to [1]">[draft a reply to [1]]</button>
         </div>
       `
-      : "";
+      : isNewsConv && !isStreamingHere
+        ? `
+        <div class="composer-controls">
+          <span class="muted">news suggestions:</span>
+          <button class="citation-link" data-chat-suggest="What are today's top corroborated European news stories?">[today's top stories]</button>
+          <button class="citation-link" data-chat-suggest="Compare perspectives on current global energy & grid policy news">[compare perspectives]</button>
+          <button class="citation-link" data-news-jump-lane="stories">[open top stories lane]</button>
+          <button class="citation-link" data-news-jump-lane="foryou">[open for you]</button>
+        </div>
+      `
+        : "";
 
   const convTasks = state.conversationTasks[detail.conversation.id] ?? [];
   const taskCardsHtml = convTasks
@@ -232,7 +252,7 @@ export function renderChatPanel(
             : ""
         }
         ${
-          messages.length === 0 && convTasks.length === 0 && !state.isStreaming && !(isMailConv && state.mailTriageOverview)
+          messages.length === 0 && convTasks.length === 0 && !isStreamingHere && !(isMailConv && state.mailTriageOverview)
             ? `<div class="muted">no messages in this conversation yet.</div>`
             : messages
                 .map((m) =>
@@ -249,25 +269,26 @@ export function renderChatPanel(
                     m.citations_flagged,
                     m.findings ?? state.messageFindings[m.id],
                     m.brain_sources ?? state.messageBrainSources[m.id],
-                    m.email_cards ?? state.messageEmailCards[m.id]
+                    m.email_cards ?? state.messageEmailCards[m.id],
+                    m.answer_meta ?? state.messageAnswerMeta[m.id]
                   )
                 )
                 .join("")
         }
         ${taskCardsHtml}
         ${
-          state.isStreaming
+          isStreamingHere && convStream
             ? `
-          <div class="msg-block msg-streaming-block" id="streaming-msg-block">
+          <div class="msg-block msg-streaming-block" id="streaming-msg-block" data-streaming-conv-id="${escapeHtml(convId)}">
             <div class="msg-header">
               <span>assistant</span>
-              <span>${escapeHtml(state.selectedModel)} [<span id="streaming-phase-badge">${escapeHtml(phaseLabel)}</span> · <span id="streaming-elapsed-timer">${elapsedSec}s</span>]</span>
+              <span>${escapeHtml(convStream.model)} [<span id="streaming-phase-badge">${escapeHtml(phaseLabel)}</span> · <span id="streaming-elapsed-timer">${elapsedSec}s</span>]</span>
             </div>
             <div class="streaming-status-box" id="streaming-status-box">
               <div class="streaming-status-current" id="streaming-status-current">&gt; status: ${escapeHtml(statusLineText)}</div>
               <div class="streaming-steps-list" id="streaming-steps-list">${stepsHtml}</div>
             </div>
-            <div class="msg-body"><span id="streaming-msg-text">${escapeHtml(state.streamingText)}</span><span class="caret-blink">▌</span></div>
+            <div class="msg-body"><span id="streaming-msg-text">${escapeHtml(convStream.text)}</span><span class="caret-blink">▌</span></div>
           </div>
         `
             : ""
@@ -287,10 +308,10 @@ export function renderChatPanel(
             autocorrect="off"
             autocapitalize="off"
             placeholder="${escapeHtml(offlineNotice)}"
-            ${state.isStreaming ? "disabled" : ""}
+            ${isStreamingHere ? "disabled" : ""}
           />
           <span class="caret-blink">▌</span>
-          <button id="chat-send-btn" ${state.isStreaming ? "disabled" : ""}>${state.isStreaming ? "[in progress...]" : "[send]"}</button>
+          <button id="chat-send-btn" ${isStreamingHere ? "disabled" : ""}>${isStreamingHere ? "[in progress...]" : "[send]"}</button>
         </div>
 
         <div class="composer-meta-row">
@@ -308,7 +329,7 @@ export function renderChatPanel(
                 )
                 .join("")}
             </select>
-            <button id="chat-web-toggle" class="${state.webSearchEnabled ? "active" : ""}">
+            <button id="chat-web-toggle" class="${state.webSearchEnabled ? "active" : ""}" title="enable live web_search &amp; fetch_webpage tools for cloud and local models">
               web: ${state.webSearchEnabled ? "on" : "off"}
             </button>
             <button id="chat-mail-toggle" class="${mailEffectiveOn ? "active" : ""}" title="include top 5 FTS matches from mail.sqlite as sources">
@@ -355,11 +376,15 @@ export function renderChatPanel(
   }
 }
 
-export function appendStreamingDelta(delta: string): void {
-  state.streamingText += delta;
+export function appendStreamingDelta(convId: string, delta: string): void {
+  const s = state.streamsByConv[convId];
+  if (!s) return;
+  s.text += delta;
+  const blockEl = document.getElementById("streaming-msg-block");
+  if (blockEl?.getAttribute("data-streaming-conv-id") !== convId) return;
   const el = document.getElementById("streaming-msg-text");
   if (el) {
-    el.textContent = state.streamingText;
+    el.textContent = s.text;
     const list = document.getElementById("chat-messages-list");
     if (list) {
       list.scrollTop = list.scrollHeight;
@@ -367,21 +392,27 @@ export function appendStreamingDelta(delta: string): void {
   }
 }
 
-export function updateStreamingStatus(status: string, phase?: string): void {
-  state.streamingStatus = status;
+export function updateStreamingStatus(
+  convId: string,
+  status: string,
+  phase?: string
+): void {
+  const s = state.streamsByConv[convId];
+  if (!s) return;
+  s.status = status;
   if (phase) {
-    state.streamingPhase = phase;
+    s.phase = phase;
   }
-  if (
-    status &&
-    state.streamingSteps[state.streamingSteps.length - 1] !== status
-  ) {
-    state.streamingSteps = [...state.streamingSteps.slice(-4), status];
+  if (status && s.steps[s.steps.length - 1] !== status) {
+    s.steps = [...s.steps.slice(-4), status];
   }
 
+  const blockEl = document.getElementById("streaming-msg-block");
+  if (blockEl?.getAttribute("data-streaming-conv-id") !== convId) return;
+
   const phaseEl = document.getElementById("streaming-phase-badge");
-  if (phaseEl && state.streamingPhase) {
-    phaseEl.textContent = state.streamingPhase;
+  if (phaseEl && s.phase) {
+    phaseEl.textContent = s.phase;
   }
   const curEl = document.getElementById("streaming-status-current");
   if (curEl) {
@@ -389,17 +420,17 @@ export function updateStreamingStatus(status: string, phase?: string): void {
   }
   const stepsEl = document.getElementById("streaming-steps-list");
   if (stepsEl) {
-    stepsEl.innerHTML = state.streamingSteps
+    stepsEl.innerHTML = s.steps
       .map(
         (step, idx) =>
-          `<div class="streaming-step-line">${idx === state.streamingSteps.length - 1 ? "&gt;" : "ok"} ${escapeHtml(step)}</div>`
+          `<div class="streaming-step-line">${idx === s.steps.length - 1 ? "&gt;" : "ok"} ${escapeHtml(step)}</div>`
       )
       .join("");
   }
   const inputEl = document.getElementById(
     "chat-composer-input"
   ) as HTMLInputElement | null;
-  if (inputEl && state.isStreaming) {
+  if (inputEl && state.activeDetail?.conversation.id === convId) {
     inputEl.placeholder = `[in progress: ${status}]`;
   }
   const list = document.getElementById("chat-messages-list");
@@ -409,10 +440,11 @@ export function updateStreamingStatus(status: string, phase?: string): void {
 }
 
 export function tickStreamingElapsed(): void {
-  if (!state.isStreaming || state.streamingStartedAt <= 0) return;
-  const elapsedSec = ((Date.now() - state.streamingStartedAt) / 1000).toFixed(
-    1
-  );
+  const blockEl = document.getElementById("streaming-msg-block");
+  const domConvId = blockEl?.getAttribute("data-streaming-conv-id") ?? "";
+  const s = domConvId ? state.streamsByConv[domConvId] : null;
+  if (!s || s.startedAt <= 0) return;
+  const elapsedSec = ((Date.now() - s.startedAt) / 1000).toFixed(1);
   const timerEl = document.getElementById("streaming-elapsed-timer");
   if (timerEl) {
     timerEl.textContent = `${elapsedSec}s`;
@@ -432,7 +464,8 @@ function renderMessageBlock(
   citationsFlagged?: number | null,
   findings?: FindingItem[],
   brainSources?: BrainCitationItem[],
-  emailCards?: ChatEmailCard[]
+  emailCards?: ChatEmailCard[],
+  answerMeta?: AnswerMeta
 ): string {
   let sourceIds: string[] = [];
   if (sourceIdsJson) {
@@ -490,14 +523,16 @@ function renderMessageBlock(
     readFooterHtml = `<div class="muted">read ${sourceIds.length} source${sourceIds.length === 1 ? "" : "s"} · ${totalSent.toLocaleString()} chars · ${cutCount} cut</div>`;
   }
 
+  const lastPromptHere =
+    state.lastPromptByConv[state.activeDetail?.conversation.id ?? ""] ?? "";
   const retryButtonHtml =
     isErrorMsg
       ? `
       <div class="composer-controls">
         ${
-          state.lastUserPrompt
-            ? `<button class="citation-link" data-retry-prompt="${escapeHtml(state.lastUserPrompt)}">[retry]</button>
-               <button class="citation-link" data-use-planck-prompt="${escapeHtml(state.lastUserPrompt)}">[use planck instead]</button>`
+          lastPromptHere
+            ? `<button class="citation-link" data-retry-prompt="${escapeHtml(lastPromptHere)}">[retry]</button>
+               <button class="citation-link" data-use-planck-prompt="${escapeHtml(lastPromptHere)}">[use planck instead]</button>`
             : ""
         }
         ${
@@ -748,6 +783,8 @@ function renderMessageBlock(
       ? ` <button class="citation-link" data-watch-msg="${escapeHtml(msgId)}" title="watch this answer or source for changes">[watch]</button>`
       : "";
 
+  const answerAuditHtml = renderAnswerMetaSectionHtml(msgId, answerMeta);
+
   return `
     <div class="msg-block ${isErrorMsg ? "msg-error-block" : ""}">
       <div class="msg-header">
@@ -755,6 +792,7 @@ function renderMessageBlock(
         <span>${modelLabel}${srcCountLabel}${escapeHtml(citeStatsLabel)}${watchBtnHtml}</span>
       </div>
       <div class="msg-body">${formattedBody}</div>
+      ${answerAuditHtml}
       ${readFooterHtml}
       ${brainCitationsListHtml}
       ${embeddedVideosHtml}
@@ -763,6 +801,104 @@ function renderMessageBlock(
       ${pagePreviewCardsHtml}
       ${proposalsHtml}
       ${retryButtonHtml}
+    </div>
+  `;
+}
+
+function renderAnswerMetaSectionHtml(
+  msgId: string,
+  meta?: AnswerMeta
+): string {
+  if (!meta) return "";
+  const conf10 = meta.confidence10 ?? 0;
+  const filledBars = Math.max(0, Math.min(10, Math.round(conf10)));
+  const meterStr = `${"=".repeat(filledBars)}${"-".repeat(10 - filledBars)}`;
+  const bandCls =
+    meta.band === "high" || meta.band === "good"
+      ? "news-band-good"
+      : "news-band-low";
+  const rolesLine = meta.models_used
+    ? `plan: ${meta.models_used.planner} · read: ${meta.models_used.reader} · analyze: ${meta.models_used.analyzer}`
+    : "";
+
+  const divHtml = meta.divergence
+    ? `<div class="profile-status-banner">[! notice: personal trust shifted result | system-only: ${escapeHtml(String(meta.divergence.system_value ?? "n/a"))} (${meta.divergence.system_confidence.toFixed(1)}/10 ${escapeHtml(meta.divergence.system_band)})]</div>`
+    : "";
+
+  const defaultOpenExplain =
+    meta.band === "low" || meta.band === "sceptical" || (meta.conflicts?.length ?? 0) > 0;
+  const explainOpen = state.expandedExplainMessages[msgId] ?? defaultOpenExplain;
+  const inDepthOpen = Boolean(state.expandedInDepthMessages[msgId]);
+
+  const explainBodyHtml = explainOpen
+    ? `
+      <div class="kb-card" style="margin-top:6px;">
+        <div class="muted">steps: ${meta.steps.map((s) => escapeHtml(s)).join(" -> ")}</div>
+        ${
+          meta.items && meta.items.length > 0
+            ? `<table class="kb-table" style="margin-top:6px;"><thead><tr><th>delta</th><th>reason</th></tr></thead><tbody>${meta.items
+                .map(
+                  ([lbl, val]) =>
+                    `<tr><td>${val >= 0 ? `+${val.toFixed(1)}` : val.toFixed(1)}</td><td>${escapeHtml(lbl)}</td></tr>`
+                )
+                .join("")}</tbody></table>`
+            : ""
+        }
+        ${
+          meta.sources && meta.sources.length > 0
+            ? `<table class="kb-table" style="margin-top:6px;"><thead><tr><th>role</th><th>domain</th><th>fam</th><th>sys</th><th>you</th><th>eff</th><th>category</th><th>trust</th></tr></thead><tbody>${meta.sources
+                .map((s) => {
+                  const t = s.trust;
+                  const youStr = t.personal !== null && t.personal !== undefined ? t.personal.toFixed(1) : "-";
+                  const confFlag = t.conflict ? " [!]" : "";
+                  return `<tr><td>${escapeHtml(s.role)}</td><td><button class="citation-link" data-open-tab-url="${escapeHtml(s.url)}" data-open-tab-title="${escapeHtml(s.title)}">${escapeHtml(s.domain)}</button>${escapeHtml(confFlag)}</td><td>${escapeHtml(t.family)}</td><td>${t.system.toFixed(0)}</td><td>${escapeHtml(youStr)}</td><td><strong>${t.effective.toFixed(1)}</strong></td><td>${escapeHtml(t.category)}</td><td><button class="citation-link" data-news-trust-msg="${escapeHtml(msgId)}" data-news-trust-dom="${escapeHtml(s.domain)}" data-news-trust-delta="2">[+]</button> <button class="citation-link" data-news-trust-msg="${escapeHtml(msgId)}" data-news-trust-dom="${escapeHtml(s.domain)}" data-news-trust-delta="-2">[-]</button></td></tr>`;
+                })
+                .join("")}</tbody></table>`
+            : ""
+        }
+      </div>
+    `
+    : "";
+
+  const inDepthBodyHtml =
+    inDepthOpen && meta.passages && meta.passages.length > 0
+      ? `
+      <div class="kb-card" style="margin-top:6px;">
+        ${meta.passages
+          .map(
+            (p) => `
+          <div class="source-row">
+            <div class="source-row-top">
+              <strong>${escapeHtml(p.domain)}</strong>
+              <button class="citation-link" data-open-tab-url="${escapeHtml(p.url)}" data-open-tab-title="${escapeHtml(p.title || p.domain)}">[open tab]</button>
+            </div>
+            <div>${escapeHtml(p.text)}</div>
+          </div>`
+          )
+          .join("")}
+      </div>
+    `
+      : "";
+
+  return `
+    <div class="news-audit-box">
+      <div class="composer-controls">
+        <span class="news-band-pill ${bandCls}">[${escapeHtml((meta.band || "low").toUpperCase())} · ${conf10.toFixed(1)}/10 · ${escapeHtml(meta.band_label)}]</span>
+        <span class="muted">[${escapeHtml(meterStr)}]</span>
+        ${rolesLine ? `<span class="muted">${escapeHtml(rolesLine)}</span>` : ""}
+      </div>
+      ${divHtml}
+      ${meta.privacy_disclosure ? `<div class="muted">${escapeHtml(meta.privacy_disclosure)}</div>` : ""}
+      <div class="composer-controls">
+        <button class="citation-link" data-toggle-explain-msg="${escapeHtml(msgId)}">[${explainOpen ? "hide" : "show"} how i got this]</button>
+        ${
+          meta.passages && meta.passages.length > 0
+            ? `<button class="citation-link" data-toggle-indepth-msg="${escapeHtml(msgId)}">[${inDepthOpen ? "hide" : "show"} in depth · ${meta.passages.length} passages]</button>`
+            : ""
+        }
+      </div>
+      ${explainBodyHtml}
+      ${inDepthBodyHtml}
     </div>
   `;
 }
@@ -1061,7 +1197,7 @@ function bindChatEvents(container: HTMLElement, actions: ChatActions): void {
   ) as HTMLInputElement | null;
   const submit = () => {
     const val = input?.value.trim() ?? "";
-    if (!val || state.isStreaming) return;
+    if (!val || isConvStreaming(state.activeDetail?.conversation.id)) return;
     if (input) input.value = "";
     actions.onSendMessage(val);
   };
@@ -1098,7 +1234,7 @@ function bindChatEvents(container: HTMLElement, actions: ChatActions): void {
 
   container.querySelectorAll("[data-chat-suggest]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      if (state.isStreaming) return;
+      if (isConvStreaming(state.activeDetail?.conversation.id)) return;
       const prompt = (btn as HTMLElement).getAttribute("data-chat-suggest");
       if (prompt) {
         actions.onSendMessage(prompt);
@@ -1137,7 +1273,7 @@ function bindChatEvents(container: HTMLElement, actions: ChatActions): void {
 
   container.querySelectorAll("[data-retry-prompt]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      if (state.isStreaming) return;
+      if (isConvStreaming(state.activeDetail?.conversation.id)) return;
       const prompt = (btn as HTMLElement).getAttribute("data-retry-prompt");
       if (prompt) actions.onSendMessage(prompt);
     });
@@ -1145,7 +1281,7 @@ function bindChatEvents(container: HTMLElement, actions: ChatActions): void {
 
   container.querySelectorAll("[data-use-planck-prompt]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      if (state.isStreaming) return;
+      if (isConvStreaming(state.activeDetail?.conversation.id)) return;
       const prompt = (btn as HTMLElement).getAttribute("data-use-planck-prompt");
       if (!prompt) return;
       if (actions.onUsePlanckInstead) {
@@ -1343,6 +1479,45 @@ function bindChatEvents(container: HTMLElement, actions: ChatActions): void {
       const partId = el.getAttribute("data-part-id") ?? "";
       if (mid && actions.onDownloadMailAttachment) {
         actions.onDownloadMailAttachment(mid, partId);
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-toggle-explain-msg]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const mid = (btn as HTMLElement).getAttribute("data-toggle-explain-msg") ?? "";
+      if (!mid) return;
+      state.expandedExplainMessages[mid] = !state.expandedExplainMessages[mid];
+      renderChatPanel(container, actions);
+    });
+  });
+
+  container.querySelectorAll("[data-toggle-indepth-msg]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const mid = (btn as HTMLElement).getAttribute("data-toggle-indepth-msg") ?? "";
+      if (!mid) return;
+      state.expandedInDepthMessages[mid] = !state.expandedInDepthMessages[mid];
+      renderChatPanel(container, actions);
+    });
+  });
+
+  container.querySelectorAll("[data-news-trust-dom]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const mid = el.getAttribute("data-news-trust-msg") ?? "";
+      const dom = el.getAttribute("data-news-trust-dom") ?? "";
+      const delta = Number(el.getAttribute("data-news-trust-delta") ?? "0");
+      if (mid && dom && actions.onNewsTrustDelta) {
+        actions.onNewsTrustDelta(mid, dom, delta);
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-news-jump-lane]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const lane = (btn as HTMLElement).getAttribute("data-news-jump-lane") ?? "";
+      if (lane && actions.onOpenNewsLane) {
+        actions.onOpenNewsLane(lane);
       }
     });
   });

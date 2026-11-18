@@ -45,7 +45,19 @@ ENTITY_TYPE_DIRS: dict[str, str] = {
     "note": "Notes",
     "fact": "Notes",
     "decision": "Decisions",
+    "story": "News/Stories",
+    "claim": "News/Claims",
+    "topic": "News/Topics",
+    "source": "Sources/Media",
 }
+
+BOOKING_OR_TRACKING_RE = re.compile(
+    r"\b(?=[A-Z0-9-]{6,22}\b)(?:[A-Z]{1,4}\d{3,}[A-Z0-9]*|\d{5,}[A-Z0-9-]*|[A-Z]{2,}-\d{3,})\b"
+)
+MONEY_AMOUNT_RE = re.compile(
+    r"(?:€|eur|usd|\$|£|gbp|chf)\s*\d+(?:[.,]\d+)?|\b\d+(?:[.,]\d+)?\s*(?:€|eur|usd|gbp|chf)\b",
+    re.IGNORECASE,
+)
 
 TIER1_TYPES = {"account", "person", "place", "address", "project", "order"}
 
@@ -1073,6 +1085,49 @@ class SatzBrain:
                 tier=1,
                 actor="user/proposal_accept",
             )
+
+    def scrub_pii_for_external_query(self, raw_query: str) -> str:
+        """
+        Strips personal identifiers (emails, street addresses, booking/order codes,
+        invoice amounts, and non-public personal contact names from Brain) before
+        sending a topic query to an external web search engine.
+        """
+        cleaned = str(raw_query or "").strip()
+        if not cleaned:
+            return ""
+        cleaned = EMAIL_RE.sub(" ", cleaned)
+        cleaned = ADDRESS_LINE_RE.sub(" ", cleaned)
+        cleaned = BOOKING_OR_TRACKING_RE.sub(" ", cleaned)
+        cleaned = MONEY_AMOUNT_RE.sub(" ", cleaned)
+
+        if not self.locked:
+            try:
+                with self.lock:
+                    reg = self._load_registry()
+                entities = reg.get("entities") or {}
+                for _slug, meta in entities.items():
+                    etype = str(meta.get("$type") or "").lower()
+                    attrs = meta.get("attributes") or {}
+                    if etype == "person" and not attrs.get("public_figure"):
+                        for nm in [meta.get("name"), *(meta.get("aliases") or [])]:
+                            nm_s = str(nm or "").strip()
+                            if len(nm_s) >= 3:
+                                cleaned = re.sub(
+                                    rf"\b{re.escape(nm_s)}\b",
+                                    " ",
+                                    cleaned,
+                                    flags=re.IGNORECASE,
+                                )
+                    elif etype == "account":
+                        em = str(attrs.get("email") or "").strip()
+                        if em:
+                            cleaned = cleaned.replace(em, " ")
+            except Exception:
+                pass
+
+        cleaned = re.sub(r"\b(?:for|on|of|by|with|to|from)\s*$", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,.;:-")
+        return cleaned
 
     def reject_proposal(self, proposal_id: str) -> bool:
         with self.lock:

@@ -24,6 +24,12 @@ import type {
   MailPreset,
   MailStatusSummary,
   ModelManagementConfig,
+  AnswerMeta,
+  NewsCategoryEntry,
+  NewsPerspectiveMatrix,
+  NewsSourceEntry,
+  NewsStoryCluster,
+  NewsTopicItem,
   SidecarHealth,
   SourceItem,
   SourceStatEntry,
@@ -59,17 +65,31 @@ async function ensureSidecarConfig(): Promise<{ baseUrl: string; token: string }
 
 async function sidecarFetch(
   path: string,
-  init: RequestInit = {}
+  init: RequestInit = {},
+  timeoutMs?: number
 ): Promise<Response> {
   const { baseUrl, token } = await ensureSidecarConfig();
   const headers = new Headers(init.headers ?? {});
   if (token) {
     headers.set("X-Satz-Token", token);
   }
-  return await fetch(`${baseUrl}${path}`, {
-    ...init,
-    headers,
-  });
+  let ctrl: AbortController | null = null;
+  let timerId: number | null = null;
+  if (timeoutMs && timeoutMs > 0 && !init.signal) {
+    ctrl = new AbortController();
+    timerId = window.setTimeout(() => ctrl?.abort(), timeoutMs);
+  }
+  try {
+    return await fetch(`${baseUrl}${path}`, {
+      ...init,
+      headers,
+      signal: init.signal ?? ctrl?.signal,
+    });
+  } finally {
+    if (timerId !== null) {
+      window.clearTimeout(timerId);
+    }
+  }
 }
 
 function mapConversationRow(raw: Record<string, unknown>): Conversation {
@@ -79,9 +99,11 @@ function mapConversationRow(raw: Record<string, unknown>): Conversation {
   const origin: ConversationOrigin =
     rawOrigin === "mail"
       ? "mail"
-      : rawOrigin === "direct"
-        ? "direct"
-        : "chat";
+      : rawOrigin === "news"
+        ? "news"
+        : rawOrigin === "direct"
+          ? "direct"
+          : "chat";
   return {
     id: String(raw.id ?? ""),
     title: mappedTitle,
@@ -219,6 +241,7 @@ function normalizeConversationDetail(
       brain_sources: parsedExtras?.brain_sources as ChatMessage["brain_sources"],
       proposals: parsedExtras?.proposals as ChatMessage["proposals"],
       email_cards: parsedExtras?.email_cards as ChatMessage["email_cards"],
+      answer_meta: parsedExtras?.answer_meta as ChatMessage["answer_meta"],
     };
   });
 
@@ -330,6 +353,19 @@ export async function apiSetConversationSummary(
 
 export async function apiEnsureMailConversation(): Promise<Conversation> {
   const row = await invoke<Record<string, unknown>>("ensure_mail_conversation");
+  const conv = mapConversationRow(row);
+  try {
+    state.conversations = await apiListConversations();
+  } catch {
+    if (!state.conversations.some((c) => c.id === conv.id)) {
+      state.conversations = [conv, ...state.conversations];
+    }
+  }
+  return conv;
+}
+
+export async function apiEnsureNewsConversation(): Promise<Conversation> {
+  const row = await invoke<Record<string, unknown>>("ensure_news_conversation");
   const conv = mapConversationRow(row);
   try {
     state.conversations = await apiListConversations();
@@ -483,9 +519,9 @@ export async function apiRemoveBookmark(bookmarkId: string): Promise<void> {
   await invoke("remove_bookmark", { bookmarkId });
 }
 
-export async function sidecarFetchHealth(): Promise<SidecarHealth> {
+export async function sidecarFetchHealth(timeoutMs?: number): Promise<SidecarHealth> {
   try {
-    const res = await sidecarFetch("/health");
+    const res = await sidecarFetch("/health", {}, timeoutMs);
     if (!res.ok) throw new Error("sidecar error");
     const data = (await res.json()) as SidecarHealth;
     return {
@@ -554,9 +590,9 @@ export async function sidecarFetchDigest(): Promise<DigestEntry[]> {
   }
 }
 
-export async function sidecarFetchKnowledge(): Promise<KnowledgeSummary | null> {
+export async function sidecarFetchKnowledge(timeoutMs?: number): Promise<KnowledgeSummary | null> {
   try {
-    const res = await sidecarFetch("/knowledge");
+    const res = await sidecarFetch("/knowledge", {}, timeoutMs);
     if (!res.ok) return null;
     const raw = (await res.json()) as Record<string, unknown>;
     const rawDomains = (raw.top_domains ?? []) as Array<Record<string, unknown>>;
@@ -2044,12 +2080,257 @@ export async function sidecarUpdateModelConfig(
         chat: "gemma-4-e4b",
         web_answer: "planck3 (web)",
         reader: "hertz (reader)",
+        news_planner: "gemma-4-e4b",
+        news_capture: "gemma-4-e4b",
+        news_reader: "hertz (reader)",
+        news_analyzer: "gemma-4-e4b",
         mail_classifier: "local",
         brain_encoder: "planck13 (local)",
       },
       cloud_providers: [],
       error: String(e),
     };
+  }
+}
+
+export async function sidecarFetchNewsStories(
+  lane: string = "top",
+  topic: string = "",
+  explore: boolean = false,
+  limit: number = 30
+): Promise<{
+  ok: boolean;
+  lane: string;
+  explore: boolean;
+  total: number;
+  stories: NewsStoryCluster[];
+}> {
+  try {
+    const qs = new URLSearchParams({
+      lane,
+      topic,
+      explore: explore ? "1" : "0",
+      limit: String(limit),
+    });
+    const res = await sidecarFetch(`/news/stories?${qs.toString()}`);
+    if (!res.ok) return { ok: false, lane, explore, total: 0, stories: [] };
+    return await res.json();
+  } catch {
+    return { ok: false, lane, explore, total: 0, stories: [] };
+  }
+}
+
+export async function sidecarRefreshNews(
+  force: boolean = true,
+  includeSearch: boolean = false
+): Promise<{
+  ok: boolean;
+  fetched_feeds?: number;
+  not_modified?: number;
+  articles_ingested?: number;
+  clusters?: number;
+  errors?: string[];
+  error?: string;
+}> {
+  try {
+    const res = await sidecarFetch("/news/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force, include_search: includeSearch }),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarFetchNewsPerspectives(
+  clusterId: string,
+  refresh: boolean = false
+): Promise<NewsPerspectiveMatrix | null> {
+  try {
+    const qs = new URLSearchParams({
+      cluster_id: clusterId,
+      refresh: refresh ? "1" : "0",
+    });
+    const res = await sidecarFetch(`/news/perspectives?${qs.toString()}`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function sidecarNewsChatAnswer(
+  question: string,
+  sources?: Array<{ id: string; url: string; title: string; domain: string }>,
+  roles?: Record<string, string>
+): Promise<{
+  ok: boolean;
+  answer: string;
+  model: string;
+  sources: Array<{ url: string; title: string; domain?: string }>;
+  source_stats?: SourceStatEntry[];
+  findings: FindingItem[];
+  answer_meta?: AnswerMeta;
+  error?: string;
+}> {
+  try {
+    const res = await sidecarFetch("/news/chat_answer", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, sources, roles }),
+    });
+    return await res.json();
+  } catch (e) {
+    return {
+      ok: false,
+      answer: `[error: ${e}]`,
+      model: "error",
+      sources: [],
+      findings: [],
+      error: String(e),
+    };
+  }
+}
+
+export async function sidecarReweighNewsMeta(
+  answerMeta: AnswerMeta
+): Promise<AnswerMeta | null> {
+  try {
+    const res = await sidecarFetch("/news/reweigh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answer_meta: answerMeta }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { ok?: boolean; answer_meta?: AnswerMeta };
+    return data.answer_meta ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function sidecarTranslateNewsArticle(
+  articleId: string,
+  targetLang: string = "en"
+): Promise<{
+  ok: boolean;
+  article_id?: string;
+  language?: string;
+  translated_text?: string;
+  original_text?: string;
+  error?: string;
+}> {
+  try {
+    const res = await sidecarFetch("/news/translate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ article_id: articleId, target_lang: targetLang }),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarFetchNewsSources(opts?: {
+  q?: string;
+  category?: string;
+  band?: string;
+  conflicted?: boolean;
+  withRss?: boolean;
+}): Promise<{
+  ok: boolean;
+  as_of: string;
+  categories: NewsCategoryEntry[];
+  total: number;
+  sources: NewsSourceEntry[];
+}> {
+  try {
+    const qs = new URLSearchParams({
+      q: opts?.q ?? "",
+      category: opts?.category ?? "",
+      band: opts?.band ?? "",
+      conflicted: opts?.conflicted ? "1" : "0",
+      with_rss: opts?.withRss ? "1" : "0",
+    });
+    const res = await sidecarFetch(`/news/sources?${qs.toString()}`);
+    if (!res.ok) return { ok: false, as_of: "", categories: [], total: 0, sources: [] };
+    return await res.json();
+  } catch {
+    return { ok: false, as_of: "", categories: [], total: 0, sources: [] };
+  }
+}
+
+export async function sidecarManageNewsFeed(
+  payload: Record<string, unknown>
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await sidecarFetch("/news/sources/feed", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarFetchNewsTopics(): Promise<{
+  ok: boolean;
+  topics: NewsTopicItem[];
+}> {
+  try {
+    const res = await sidecarFetch("/news/topics");
+    if (!res.ok) return { ok: false, topics: [] };
+    return await res.json();
+  } catch {
+    return { ok: false, topics: [] };
+  }
+}
+
+export async function sidecarManageNewsTopic(
+  payload: Record<string, unknown>
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await sidecarFetch("/news/topics", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarSaveNewsClusterToBrain(
+  clusterId: string
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await sidecarFetch("/news/save_to_brain", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cluster_id: clusterId }),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarHideNewsCluster(clusterId: string): Promise<boolean> {
+  try {
+    const res = await sidecarFetch("/news/cluster/hide", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cluster_id: clusterId }),
+    });
+    return res.ok;
+  } catch {
+    return false;
   }
 }
 

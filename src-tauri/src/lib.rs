@@ -182,6 +182,11 @@ fn ensure_mail_conversation(db: State<'_, DbState>) -> Result<Conversation, Stri
 }
 
 #[tauri::command]
+fn ensure_news_conversation(db: State<'_, DbState>) -> Result<Conversation, String> {
+    db.ensure_news_conversation().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn open_tab(
     db: State<'_, DbState>,
     conversation_id: String,
@@ -914,6 +919,7 @@ pub fn run() {
             get_conversation_bundle,
             create_conversation,
             ensure_mail_conversation,
+            ensure_news_conversation,
             rename_conversation,
             pin_conversation,
             toggle_pin_conversation,
