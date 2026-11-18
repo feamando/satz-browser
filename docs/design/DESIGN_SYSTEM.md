@@ -286,7 +286,7 @@ Centered column, max-width 760px, top padding 46px.
 1. Date line: mono `--fs-micro` uppercase `--faint` (`WEDNESDAY · 18 NOV`).
 2. Greeting: Besley 700 `--fs-2xl`, "Where do you want to start?".
 3. **Home command bar `.bigbar`:** 640px, `--panel`, 1px `--line`, `--r-xl`, `--shadow-bar`, padding `14px 14px 8px 16px`. Row 1: `cmd` icon, input `--fs-lg`, `.kbd` ⌘K. Row 2: attach chip, model chip, two inline suggestions, send button right.
-4. Two columns (1.35fr / 1fr, gap 18px):
+4. Two sections **stacked full width** at the command bar's 640px width, For you first, Resume below, gap 18px (decided 2026-11-18; the side-by-side mock is superseded):
    - **For you** (`.label` + `refresh` text action): digest items `.digest` with a 26px `--sunk` source tile (icon by kind: mail, news, star for bookmark, globe for page), title 500 `--fs-base`, subline `--fs-xs` `--muted` (lane · sender or source · age · reason). Optional thumbnail 72x50 `--r-md` right of the text; extra thumbs as a row of 54x38. Hover `--hover` on the whole item, `--r-lg`.
    - **Resume** (`.label` + `all`): `.row`-style items with conversation icon, title, mono meta (tabs, src, age).
 5. Profile unlock card (when locked): a `.card` above the columns with PIN `.input.pin`, `Unlock` primary button, `Unlock with Touch ID` button when available, and `Create profile` below a `.sep`.

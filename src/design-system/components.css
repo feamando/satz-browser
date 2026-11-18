@@ -271,10 +271,9 @@ button.pill:hover, a.pill:hover { background: var(--hover); }
 .bigbar-in > input::placeholder { color: var(--faint); }
 .bigbar-ctl { display: flex; align-items: center; gap: var(--sp-1); margin-left: -6px; }
 .bigbar-ctl > .send { margin-left: auto; width: 28px; height: 28px; }
-.home-cols { display: grid; grid-template-columns: 1.35fr 1fr; gap: var(--sp-7); margin-top: var(--sp-3); }
+.home-cols { display: flex; flex-direction: column; gap: var(--sp-7); width: 100%; max-width: 640px; align-self: center; margin-top: var(--sp-3); }
 .home-cols > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .home-cols .label { padding: 0 2px var(--sp-3); }
-@media (max-width: 820px) { .home-cols { grid-template-columns: 1fr; } }
 .digest { display: flex; gap: var(--sp-4); align-items: flex-start; padding: var(--sp-4); border-radius: var(--r-lg); cursor: pointer; min-width: 0; }
 .digest:hover { background: var(--hover); }
 .digest-src { width: 26px; height: 26px; flex: none; border-radius: var(--r-sm); border: 1px solid var(--line); background: var(--sunk); color: var(--muted); display: flex; align-items: center; justify-content: center; }
