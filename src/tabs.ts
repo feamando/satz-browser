@@ -517,8 +517,7 @@ export async function syncWebviewsNow(): Promise<void> {
     const rect = slot.getBoundingClientRect();
     const parentEl = slot.parentElement;
     const toolbarEl =
-      parentEl?.querySelector(".site-tab-toolbar") ??
-      parentEl?.querySelector(".email-tab-header");
+      parentEl?.querySelector(".tile-h");
     const toolbarRect = toolbarEl?.getBoundingClientRect();
     const toolbarBottom = Math.max(
       minStripBottom,

@@ -43,7 +43,20 @@
   font-display: swap;
   unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
 }
-/* JetBrains Mono @font-face stays in src/style.css (already bundled). */
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/JetBrainsMono-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
 
 :root {
   /* ---------- Brand ramp (logo, charts, illustrations only) ---------- */
@@ -128,12 +141,6 @@
   --shadow-bar: 0 10px 30px -20px rgba(40, 20, 80, .35);
   --shadow-pop: 0 18px 40px -18px rgba(20, 10, 40, .45);
   --img-filter: none;     /* news thumbnails */
-
-  /* ---------- Compatibility aliases for src/style.css (remove after migration) ---------- */
-  --bg: var(--canvas);
-  --surface: var(--panel);
-  --border: var(--line);
-  --fg: var(--ink);
 }
 
 /* ---------- Semantic: DARK ---------- */

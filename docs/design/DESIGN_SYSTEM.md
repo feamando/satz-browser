@@ -1,6 +1,6 @@
 # Satz Design System
 
-Version 1 · 2026-11-18 · Status: approved direction, migration pending · Owner: Nikita Gorshkov
+Version 1.1 · 2026-11-19 · Status: migrated (D1-D9 complete) · Owner: Nikita Gorshkov
 
 **TL;DR.** Satz moves from the v0.5 terminal look (black, monospace everywhere, square corners) to a calmer reading tool: paper light and violet-black dark themes, Inter for UI, Besley for display, JetBrains Mono kept only for data, and mildly rounded corners. Telemetry leaves the status bar and moves into a popover, the composer puts the prompt first, the sidebar becomes an accordion, and the on-tab agent folds to a strip. This file is the spec for every component the app uses today. Tokens live in `src/design-system/tokens.css`, the logo in `src/design-system/brand.ts`, icons in `src/design-system/icons.ts`. Component styles live in `src/design-system/components.css`, rendered in the gallery `docs/design/components.html` (regenerate with `python3 scripts/build_components_gallery.py`). Full-screen mocks are in `docs/design/satz-directions.html`. The step-by-step migration is `docs/PLAN_v0.7_design_system.md`.
 
@@ -424,9 +424,9 @@ Every class defined or used in `src/style.css` and `src/*.ts` as of 2026-11-18 (
 | `.rail-footer` | `.foot` | 5.2 |
 | `.bookmark-btn-wrap`, `.bookmark-tooltip-hint` | Top bar `star` button with `title` | 5.3 |
 | `.tab-strip`, `.tab-strip-left`, `.tab-strip-right`, `.tab-item`, `.tab-close-btn` | `.tabs`, `.tab` | 5.5 |
-| `.site-tab-toolbar`, `.address-input` | `.top`, `.addr` | 5.3 |
+| `.site-tab-toolbar`, `.address-input` | `.top`, `.addr`, `.tile-h`, `.tile-addr` | 5.3, 5.16 |
 | `.webview-slot` | Keep | 5.16 |
-| `.compare-grid`, `.panes-2/3/4`, `.compare-tile` | Keep | 5.16 |
+| `.compare-grid`, `.panes-2/3/4`, `.compare-tile` | Keep (+ `.compare-view`) | 5.16 |
 | `.start-screen`, `.start-container`, `.start-prompt-title` | `.home`, greeting | 5.8 |
 | `.start-input-box`, `.start-input-row`, `.start-input-field`, `.start-controls-row` | `.bigbar` | 5.8 |
 | `.start-columns`, `.start-col`, `.start-col-header`, `.start-col-foryou`, `.start-col-resume` | `.home-cols`, `.label` | 5.8 |
@@ -469,7 +469,7 @@ Every class defined or used in `src/style.css` and `src/*.ts` as of 2026-11-18 (
 | `#region-error-log-overlay` | Error log panel | 5.12 |
 | `#chat-model-select`, `#start-model-select`, `#overlay-model-select` | Model `.chip` + `.menu` | 5.6 |
 
-Classes referenced in TS but never defined in CSS today (they get styles in v1): `email-tab-header`, `kb-header`, `kb-textarea`, `rail-row-src-count`, `start-col-foryou`, `start-col-resume`, `start-resume-item`.
+All v0.5 class rules and compatibility aliases (`--bg`, `--surface`, `--border`, `--fg`) were retired and `src/style.css` removed in D9; active layout and component styles reside solely in `src/design-system/tokens.css` and `src/design-system/components.css`.
 
 ## 8. Migration plan
 
