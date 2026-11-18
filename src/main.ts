@@ -120,7 +120,7 @@ import {
   syncConfiguredChatModel,
 } from "./state";
 import { renderStatusLine } from "./status";
-import { renderTabStrip, scheduleWebviewLayoutSync } from "./tabs";
+import { renderTabStrip, renderTopBar, scheduleWebviewLayoutSync } from "./tabs";
 import type { CommandBarRoute, LocalModelId, NewsLane, TabPageEvent } from "./types";
 
 let resizeObserver: ResizeObserver | null = null;
@@ -767,6 +767,7 @@ function toggleAgentRail(): void {
   state.agentRailOpen = !state.agentRailOpen;
   setUiAgentFoldedPref(!state.agentRailOpen);
   setShellAgentFolded(!state.agentRailOpen);
+  renderTopBarRegion();
   renderViewportRegion();
 }
 
@@ -813,8 +814,8 @@ function mountShellSkeleton(): void {
     <div class="shell agent-folded" id="region-shell">
       <aside class="side" id="region-rail"></aside>
       <main class="main">
-        <div id="region-top"></div>
-        <header class="tab-strip" id="region-tab-strip"></header>
+        <header class="top hidden" id="region-top"></header>
+        <div class="tabs hidden" id="region-tab-strip"></div>
         <div class="workspace-body" id="region-viewport"></div>
       </main>
       <aside class="agent" id="region-agent"></aside>
@@ -868,7 +869,7 @@ async function handleTabPageEvent(payload: TabPageEvent): Promise<void> {
       state.tabCanFillLogin[tab.id] = false;
     }
     if (prevCanFill !== Boolean(state.tabCanFillLogin[tab.id])) {
-      renderViewportRegion();
+      renderTopBarRegion();
     }
   }
 
@@ -880,11 +881,13 @@ async function handleTabPageEvent(payload: TabPageEvent): Promise<void> {
       state.activeDetail = refreshed;
       await refreshLists();
       renderRailRegion();
+      renderTopBarRegion();
       renderTabStripRegion();
       renderStatusLine();
       refreshChatContextIfVisible();
     }
   } else {
+    renderTopBarRegion();
     renderTabStripRegion();
     refreshChatContextIfVisible();
   }
@@ -909,6 +912,7 @@ function renderAllRegions(): void {
 }
 
 function renderWorkspaceRegions(): void {
+  renderTopBarRegion();
   renderTabStripRegion();
   renderViewportRegion();
   renderStatusLine();
@@ -1020,6 +1024,66 @@ function renderRailRegion(): void {
       state.profileStatusMessage = "profile locked. encrypted vault unloaded.";
       await syncAfterProfileAuthChange(false);
       renderAllRegions();
+    },
+  });
+}
+
+function renderTopBarRegion(): void {
+  renderTopBar({
+    onNavTab: (tabId, action) => {
+      void apiControlTab(tabId, action);
+    },
+    onNavigateAddress: (tabId, rawVal) => {
+      void (async () => {
+        if (!state.activeDetail) return;
+        const targetUrl = normalizeUrl(rawVal);
+        await apiNavigateTab(tabId, targetUrl);
+        state.activeDetail = await apiGetConversation(
+          state.activeDetail.conversation.id
+        );
+        await refreshLists();
+        renderRailRegion();
+        renderTopBarRegion();
+        renderTabStripRegion();
+        renderStatusLine();
+      })();
+    },
+    onWatchTab: (tabId) => {
+      const tab = state.activeDetail?.tabs.find((t) => t.id === tabId);
+      if (tab && state.activeDetail) {
+        void handleWatchTarget(
+          state.activeDetail.conversation.id,
+          tab.url,
+          tab.title || extractDomain(tab.url)
+        );
+      }
+    },
+    onAutofillTab: (tabId) => {
+      void apiAutofillTabCredentials(tabId, false);
+    },
+    onToggleCodesPopover: (tabId) => {
+      state.openCodesPopoverTabId =
+        state.openCodesPopoverTabId === tabId ? null : tabId;
+      renderTopBarRegion();
+    },
+    onRunComparer: () => {
+      void handleRunComparer("compare these");
+    },
+    onExitCompare: () => {
+      state.compareMode = false;
+      renderWorkspaceRegions();
+    },
+    onToggleCompareMode: () => {
+      handleToggleCompareMode();
+    },
+    onToggleAgentRail: () => {
+      toggleAgentRail();
+    },
+    onNewTab: () => {
+      void handleCreateNewTab();
+    },
+    onOpenCommandBar: () => {
+      handleToggleCommandBar();
     },
   });
 }
@@ -1602,89 +1666,14 @@ function renderSiteTabViewport(viewport: HTMLElement): void {
       state.siteTabPromoCodes[promoCacheKey] = codes;
       state.siteTabPromoCodes[tab.id] = codes;
       if (codes.length > 0 && state.activeTabId === tab.id) {
-        renderViewportRegion();
+        renderTopBarRegion();
       }
     })();
   }
-  const activePromoCodes =
-    state.siteTabPromoCodes[promoCacheKey] ??
-    state.siteTabPromoCodes[tab.id] ??
-    [];
-  const showCodesPopover =
-    state.openCodesPopoverTabId === tab.id && activePromoCodes.length > 0;
 
   viewport.innerHTML = `
     <div class="chat-view">
       <div class="viewport-primary">
-        <div class="site-tab-toolbar">
-          <button data-nav-btn="back" data-tab="${escapeHtml(tab.id)}">&lt;-</button>
-          <button data-nav-btn="forward" data-tab="${escapeHtml(tab.id)}">-&gt;</button>
-          <button data-nav-btn="reload" data-tab="${escapeHtml(tab.id)}">[reload]</button>
-          <input
-            id="address-input-${escapeHtml(tab.id)}"
-            class="address-input"
-            data-address-tab="${escapeHtml(tab.id)}"
-            type="text"
-            spellcheck="false"
-            autocorrect="off"
-            autocapitalize="off"
-            placeholder="enter a url or search query_"
-            value="${escapeHtml(tab.url === "about:blank" ? "" : tab.url)}"
-          />
-          ${
-            activePromoCodes.length > 0
-              ? `
-          <button
-            data-codes-pill-tab="${escapeHtml(tab.id)}"
-            class="${showCodesPopover ? "active" : ""}"
-            title="Active promo codes from mail for ${escapeHtml(tabDomain)}"
-          >
-            [codes (${activePromoCodes.length})]
-          </button>
-          `
-              : ""
-          }
-          ${
-            state.tabCanFillLogin[tab.id]
-              ? `
-          <button
-            data-autofill-tab="${escapeHtml(tab.id)}"
-            title="Fill login credentials (${MOD_LABEL}+shift+l)"
-          >
-            [fill login]
-          </button>
-          `
-              : ""
-          }
-          <button
-            data-watch-tab="${escapeHtml(tab.id)}"
-            title="Watch this page for price or content changes"
-          >
-            [watch]
-          </button>
-          <button id="toggle-agent-rail-btn" class="${state.agentRailOpen ? "active" : ""}">
-            [chat rail ${MOD_LABEL}+j]
-          </button>
-        </div>
-        ${
-          showCodesPopover
-            ? `
-        <div class="kb-card">
-          <div class="rail-row">
-            <span class="muted">promo codes for ${escapeHtml(tabDomain)}:</span>
-            <div>
-              ${activePromoCodes
-                .map(
-                  (c) =>
-                    `<button data-copy-promo-code="${escapeHtml(String(c.code ?? ""))}">[copy ${escapeHtml(String(c.code ?? ""))}${c.discount_value ? ` · ${escapeHtml(String(c.discount_value))}` : ""}${c.expiry ? ` · exp ${escapeHtml(String(c.expiry))}` : ""}]</button>`
-                )
-                .join(" ")}
-            </div>
-          </div>
-        </div>
-        `
-            : ""
-        }
         <div id="webview-slot-${escapeHtml(tab.id)}" class="webview-slot">
           loading ${escapeHtml(tab.url)}...
         </div>
@@ -1713,11 +1702,6 @@ function renderCompareViewport(viewport: HTMLElement): void {
   viewport.innerHTML = `
     <div class="chat-view">
       <div class="viewport-primary">
-        <div class="site-tab-toolbar">
-          <span class="muted">compare (${tabs.length} tiles)</span>
-          <button id="compare-run-comparer-btn" title="Run Comparer agent across compared tiles">[compare these]</button>
-          <button id="compare-exit-btn">[exit compare]</button>
-        </div>
         <div class="compare-grid panes-${count}">
           ${tabs
             .map(

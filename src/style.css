@@ -46,7 +46,7 @@ select {
 }
 
 :where(
-  input:not(.input),
+  input:not(.input, .address-input),
   textarea,
   select,
   button:not(
@@ -61,6 +61,8 @@ select {
     .chip,
     .send,
     .tab,
+    .tab-close-btn,
+    .addr-trigger,
     .pill,
     .badge
   )
@@ -70,7 +72,7 @@ select {
   border-radius: 0;
 }
 
-input:not(.input):focus,
+input:not(.input, .address-input):focus,
 textarea:focus,
 select:focus {
   border-color: var(--fg);
@@ -89,6 +91,8 @@ select:focus {
     .chip,
     .send,
     .tab,
+    .tab-close-btn,
+    .addr-trigger,
     .pill,
     .badge
   )
@@ -111,6 +115,8 @@ select:focus {
     .chip,
     .send,
     .tab,
+    .tab-close-btn,
+    .addr-trigger,
     .pill,
     .badge
   )
@@ -131,6 +137,8 @@ select:focus {
     .chip,
     .send,
     .tab,
+    .tab-close-btn,
+    .addr-trigger,
     .pill,
     .badge
   ),
@@ -427,6 +435,131 @@ select:focus {
 #region-shell.agent-folded[data-layout="flush"] #region-agent,
 [data-layout="flush"] #region-shell.agent-folded #region-agent {
   margin-left: 0;
+}
+
+/* v0.7 D3 Top Bar & Tab Strip Helpers */
+#region-top.hidden,
+#region-tab-strip.hidden {
+  display: none;
+}
+
+#region-top {
+  position: relative;
+  z-index: 25;
+  overflow: visible;
+}
+
+#region-top .top-nav,
+#region-top .top-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+#region-top .addr {
+  position: relative;
+  min-width: 0;
+}
+
+#region-top .addr input.address-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  padding: 0;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  color: var(--ink);
+}
+
+#region-top .addr input.address-input:focus {
+  border: none;
+}
+
+#region-top .addr-trigger {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  padding: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+#region-top .addr-trigger:hover {
+  color: var(--ink);
+}
+
+#region-top .addr-static {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--ink);
+}
+
+#region-top .codes-pop-anchor {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+#region-top .codes-pop-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 240px;
+  z-index: 60;
+}
+
+#region-tab-strip {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+#region-tab-strip::-webkit-scrollbar {
+  display: none;
+}
+
+#region-tab-strip .tab {
+  flex-shrink: 0;
+  max-width: 220px;
+}
+
+#region-tab-strip .tab.selected-compare {
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+
+#region-tab-strip .tab-close-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  padding: 2px;
+  border-radius: 4px;
+  opacity: 0.65;
+  cursor: pointer;
+}
+
+#region-tab-strip .tab-close-btn:hover {
+  opacity: 1;
+  background: var(--hover);
+}
+
+#region-tab-strip .tabs-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--line);
+  margin: 0 2px;
+  flex-shrink: 0;
 }
 
 /* App Shell */

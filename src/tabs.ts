@@ -1,7 +1,22 @@
 import { apiSyncTabWebviews } from "./api";
+import { icon } from "./design-system/icons";
 import { isModKey } from "./keys";
 import { escapeHtml, extractDomain, MOD_LABEL, state } from "./state";
 import type { TabBoundsSpec } from "./types";
+
+export interface TopBarActions {
+  onNavTab: (tabId: string, action: "back" | "forward" | "reload") => void;
+  onNavigateAddress: (tabId: string, url: string) => void;
+  onWatchTab: (tabId: string) => void;
+  onAutofillTab: (tabId: string) => void;
+  onToggleCodesPopover: (tabId: string) => void;
+  onRunComparer: () => void;
+  onExitCompare: () => void;
+  onToggleCompareMode: () => void;
+  onToggleAgentRail: () => void;
+  onNewTab: () => void;
+  onOpenCommandBar: () => void;
+}
 
 export interface TabStripActions {
   onSelectTab: (tabId: string) => void;
@@ -13,77 +28,384 @@ export interface TabStripActions {
   onToggleCompareMode: () => void;
 }
 
+export function renderTopBar(actions: TopBarActions): void {
+  const container = document.getElementById("region-top");
+  if (!container) return;
+
+  const detail = state.activeDetail;
+  if (!detail || state.showKnowledgeView || state.showBrainView) {
+    container.classList.add("hidden");
+    container.innerHTML = "";
+    return;
+  }
+
+  container.classList.remove("hidden");
+
+  const openTabs = detail.tabs.filter((t) => t.is_open);
+  const isMailConv = detail.conversation.origin === "mail";
+  const isNewsConv = detail.conversation.origin === "news";
+  const isCompare = state.compareMode && state.compareTabIds.length >= 2;
+  const activeTab = !isCompare
+    ? openTabs.find((t) => t.id === state.activeTabId)
+    : undefined;
+  const isMailMsgTab = Boolean(
+    activeTab && (activeTab.kind === "mail" || activeTab.url.startsWith("satzmail://"))
+  );
+  const isComposeTab = activeTab?.kind === "compose";
+  const isSiteTab = Boolean(activeTab && !isMailMsgTab && !isComposeTab);
+  const isChatTab = !isCompare && state.activeTabId === "chat";
+  const tabsVisible = isMailConv || isNewsConv || openTabs.length > 0;
+  const supportsAgent = isCompare || isChatTab || isSiteTab || isMailMsgTab;
+
+  const siteTab = isSiteTab ? activeTab! : null;
+  const tabDomain = siteTab ? extractDomain(siteTab.url) : "";
+  const promoCacheKey = siteTab ? `${siteTab.id}:${tabDomain}` : "";
+  const activePromoCodes = siteTab
+    ? (state.siteTabPromoCodes[promoCacheKey] ??
+        state.siteTabPromoCodes[siteTab.id] ??
+        [])
+    : [];
+  const showCodesPopover = Boolean(
+    siteTab &&
+      state.openCodesPopoverTabId === siteTab.id &&
+      activePromoCodes.length > 0
+  );
+
+  const navHtml = siteTab
+    ? `
+      <div class="top-nav">
+        <button class="icon-btn" type="button" data-nav-btn="back" data-tab="${escapeHtml(siteTab.id)}" title="Back">${icon("back")}</button>
+        <button class="icon-btn" type="button" data-nav-btn="forward" data-tab="${escapeHtml(siteTab.id)}" title="Forward">${icon("fwd")}</button>
+        <button class="icon-btn" type="button" data-nav-btn="reload" data-tab="${escapeHtml(siteTab.id)}" title="Reload">${icon("reload")}</button>
+      </div>
+    `
+    : `
+      <div class="top-nav">
+        <button class="icon-btn" type="button" disabled title="Back">${icon("back")}</button>
+        <button class="icon-btn" type="button" disabled title="Forward">${icon("fwd")}</button>
+        <button class="icon-btn" type="button" disabled title="Reload">${icon("reload")}</button>
+      </div>
+    `;
+
+  let centerHtml = "";
+  if (siteTab) {
+    const isSecure = siteTab.url.startsWith("https://");
+    const addrIcon = isSecure ? icon("lock", "ico-sm") : icon("globe", "ico-sm");
+    const displayVal = siteTab.url === "about:blank" ? "" : siteTab.url;
+    centerHtml = `
+      <div class="addr">
+        ${addrIcon}
+        <input
+          id="address-input-${escapeHtml(siteTab.id)}"
+          class="address-input"
+          data-address-tab="${escapeHtml(siteTab.id)}"
+          type="text"
+          spellcheck="false"
+          autocorrect="off"
+          autocapitalize="off"
+          placeholder="Enter URL or search query..."
+          value="${escapeHtml(displayVal)}"
+        />
+        ${
+          activePromoCodes.length > 0
+            ? `
+              <div class="codes-pop-anchor">
+                <button
+                  type="button"
+                  data-codes-pill-tab="${escapeHtml(siteTab.id)}"
+                  class="pill accent ${showCodesPopover ? "active" : ""}"
+                  title="Active promo codes from mail for ${escapeHtml(tabDomain)}"
+                >
+                  ${activePromoCodes.length} promo${activePromoCodes.length === 1 ? "" : "s"}
+                </button>
+                ${
+                  showCodesPopover
+                    ? `
+                      <div class="menu codes-pop-menu">
+                        ${activePromoCodes
+                          .map((c) => {
+                            const codeStr = String(c.code ?? "");
+                            const valStr = String(c.discount_value ?? "");
+                            const expStr = String(c.expiry ?? "");
+                            return `
+                              <button class="menu-item" type="button" data-copy-promo-code="${escapeHtml(codeStr)}">
+                                <strong>${escapeHtml(codeStr)}</strong>
+                                <span class="muted">${valStr ? escapeHtml(valStr) : ""}${expStr ? ` · exp ${escapeHtml(expStr)}` : ""}</span>
+                              </button>
+                            `;
+                          })
+                          .join("")}
+                      </div>
+                    `
+                    : ""
+                }
+              </div>
+            `
+            : ""
+        }
+      </div>
+    `;
+  } else if (isCompare) {
+    centerHtml = `
+      <div class="addr">
+        ${icon("compare", "ico-sm")}
+        <span class="addr-static truncate">Compare · ${Math.min(4, state.compareTabIds.length)} panes</span>
+      </div>
+    `;
+  } else if (isComposeTab) {
+    centerHtml = `
+      <div class="addr">
+        ${icon("compose", "ico-sm")}
+        <span class="addr-static truncate">Compose message</span>
+      </div>
+    `;
+  } else if (isMailMsgTab && activeTab) {
+    centerHtml = `
+      <div class="addr">
+        ${icon("mail", "ico-sm")}
+        <span class="addr-static truncate">${escapeHtml(activeTab.title || "Email message")}</span>
+      </div>
+    `;
+  } else {
+    const promptHint = isMailConv
+      ? "Search or ask over Mail"
+      : isNewsConv
+        ? "Search or explore News"
+        : detail.conversation.title || "Search or enter URL";
+    centerHtml = `
+      <div class="addr">
+        <button id="top-cmd-addr-btn" class="addr-trigger" type="button" title="Command Bar (${MOD_LABEL}+K)">
+          ${icon("search", "ico-sm")}
+          <span class="truncate">${escapeHtml(promptHint)}</span>
+          <span class="kbd">${escapeHtml(MOD_LABEL.toUpperCase())}+K</span>
+        </button>
+      </div>
+    `;
+  }
+
+  const actionsHtml = `
+    <div class="top-actions">
+      ${
+        !tabsVisible
+          ? `<button id="tab-strip-add-btn" class="icon-btn" type="button" title="New tab (${MOD_LABEL}+T)">${icon("plus")}</button>`
+          : ""
+      }
+      ${
+        siteTab && state.tabCanFillLogin[siteTab.id]
+          ? `<button class="btn" type="button" data-autofill-tab="${escapeHtml(siteTab.id)}" title="Fill login credentials (${MOD_LABEL}+Shift+L)">${icon("lock", "ico-sm")}<span>Fill login</span></button>`
+          : ""
+      }
+      ${
+        siteTab
+          ? `<button class="icon-btn" type="button" data-watch-tab="${escapeHtml(siteTab.id)}" title="Watch this page for changes">${icon("watch")}</button>`
+          : ""
+      }
+      ${
+        isCompare
+          ? `
+            <button id="compare-run-comparer-btn" class="btn primary" type="button" title="Run Comparer agent across compared tiles">${icon("compare", "ico-sm")}<span>Compare these</span></button>
+            <button id="compare-exit-btn" class="btn" type="button">Exit</button>
+          `
+          : openTabs.length >= 2
+            ? `
+              <button
+                id="tab-strip-compare-btn"
+                class="btn ${state.compareTabIds.length >= 2 ? "active" : ""}"
+                type="button"
+                title="Select 2-4 tabs with ${MOD_LABEL}+click then press ${MOD_LABEL}+M"
+              >
+                ${icon("compare", "ico-sm")}
+                <span>${state.compareTabIds.length >= 2 ? `Compare (${state.compareTabIds.length})` : "Compare"}</span>
+              </button>
+            `
+            : ""
+      }
+      ${
+        supportsAgent
+          ? `
+            <button
+              id="toggle-agent-rail-btn"
+              class="icon-btn ${state.agentRailOpen ? "active" : ""}"
+              type="button"
+              title="Toggle assistant panel (${MOD_LABEL}+J)"
+            >
+              ${icon("panel")}
+            </button>
+          `
+          : ""
+      }
+    </div>
+  `;
+
+  container.innerHTML = `${navHtml}${centerHtml}${actionsHtml}`;
+
+  container.querySelectorAll("[data-nav-btn]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const action = el.getAttribute("data-nav-btn") as "back" | "forward" | "reload" | null;
+      const tabId = el.getAttribute("data-tab");
+      if (action && tabId) actions.onNavTab(tabId, action);
+    });
+  });
+
+  const addrInput = container.querySelector("[data-address-tab]") as HTMLInputElement | null;
+  addrInput?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const tabId = addrInput.getAttribute("data-address-tab");
+      if (tabId) actions.onNavigateAddress(tabId, addrInput.value);
+    }
+  });
+
+  container.querySelector("#top-cmd-addr-btn")?.addEventListener("click", () => {
+    actions.onOpenCommandBar();
+  });
+
+  if (!tabsVisible) {
+    container.querySelector("#tab-strip-add-btn")?.addEventListener("click", () => {
+      actions.onNewTab();
+    });
+  }
+
+  container.querySelectorAll("[data-autofill-tab]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tabId = (btn as HTMLElement).getAttribute("data-autofill-tab");
+      if (tabId) actions.onAutofillTab(tabId);
+    });
+  });
+
+  container.querySelectorAll("[data-watch-tab]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tabId = (btn as HTMLElement).getAttribute("data-watch-tab");
+      if (tabId) {
+        actions.onWatchTab(tabId);
+        (btn as HTMLElement).classList.add("active");
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-codes-pill-tab]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const tabId = (btn as HTMLElement).getAttribute("data-codes-pill-tab");
+      if (tabId) actions.onToggleCodesPopover(tabId);
+    });
+  });
+
+  container.querySelectorAll("[data-copy-promo-code]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const code = el.getAttribute("data-copy-promo-code") || "";
+      if (code && navigator.clipboard) {
+        void navigator.clipboard.writeText(code);
+        el.innerHTML = `<strong>${escapeHtml(code)}</strong> <span class="muted">Copied</span>`;
+      }
+    });
+  });
+
+  container.querySelector("#tab-strip-compare-btn")?.addEventListener("click", () => {
+    actions.onToggleCompareMode();
+  });
+
+  container.querySelector("#compare-run-comparer-btn")?.addEventListener("click", () => {
+    actions.onRunComparer();
+  });
+
+  container.querySelector("#compare-exit-btn")?.addEventListener("click", () => {
+    actions.onExitCompare();
+  });
+
+  container.querySelector("#toggle-agent-rail-btn")?.addEventListener("click", () => {
+    actions.onToggleAgentRail();
+  });
+}
+
 export function renderTabStrip(actions: TabStripActions): void {
   const container = document.getElementById("region-tab-strip");
   if (!container) return;
 
   const detail = state.activeDetail;
-  if (!detail || state.showKnowledgeView) {
-    container.innerHTML = `
-      <div class="tab-strip-left">
-        <span class="muted">${state.showKnowledgeView ? "knowledge base" : "start screen"}</span>
-      </div>
-      <div class="tab-strip-right"></div>
-    `;
+  if (!detail || state.showKnowledgeView || state.showBrainView) {
+    container.classList.add("hidden");
+    container.innerHTML = "";
     return;
   }
 
   const openTabs = detail.tabs.filter((t) => t.is_open);
   const isMailConv = detail.conversation.origin === "mail";
   const isNewsConv = detail.conversation.origin === "news";
+
+  if (!isMailConv && !isNewsConv && openTabs.length === 0) {
+    container.classList.add("hidden");
+    container.innerHTML = "";
+    return;
+  }
+
+  container.classList.remove("hidden");
+
   const isChatActive = state.activeTabId === "chat" && !state.compareMode;
   const counts = state.mailCounts;
   const totalUnreadAll =
     state.mailAccounts.length > 0
-      ? state.mailAccounts.reduce((acc, a) => acc + (a.inbox_unread ?? 0), 0)
+      ? state.mailAccounts.reduce((acc, a) => acc + (a.inbox_unread ?? 0), 0) ||
+        counts.inbox_unread
       : counts.inbox_unread;
 
   const mailAccountTabsHtml =
     isMailConv && state.mailAccounts.length > 0
       ? `
-        <div
-          class="tab-item ${state.mailActiveAccountId === null ? "active" : ""}"
+        <span class="tabs-sep"></span>
+        <button
+          type="button"
+          class="tab ${state.mailActiveAccountId === null ? "active" : ""}"
           data-mail-acct-tab="all"
           title="Common unified view across all configured email accounts"
         >
-          <span>[ all mail${totalUnreadAll > 0 ? ` ${totalUnreadAll}` : ""} ]</span>
-        </div>
+          <span>All mail</span>
+          ${totalUnreadAll > 0 ? `<span class="count">${totalUnreadAll}</span>` : ""}
+        </button>
         ${state.mailAccounts
           .map((acct) => {
             const isAcctSelected = state.mailActiveAccountId === acct.id;
             const acctName = acct.email || acct.label;
             const acctUnread = acct.inbox_unread ?? 0;
             return `
-              <div
-                class="tab-item ${isAcctSelected ? "active" : ""}"
+              <button
+                type="button"
+                class="tab ${isAcctSelected ? "active" : ""}"
                 data-mail-acct-tab="${escapeHtml(acct.id)}"
                 title="Filter mail lanes to ${escapeHtml(acctName)}"
               >
-                <span>[ ${escapeHtml(acctName)}${acctUnread > 0 ? ` ${acctUnread}` : ""} ]</span>
-              </div>
+                <span class="truncate">${escapeHtml(acctName)}</span>
+                ${acctUnread > 0 ? `<span class="count">${acctUnread}</span>` : ""}
+              </button>
             `;
           })
           .join("")}
-        <button id="tab-strip-add-mail-acct-btn" title="Add another email account in Settings">[ + account ]</button>
-        <span class="muted">·</span>
+        <button id="tab-strip-add-mail-acct-btn" class="icon-btn" type="button" title="Add email account in Settings">${icon("plus", "ico-sm")}</button>
+        <span class="tabs-sep"></span>
       `
       : "";
 
   const mailLaneTabsHtml = isMailConv
     ? `
       ${mailAccountTabsHtml}
-      <div class="tab-item ${!state.compareMode && state.activeTabId === "lane:inbox" ? "active" : ""}" data-lane-tab="inbox">
-        <span>[ inbox${counts.inbox_unread > 0 ? ` ${counts.inbox_unread}` : ""} ]</span>
-      </div>
-      <div class="tab-item ${!state.compareMode && state.activeTabId === "lane:pings" ? "active" : ""}" data-lane-tab="pings">
-        <span>[ pings${counts.pings > 0 ? ` ${counts.pings}` : ""} ]</span>
-      </div>
-      <div class="tab-item ${!state.compareMode && state.activeTabId === "lane:orders" ? "active" : ""}" data-lane-tab="orders">
-        <span>[ orders${counts.orders > 0 ? ` ${counts.orders}` : ""} ]</span>
-      </div>
-      <div class="tab-item ${!state.compareMode && state.activeTabId === "lane:promos" ? "active" : ""}" data-lane-tab="promos">
-        <span>[ promos${counts.promos > 0 ? ` ${counts.promos}` : ""} ]</span>
-      </div>
+      <button type="button" class="tab ${!state.compareMode && state.activeTabId === "lane:inbox" ? "active" : ""}" data-lane-tab="inbox">
+        <span>Inbox</span>
+        ${counts.inbox_unread > 0 ? `<span class="count">${counts.inbox_unread}</span>` : ""}
+      </button>
+      <button type="button" class="tab ${!state.compareMode && state.activeTabId === "lane:pings" ? "active" : ""}" data-lane-tab="pings">
+        <span>Pings</span>
+        ${counts.pings > 0 ? `<span class="count">${counts.pings}</span>` : ""}
+      </button>
+      <button type="button" class="tab ${!state.compareMode && state.activeTabId === "lane:orders" ? "active" : ""}" data-lane-tab="orders">
+        <span>Orders</span>
+        ${counts.orders > 0 ? `<span class="count">${counts.orders}</span>` : ""}
+      </button>
+      <button type="button" class="tab ${!state.compareMode && state.activeTabId === "lane:promos" ? "active" : ""}" data-lane-tab="promos">
+        <span>Promos</span>
+        ${counts.promos > 0 ? `<span class="count">${counts.promos}</span>` : ""}
+      </button>
     `
     : "";
 
@@ -91,67 +413,64 @@ export function renderTabStrip(actions: TabStripActions): void {
   const newsTopicCount = state.newsTopics.length || state.sidecar.news?.topics || 0;
   const newsLaneTabsHtml = isNewsConv
     ? `
-      <div class="tab-item ${!state.compareMode && state.activeTabId === "news-lane:stories" ? "active" : ""}" data-news-lane-tab="stories" title="Clustered stories ranked by source family independence & recency">
-        <span>[ top stories${newsClusterCount > 0 ? ` ${newsClusterCount}` : ""} ]</span>
-      </div>
-      <div class="tab-item ${!state.compareMode && state.activeTabId === "news-lane:foryou" ? "active" : ""}" data-news-lane-tab="foryou" title="Personalized from your Brain & Mail topics (local PII-scrubbed) + 25% trusted explore">
-        <span>[ for you ]</span>
-      </div>
-      <div class="tab-item ${!state.compareMode && state.activeTabId === "news-lane:perspectives" ? "active" : ""}" data-news-lane-tab="perspectives" title="Side-by-side conflicting source families & blind spots">
-        <span>[ perspectives ]</span>
-      </div>
-      <div class="tab-item ${!state.compareMode && state.activeTabId === "news-lane:topics" ? "active" : ""}" data-news-lane-tab="topics" title="Tracked news beats and story watches">
-        <span>[ topics${newsTopicCount > 0 ? ` ${newsTopicCount}` : ""} ]</span>
-      </div>
-      <div class="tab-item ${!state.compareMode && state.activeTabId === "news-lane:sources" ? "active" : ""}" data-news-lane-tab="sources" title="222+ hand-scored sources, 31 categories, wire families & RSS feeds (30% cap)">
-        <span>[ sources ]</span>
-      </div>
+      <button type="button" class="tab ${!state.compareMode && state.activeTabId === "news-lane:stories" ? "active" : ""}" data-news-lane-tab="stories" title="Clustered stories ranked by source family independence &amp; recency">
+        <span>Top stories</span>
+        ${newsClusterCount > 0 ? `<span class="count">${newsClusterCount}</span>` : ""}
+      </button>
+      <button type="button" class="tab ${!state.compareMode && state.activeTabId === "news-lane:foryou" ? "active" : ""}" data-news-lane-tab="foryou" title="Personalized from your Brain &amp; Mail topics (local PII-scrubbed) + 25% trusted explore">
+        <span>For you</span>
+      </button>
+      <button type="button" class="tab ${!state.compareMode && state.activeTabId === "news-lane:perspectives" ? "active" : ""}" data-news-lane-tab="perspectives" title="Side-by-side conflicting source families &amp; blind spots">
+        <span>Perspectives</span>
+      </button>
+      <button type="button" class="tab ${!state.compareMode && state.activeTabId === "news-lane:topics" ? "active" : ""}" data-news-lane-tab="topics" title="Tracked news beats and story watches">
+        <span>Topics</span>
+        ${newsTopicCount > 0 ? `<span class="count">${newsTopicCount}</span>` : ""}
+      </button>
+      <button type="button" class="tab ${!state.compareMode && state.activeTabId === "news-lane:sources" ? "active" : ""}" data-news-lane-tab="sources" title="Hand-scored sources, RSS feeds &amp; trust sliders">
+        <span>Sources</span>
+      </button>
     `
     : "";
 
   container.innerHTML = `
-    <div class="tab-strip-left">
-      <div class="tab-item ${isChatActive ? "active" : ""}" data-tab-id="chat">
-        <span>[ chat ]</span>
-      </div>
-      ${mailLaneTabsHtml}
-      ${newsLaneTabsHtml}
-      ${openTabs
-        .map((tab, idx) => {
-          const isActive =
-            !state.compareMode && state.activeTabId === tab.id;
-          const isSelectedForCompare = state.compareTabIds.includes(tab.id);
-          const domain =
-            tab.kind === "mail"
-              ? "mail"
-              : tab.kind === "compose"
-                ? "compose"
-                : extractDomain(tab.url);
-          const shortTitle = (tab.title || domain).slice(0, 22);
-          return `
-            <div
-              class="tab-item ${isActive ? "active" : ""} ${isSelectedForCompare ? "selected-compare" : ""}"
-              data-site-tab-id="${escapeHtml(tab.id)}"
-              title="source [${idx + 1}] in chat context · ${escapeHtml(tab.title || tab.url)}"
-            >
-              <span class="truncate">[${idx + 1}] ${escapeHtml(domain)} · ${escapeHtml(shortTitle)}</span>
-              <button class="tab-close-btn" data-close-tab-id="${escapeHtml(tab.id)}" title="close tab and remove from context">x</button>
-            </div>
-          `;
-        })
-        .join("")}
-      <button id="tab-strip-add-btn" title="new tab [${MOD_LABEL}+t]">[ + ]</button>
-    </div>
-
-    <div class="tab-strip-right">
-      <button
-        id="tab-strip-compare-btn"
-        class="${state.compareMode ? "active" : ""}"
-        title="select 2-4 tabs with ${MOD_LABEL}+click then press ${MOD_LABEL}+m"
-      >
-        compare: ${state.compareTabIds.length >= 2 ? `${state.compareTabIds.length} tabs` : "select tabs"} [${MOD_LABEL}+m]
-      </button>
-    </div>
+    <button type="button" class="tab ${isChatActive ? "active" : ""}" data-tab-id="chat">
+      ${icon("chat", "ico-sm")}
+      <span>Chat</span>
+    </button>
+    ${mailLaneTabsHtml}
+    ${newsLaneTabsHtml}
+    ${openTabs
+      .map((tab, idx) => {
+        const isActive = !state.compareMode && state.activeTabId === tab.id;
+        const isSelectedForCompare = state.compareTabIds.includes(tab.id);
+        const domain =
+          tab.kind === "mail"
+            ? "Mail"
+            : tab.kind === "compose"
+              ? "Compose"
+              : extractDomain(tab.url);
+        const leadIcon =
+          tab.kind === "mail"
+            ? icon("mail", "ico-sm")
+            : tab.kind === "compose"
+              ? icon("compose", "ico-sm")
+              : icon("globe", "ico-sm");
+        const label = tab.title || domain;
+        return `
+          <div
+            class="tab ${isActive ? "active" : ""} ${isSelectedForCompare ? "selected-compare" : ""}"
+            data-site-tab-id="${escapeHtml(tab.id)}"
+            title="Source [${idx + 1}] · ${escapeHtml(tab.title || tab.url)}"
+          >
+            ${leadIcon}
+            <span class="truncate">${escapeHtml(label)}</span>
+            <button class="tab-close-btn" type="button" data-close-tab-id="${escapeHtml(tab.id)}" title="Close tab">${icon("x", "ico-sm")}</button>
+          </div>
+        `;
+      })
+      .join("")}
+    <button id="tab-strip-add-btn" class="icon-btn" type="button" title="New tab (${MOD_LABEL}+T)">${icon("plus", "ico-sm")}</button>
   `;
 
   container.querySelector('[data-tab-id="chat"]')?.addEventListener("click", () => {
@@ -217,12 +536,6 @@ export function renderTabStrip(actions: TabStripActions): void {
     .querySelector("#tab-strip-add-btn")
     ?.addEventListener("click", () => {
       actions.onNewTab();
-    });
-
-  container
-    .querySelector("#tab-strip-compare-btn")
-    ?.addEventListener("click", () => {
-      actions.onToggleCompareMode();
     });
 }
 

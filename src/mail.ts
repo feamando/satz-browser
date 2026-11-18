@@ -1309,9 +1309,6 @@ export function renderEmailTabHeaderHtml(
           <button data-email-reply-all="${escapeHtml(mid)}">[reply all]</button>
           <button data-email-forward="${escapeHtml(mid)}">[forward]</button>
           <button data-email-hide="${escapeHtml(mid)}">[hide (e)]</button>
-          <button id="toggle-agent-rail-btn" class="${state.agentRailOpen ? "active" : ""}">
-            [agent rail ${MOD_LABEL}+j]
-          </button>
         </div>
       </div>
       <div class="rail-row">

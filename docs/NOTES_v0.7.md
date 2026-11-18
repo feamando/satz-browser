@@ -32,3 +32,14 @@ Plan: `docs/PLAN_v0.7_design_system.md` · Spec: `docs/design/DESIGN_SYSTEM.md` 
   - During D2–D8 transition, `#region-agent` still hosts legacy `#chat-sources-rail`, `#site-tab-agent-rail`, and `#compare-agent-rail` contents and preserves `#toggle-agent-rail-btn` in toolbars until D3 moves the panel toggle into `.top` and D4/D8 migrate inner widgets.
   - Added `.shell.agent-folded > #region-agent` zero-width/zero-gap compensation in `src/style.css` so Floating mode's right grid gap collapses cleanly without leaving a right sliver.
 - **Checks:** `npm run build` passed; `cargo check --manifest-path src-tauri/Cargo.toml` passed; `python -m pytest sidecar` (`42 passed`); Besley 700 + Inter 400 loaded with `0` console errors; 12 screenshots verified under `docs/smoke/v0.7/d2/windows/`.
+
+### D3 · Top bar & tab strip
+- **Files:** `src/tabs.ts`, `src/main.ts`, `src/mail.ts`, `src/style.css`
+- **What changed:**
+  - Added `renderTopBar` (`#region-top`, class `.top`) with navigation arrows (`back`, `fwd`, `reload`), centered `.addr` bar (lock/globe icon, `#address-input-${tabId}` on site tabs, promo codes `.pill` + `.menu` popover, or `Mod+K` command bar trigger on Chat/Mail/News), page actions (`Fill login`, `Watch`, `Compare`, `Exit`), and `#toggle-agent-rail-btn`.
+  - Migrated `renderTabStrip` (`#region-tab-strip`, class `.tabs`) to v1 `.tab` items with `.count` badges and SVG close icons; hid `#region-tab-strip` cleanly when viewing Home, Settings, Brain, or zero-tab Chat conversations (moving `#tab-strip-add-btn` to `.top-actions` when hidden).
+  - Removed the legacy `.site-tab-toolbar` from `renderSiteTabViewport`, the outer toolbar from `renderCompareViewport`, and the duplicate `#toggle-agent-rail-btn` from `renderEmailTabHeaderHtml`.
+- **Deviations / Notes:**
+  - During D3–D5, Mail account selector pills (`All mail` + accounts) remain in `#region-tab-strip` without `[brackets]` until D6 moves account selection into `.acct-bar` inside `src/mail.ts`.
+  - `#region-top` hides (`display: none`) on Home, Settings, and Brain views so each surface leads cleanly with its own header.
+- **Checks:** `npm run build` passed; `cargo check --manifest-path src-tauri/Cargo.toml` passed; `python -m pytest sidecar -q` (`42 passed`); 12 screenshots verified under `docs/smoke/v0.7/d3/windows/` with `0` console errors.
