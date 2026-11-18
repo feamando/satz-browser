@@ -35,7 +35,7 @@ export function renderStatusLine(): void {
   ).length;
   const queueLen = state.sidecar.ingest_queue_len;
   const learnState = state.sidecar.pause_learning ? " [paused]" : "";
-  const errors = state.sidecar.errors ?? [];
+  const errors = [...(state.sidecar.errors ?? []), ...state.uiErrors];
   const errCount = errors.length;
   const errBtnHtml =
     errCount > 0
@@ -72,7 +72,7 @@ export function renderStatusLine(): void {
 
 function renderErrorLogOverlay(): void {
   let overlay = document.getElementById("region-error-log-overlay");
-  const errors = state.sidecar.errors ?? [];
+  const errors = [...(state.sidecar.errors ?? []), ...state.uiErrors];
   if (!state.showErrorLog || errors.length === 0) {
     if (overlay) {
       overlay.remove();
@@ -126,6 +126,7 @@ function renderErrorLogOverlay(): void {
   overlay.querySelector("#error-log-clear-btn")?.addEventListener("click", async () => {
     await sidecarClearErrors();
     state.sidecar.errors = [];
+    state.uiErrors = [];
     state.showErrorLog = false;
     renderStatusLine();
   });

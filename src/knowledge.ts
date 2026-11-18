@@ -5,13 +5,20 @@ import {
 import {
   escapeHtml,
   formatRelativeTime,
+  getUiLayoutPref,
+  getUiThemePref,
   IS_MAC,
   MOD_LABEL,
+  setUiLayoutPref,
+  setUiThemePref,
   state,
+  type UiLayoutPref,
+  type UiThemePref,
 } from "./state";
 import type { BrainEntityItem, CloudProviderInfo } from "./types";
 
 export interface KnowledgeActions {
+  onChangeAppearance?: () => void;
   onTogglePauseLearning: (paused: boolean) => void;
   onDeletePassage: (passageId: string) => void;
   onDeleteBrainEntity?: (slug: string) => void;
@@ -345,6 +352,19 @@ export function renderKnowledgeView(
               : "none [locked - unlock a profile to save to your Brain, Mail, and password vault; browsing uses an ephemeral in-memory store]"
           } · brain entities: ${brainEntities.length} · ${escapeHtml(brainRankingLabel)} · indexed bookmarks: ${bookmarksIndexed.length} · ingest queue: ${kb.queue_len}
         </div>
+        <div class="vault-form-row">
+          <span class="muted">Theme</span>
+          <div class="seg" role="group" aria-label="Theme">
+            <button type="button" data-ui-theme="system" aria-pressed="${getUiThemePref() === "system"}">System</button>
+            <button type="button" data-ui-theme="light" aria-pressed="${getUiThemePref() === "light"}">Light</button>
+            <button type="button" data-ui-theme="dark" aria-pressed="${getUiThemePref() === "dark"}">Dark</button>
+          </div>
+          <span class="muted">Layout</span>
+          <div class="seg" role="group" aria-label="Layout">
+            <button type="button" data-ui-layout="floating" aria-pressed="${getUiLayoutPref() === "floating"}">Floating</button>
+            <button type="button" data-ui-layout="flush" aria-pressed="${getUiLayoutPref() === "flush"}">Flush</button>
+          </div>
+        </div>
         ${
           state.profileStatusMessage
             ? `<div class="profile-status-banner">${escapeHtml(state.profileStatusMessage)}</div>`
@@ -582,6 +602,26 @@ export function renderKnowledgeView(
       </div>
     </div>
   `;
+
+  container.querySelectorAll("[data-ui-theme]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const val = btn.getAttribute("data-ui-theme") as UiThemePref | null;
+      if (!val) return;
+      setUiThemePref(val);
+      actions.onChangeAppearance?.();
+      renderKnowledgeView(container, actions);
+    });
+  });
+
+  container.querySelectorAll("[data-ui-layout]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const val = btn.getAttribute("data-ui-layout") as UiLayoutPref | null;
+      if (!val) return;
+      setUiLayoutPref(val);
+      actions.onChangeAppearance?.();
+      renderKnowledgeView(container, actions);
+    });
+  });
 
   container.querySelectorAll("[data-settings-accordion]").forEach((hdr) => {
     hdr.addEventListener("click", (e) => {

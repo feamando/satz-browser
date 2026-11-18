@@ -76,6 +76,7 @@ import {
   updateStreamingStatus,
 } from "./chat";
 import { bindKeyboardShortcuts } from "./keys";
+import { fontsReady } from "./design-system/brand";
 import { renderBrainView, renderKnowledgeView } from "./knowledge";
 import {
   refreshMailState,
@@ -102,6 +103,7 @@ import {
   updateStartDigestInPlace,
 } from "./start";
 import {
+  applyUiPreferences,
   classifyStartInput,
   escapeHtml,
   extractDomain,
@@ -364,7 +366,20 @@ function resetToNewConversation(): void {
 }
 
 async function initApp(): Promise<void> {
+  applyUiPreferences();
   mountShellSkeleton();
+
+  void fontsReady().then(async () => {
+    await document.fonts.ready;
+    if (!document.fonts.check("700 16px Besley")) {
+      state.uiErrors.push({
+        ts: Math.floor(Date.now() / 1000),
+        scope: "fonts",
+        message: "Bundled Besley 700 font unavailable; using fallback display font.",
+      });
+      renderStatusLine();
+    }
+  });
 
   bindKeyboardShortcuts({
     onOpenHome: () => {
@@ -1225,6 +1240,10 @@ function renderViewportRegion(): void {
       onCloseKnowledgeView: () => {
         state.showKnowledgeView = false;
         renderAllRegions();
+      },
+      onChangeAppearance: () => {
+        scheduleWebviewLayoutSync();
+        renderStatusLine();
       },
     });
     scheduleWebviewLayoutSync();

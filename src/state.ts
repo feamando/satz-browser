@@ -27,10 +27,81 @@ import type {
   NewsSourceEntry,
   NewsStoryCluster,
   NewsTopicItem,
+  SidecarErrorEntry,
   SidecarHealth,
   SourceStatEntry,
   WatchItem,
 } from "./types";
+
+export type UiThemePref = "system" | "light" | "dark";
+export type UiLayoutPref = "floating" | "flush";
+
+const THEME_STORAGE_KEY = "satz.ui.theme";
+const LAYOUT_STORAGE_KEY = "satz.ui.layout";
+
+export function getUiThemePref(): UiThemePref {
+  try {
+    const v = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (v === "light" || v === "dark" || v === "system") return v;
+  } catch {
+    // Ignore storage access errors
+  }
+  return "system";
+}
+
+export function setUiThemePref(pref: UiThemePref): void {
+  try {
+    window.localStorage.setItem(THEME_STORAGE_KEY, pref);
+  } catch {
+    // Ignore storage access errors
+  }
+  applyUiPreferences();
+}
+
+export function getUiLayoutPref(): UiLayoutPref {
+  try {
+    const v = window.localStorage.getItem(LAYOUT_STORAGE_KEY);
+    if (v === "flush" || v === "floating") return v;
+  } catch {
+    // Ignore storage access errors
+  }
+  return "floating";
+}
+
+export function setUiLayoutPref(pref: UiLayoutPref): void {
+  try {
+    window.localStorage.setItem(LAYOUT_STORAGE_KEY, pref);
+  } catch {
+    // Ignore storage access errors
+  }
+  applyUiPreferences();
+}
+
+export function getResolvedTheme(): "light" | "dark" {
+  const pref = getUiThemePref();
+  if (pref === "light" || pref === "dark") return pref;
+  if (
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-color-scheme: dark)").matches
+  ) {
+    return "dark";
+  }
+  return "light";
+}
+
+export function applyUiPreferences(): void {
+  if (typeof document === "undefined") return;
+  const root = document.documentElement;
+  const theme = getUiThemePref();
+  const layout = getUiLayoutPref();
+  if (theme === "light" || theme === "dark") {
+    root.setAttribute("data-theme", theme);
+  } else {
+    root.removeAttribute("data-theme");
+  }
+  root.setAttribute("data-layout", layout);
+}
 
 export const IS_MAC =
   typeof navigator !== "undefined" &&
@@ -88,6 +159,7 @@ export interface AppState {
   revealedPasswords: Record<string, string>;
   sourceStats: Record<string, SourceStatEntry>;
   showErrorLog: boolean;
+  uiErrors: SidecarErrorEntry[];
   mailAccounts: MailAccountItem[];
   mailPresets: MailPreset[];
   mailActiveAccountId: string | null;
@@ -250,6 +322,7 @@ export const state: AppState = {
   revealedPasswords: {},
   sourceStats: {},
   showErrorLog: false,
+  uiErrors: [],
   mailAccounts: [],
   mailPresets: [],
   mailActiveAccountId: null,

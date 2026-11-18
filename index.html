@@ -4,9 +4,28 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>satz</title>
+    <script>
+      try {
+        var t = localStorage.getItem("satz.ui.theme");
+        if (t === "light" || t === "dark") {
+          document.documentElement.setAttribute("data-theme", t);
+        } else {
+          document.documentElement.removeAttribute("data-theme");
+        }
+        var l = localStorage.getItem("satz.ui.layout");
+        document.documentElement.setAttribute(
+          "data-layout",
+          l === "flush" ? "flush" : "floating"
+        );
+      } catch (_) {
+        document.documentElement.setAttribute("data-layout", "floating");
+      }
+    </script>
+    <link rel="stylesheet" href="/src/design-system/tokens.css" />
+    <link rel="stylesheet" href="/src/design-system/components.css" />
     <link rel="stylesheet" href="/src/style.css" />
   </head>
-  <body>
+  <body class="ds">
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

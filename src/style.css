@@ -14,22 +14,10 @@
   font-display: swap;
 }
 
-:root {
-  --bg: #000000;
-  --surface: #0d0d0d;
-  --hover: #1a1a1a;
-  --border: #333333;
-  --muted: #777777;
-  --fg: #e8e8e8;
-  --font-mono: "JetBrains Mono", "Cascadia Mono", "Cascadia Code", Consolas, "SF Mono", Menlo, monospace;
-}
-
 * {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
-  border-radius: 0;
-  box-shadow: none;
 }
 
 html,
@@ -40,10 +28,9 @@ body,
   overflow: hidden;
   background-color: var(--bg);
   color: var(--fg);
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   font-size: 13px;
   line-height: 1.5;
-  font-variant-numeric: tabular-nums;
   user-select: none;
 }
 
@@ -51,15 +38,17 @@ input,
 button,
 textarea,
 select {
-  font-family: var(--font-mono);
+  font-family: inherit;
   font-size: 13px;
   line-height: 1.5;
-  font-variant-numeric: tabular-nums;
   color: var(--fg);
+  outline: none;
+}
+
+:where(input, textarea, select, button:not(.seg > button)) {
   background-color: var(--bg);
   border: 1px solid var(--border);
   border-radius: 0;
-  outline: none;
 }
 
 input:focus,
@@ -68,13 +57,13 @@ select:focus {
   border-color: var(--fg);
 }
 
-button {
+:where(button:not(.seg > button)) {
   cursor: pointer;
   padding: 2px 8px;
   background-color: var(--surface);
 }
 
-button:hover {
+:where(button:not(.seg > button)):hover {
   background-color: var(--hover);
 }
 
