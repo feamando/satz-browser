@@ -2657,6 +2657,7 @@ class SatzNewsEngine:
                 if r in ("user", "assistant") and c:
                     hist_lines.append(f"{r.upper()}: {c}")
             hist_blk = ("PRIOR DISCUSSION:\n" + "\n".join(hist_lines) + "\n\n") if hist_lines else ""
+            t_target = self._primary_translation_target()
             sys_p = (
                 "Compare reporting on the selected news topic objectively across the provided independent sources. "
                 "Structure clearly in markdown with:\n"

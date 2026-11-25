@@ -12,6 +12,8 @@ import {
   apiDeleteConversation,
   apiEnsureMailConversation,
   apiEnsureNewsConversation,
+  apiEnsureNewsPerspectivesConversation,
+  apiEnsureNewsSettingsConversation,
   apiEnsureDrivesConversation,
   apiEnsureSettingsConversation,
   apiExecuteTabAction,
@@ -83,8 +85,12 @@ import {
   sidecarLogBehaviorEvent,
   sidecarLookupDomainRecipe,
   sidecarMatchPasswordForUrl,
+  sidecarFetchNewsSettingsOnboard,
+  sidecarManageNewsFeed,
+  sidecarManageNewsTopic,
   sidecarMineSkillProposals,
   sidecarStreamNewsChat,
+  sidecarStreamNewsPerspectives,
   sidecarOverrideI18n,
   sidecarPrepareUnsubscribeTask,
   sidecarRecordDomainRecipe,
@@ -187,7 +193,12 @@ import {
   sidecarSaveMailAttachment,
   sidecarUpdateMailSettings,
 } from "./mail";
-import { paintNewsWordmark, refreshNewsState, renderNewsLaneView } from "./news";
+import {
+  paintNewsWordmark,
+  refreshNewsState,
+  renderNewsLaneView,
+  renderNewsSettingsManualView,
+} from "./news";
 import { renderRail } from "./rail";
 import { renderSourcesPanel } from "./sources";
 import {
@@ -614,6 +625,8 @@ async function syncAfterProfileAuthChange(unlocked: boolean): Promise<void> {
     state.drivesFolderKey = "";
     state.drivesParentKey = null;
     state.drivesBreadcrumbs = [{ key: "", name: "Drives" }];
+    state.newsPerspectivesDetail = null;
+    state.newsPerspectivesStream = null;
     state.googleOAuthSessionId = null;
     state.googleOAuthMessage = "";
     const [kb, mCfg, pol] = await Promise.all([
@@ -1143,7 +1156,8 @@ async function handleStartGoogleOAuthInBrowserTab(payload?: {
   state.mailStatusMessage = t("main.oauth_opened_mail");
 
   // Open Google consent URL in a real live Satz Browser tab (stay inside Settings if opened from Settings Chat)
-  if (state.activeDetail?.conversation.origin === "settings") {
+  const oauthOrigin = state.activeDetail?.conversation.origin;
+  if (state.activeDetail && (oauthOrigin === "settings" || oauthOrigin === "news_settings")) {
     const cid = state.activeDetail.conversation.id;
     const tab = await apiOpenTab(cid, authUrl, t("main.oauth_google_signin_tab"));
     state.activeDetail = await apiGetConversation(cid);
@@ -1632,6 +1646,8 @@ async function initApp(): Promise<void> {
     await apiEnsureNewsConversation();
     await apiEnsureDrivesConversation();
     await apiEnsureSettingsConversation();
+    await apiEnsureNewsSettingsConversation();
+    await apiEnsureNewsPerspectivesConversation();
   } catch {
     // Non-fatal if DB call fails in browser-only Vite dev preview
   }
@@ -1902,7 +1918,8 @@ function setShellAgentFolded(folded: boolean): void {
 }
 
 function toggleAgentRail(): void {
-  if (state.activeDetail?.conversation.origin === "settings") {
+  const orig = state.activeDetail?.conversation.origin;
+  if (orig === "settings" || orig === "news_settings") {
     return;
   }
   state.agentRailOpen = !state.agentRailOpen;
@@ -2645,6 +2662,16 @@ async function loadSettingsPanelData(): Promise<void> {
     if (trCfg && trCfg.ok) state.contentTranslationConfig = trCfg;
   }
   await Promise.all([refreshMailState(), syncAppI18nState(true, true)]);
+  if (state.knowledge.profile?.unlocked) {
+    try {
+      await refreshNewsState("settings");
+      if (state.activeDetail?.conversation.origin === "news_settings") {
+        await seedNewsSettingsOnboardingIfEmpty(state.activeDetail.conversation.id);
+      }
+    } catch {
+      // Non-fatal if sidecar warming
+    }
+  }
 }
 
 async function openSettingsConversation(targetTab = "chat"): Promise<void> {
@@ -2663,6 +2690,211 @@ async function openSettingsConversation(targetTab = "chat"): Promise<void> {
     ) {
       renderAllRegions();
     }
+  }
+}
+
+async function seedNewsSettingsOnboardingIfEmpty(convId: string): Promise<void> {
+  const detail = state.activeDetail;
+  if (
+    !detail ||
+    detail.conversation.id !== convId ||
+    detail.messages.length > 0 ||
+    !state.knowledge.profile?.unlocked
+  ) {
+    return;
+  }
+  const ob = await sidecarFetchNewsSettingsOnboard();
+  if (!ob.ok || !ob.needs_onboarding || !ob.prompt_text) {
+    return;
+  }
+  if ((state.activeDetail?.messages.length ?? 0) > 0) return;
+  const savedMsg = await apiAddMessage(
+    convId,
+    "assistant",
+    ob.prompt_text,
+    "news-settings-onboard",
+    JSON.stringify([]),
+    null,
+    null,
+    null,
+    JSON.stringify({ ui_cards: ob.ui_cards ?? [] })
+  );
+  if (ob.ui_cards && ob.ui_cards.length > 0) {
+    state.messageUiCards[savedMsg.id] = ob.ui_cards;
+  }
+  state.activeDetail = await apiGetConversation(convId);
+  renderAllRegions();
+}
+
+async function openNewsSettingsConversation(targetTab = "chat"): Promise<void> {
+  const nsConv =
+    state.conversations.find((c) => c.origin === "news_settings") ??
+    (await apiEnsureNewsSettingsConversation());
+  await selectConversation(nsConv.id);
+  try {
+    await refreshNewsState("settings");
+  } catch {
+    // Profile may be locked
+  }
+  if (targetTab !== "chat") {
+    state.activeTabId = targetTab;
+    state.compareMode = false;
+    renderAllRegions();
+    return;
+  }
+  await seedNewsSettingsOnboardingIfEmpty(nsConv.id);
+  renderAllRegions();
+}
+
+async function openNewsHome(lane: NewsLane = "stories"): Promise<void> {
+  const newsConv =
+    state.conversations.find((c) => c.origin === "news") ??
+    (await apiEnsureNewsConversation());
+  state.newsActiveLane = lane;
+  await selectConversation(newsConv.id, { targetTabId: `news-lane:${lane}` });
+  await refreshNewsState(lane);
+  renderAllRegions();
+}
+
+async function handleSendPerspectivesTopic(
+  topic: string,
+  clusterId?: string
+): Promise<void> {
+  const cleanTopic = topic.trim();
+  if (!cleanTopic || state.newsPerspectivesStream) return;
+
+  state.newsActiveLane = "perspectives";
+  state.activeTabId = "news-lane:perspectives";
+
+  const pConv =
+    state.conversations.find((c) => c.origin === "news_perspectives") ??
+    (await apiEnsureNewsPerspectivesConversation());
+  const pConvId = pConv.id;
+  state.lastPromptByConv[pConvId] = cleanTopic;
+
+  await apiAddMessage(pConvId, "user", cleanTopic, null, JSON.stringify([]));
+  state.newsPerspectivesDetail = await apiGetConversation(pConvId);
+  state.newsPerspectivesStream = {
+    convId: pConvId,
+    model: state.selectedModel,
+    text: "",
+    status: t("main.stream_web_search"),
+    phase: "collecting",
+    startedAt: Date.now(),
+    steps: [],
+    lastUserPrompt: cleanTopic,
+  };
+  renderViewportRegion();
+
+  let lastPaint = 0;
+  const paintThrottled = (force = false) => {
+    const now = Date.now();
+    if (force || now - lastPaint >= 75) {
+      lastPaint = now;
+      renderViewportRegion();
+    }
+  };
+
+  try {
+    const history = (state.newsPerspectivesDetail?.messages ?? [])
+      .slice(-6)
+      .map((m) => ({ role: m.role, content: m.content }));
+    const res = await sidecarStreamNewsPerspectives(
+      cleanTopic,
+      {
+        onStatus: (status, phase) => {
+          if (state.newsPerspectivesStream) {
+            state.newsPerspectivesStream.status = status;
+            state.newsPerspectivesStream.phase = phase || "streaming";
+            paintThrottled(false);
+          }
+        },
+        onReplaceText: (txt) => {
+          if (state.newsPerspectivesStream) {
+            state.newsPerspectivesStream.text = txt;
+            paintThrottled(true);
+          }
+        },
+        onDelta: (delta) => {
+          if (state.newsPerspectivesStream) {
+            state.newsPerspectivesStream.text += delta;
+            paintThrottled(false);
+          }
+        },
+        onSourceStats: (stats) => {
+          for (const st of stats) {
+            state.sourceStats[st.id] = st;
+          }
+        },
+      },
+      {
+        clusterId,
+        roles: state.modelConfig?.roles,
+        messages: history,
+      }
+    );
+
+    const streamedText = state.newsPerspectivesStream?.text ?? "";
+    state.newsPerspectivesStream = null;
+
+    let finalText = res.ok
+      ? res.annotated_text || res.answer || streamedText
+      : `${t("common.error_prefix")} ${res.error || t("main.err_news_query")}`;
+
+    if (
+      res.ok &&
+      res.blind_spots &&
+      res.blind_spots.length > 0 &&
+      !finalText.toLowerCase().includes("blind spot")
+    ) {
+      finalText += `\n\n**${t("news.persp_blind_spots")}**\n${res.blind_spots.map((b) => `- ${b}`).join("\n")}`;
+    }
+    if (
+      res.ok &&
+      res.system_counterfactual &&
+      !finalText.toLowerCase().includes("counterfactual")
+    ) {
+      finalText += `\n\n**${t("news.persp_counterfactual")}**: ${res.system_counterfactual}`;
+    }
+
+    const extrasObj = {
+      cited_sources: res.sources ?? [],
+      findings: res.findings ?? [],
+      answer_meta: res.answer_meta ?? undefined,
+    };
+    const savedMsg = await apiAddMessage(
+      pConvId,
+      "assistant",
+      finalText,
+      res.model || state.selectedModel,
+      JSON.stringify((res.sources ?? []).map((s) => s.url)),
+      null,
+      null,
+      null,
+      JSON.stringify(extrasObj)
+    );
+    if (res.sources && res.sources.length > 0) {
+      state.messageCitedSources[savedMsg.id] = res.sources;
+    }
+    if (res.findings && res.findings.length > 0) {
+      state.messageFindings[savedMsg.id] = res.findings;
+    }
+    if (res.answer_meta) {
+      state.messageAnswerMeta[savedMsg.id] = res.answer_meta;
+    }
+    state.newsPerspectivesDetail = await apiGetConversation(pConvId);
+    renderViewportRegion();
+  } catch (err) {
+    state.newsPerspectivesStream = null;
+    await apiAddMessage(
+      pConvId,
+      "assistant",
+      `${t("common.error_prefix")} ${String(err)}`,
+      state.selectedModel,
+      JSON.stringify([])
+    );
+    state.newsPerspectivesDetail = await apiGetConversation(pConvId);
+    renderViewportRegion();
   }
 }
 
@@ -2692,6 +2924,18 @@ function renderTabStripRegion(): void {
         });
         return;
       }
+      if (tabId === "news-settings-manual") {
+        renderWorkspaceRegions();
+        void refreshNewsState("settings").then(() => {
+          if (
+            state.activeDetail?.conversation.origin === "news_settings" &&
+            state.activeTabId === "news-settings-manual"
+          ) {
+            renderWorkspaceRegions();
+          }
+        });
+        return;
+      }
       if (tabId.startsWith("lane:")) {
         const laneName = tabId.slice(5) as "inbox" | "pings" | "orders" | "promos";
         state.mailActiveLane = laneName;
@@ -2702,7 +2946,8 @@ function renderTabStripRegion(): void {
         return;
       }
       if (tabId.startsWith("news-lane:")) {
-        const nLane = tabId.slice(10) as NewsLane;
+        const rawLane = tabId.slice(10);
+        const nLane: NewsLane = rawLane === "perspectives" ? "perspectives" : "stories";
         state.newsActiveLane = nLane;
         void (async () => {
           await refreshNewsState(nLane);
@@ -2736,6 +2981,12 @@ function renderTabStripRegion(): void {
     },
     onToggleCompareMode: () => {
       handleToggleCompareMode();
+    },
+    onOpenNewsSettings: (targetTab = "chat") => {
+      void openNewsSettingsConversation(targetTab);
+    },
+    onOpenNewsHome: () => {
+      void openNewsHome("stories");
     },
   });
 }
@@ -3493,6 +3744,69 @@ function renderViewportRegion(): void {
     return;
   }
 
+  const getNewsViewActions = () => ({
+    onOpenSiteUrl: (url: string, title: string, activate = true) => {
+      void handleOpenUrlAsTab(url, title, activate);
+    },
+    onCompareUrls: async (pairs: Array<{ url: string; title: string }>) => {
+      if (!state.activeDetail) return;
+      const cid = state.activeDetail.conversation.id;
+      const compareIds: string[] = [];
+      for (const p of pairs.slice(0, 4)) {
+        const existing = state.activeDetail.tabs.find(
+          (t) => t.is_open && t.url === p.url
+        );
+        if (existing) {
+          compareIds.push(existing.id);
+        } else {
+          const tab = await apiOpenTab(cid, p.url, p.title);
+          compareIds.push(tab.id);
+        }
+      }
+      state.activeDetail = await apiGetConversation(cid);
+      if (compareIds.length >= 2) {
+        state.compareTabIds = compareIds;
+        state.compareMode = true;
+      }
+      renderAllRegions();
+    },
+    onAskInNewsChat: async (prompt: string) => {
+      state.activeTabId = "chat";
+      state.compareMode = false;
+      renderWorkspaceRegions();
+      await handleSendChatMessage(prompt);
+    },
+    onOpenNewsSettings: (targetTab = "chat") => {
+      void openNewsSettingsConversation(targetTab);
+    },
+    onOpenNewsHome: () => {
+      void openNewsHome("stories");
+    },
+    onSendPerspectivesTopic: async (topic: string, clusterId?: string) => {
+      await handleSendPerspectivesTopic(topic, clusterId);
+    },
+    perspChatActions: {
+      ...getChatActions(),
+      onSendMessage: (txt: string) => {
+        void handleSendPerspectivesTopic(txt);
+      },
+      onRetryMessage: (txt: string) => {
+        void handleSendPerspectivesTopic(txt);
+      },
+    },
+    ...getInlineProfileGateHandlers(),
+    onRefreshShell: () => {
+      renderAllRegions();
+    },
+  });
+
+  if (state.activeTabId === "news-settings-manual") {
+    clearAgentPanel();
+    renderNewsSettingsManualView(viewport, getNewsViewActions());
+    scheduleWebviewLayoutSync();
+    return;
+  }
+
   if (state.activeTabId.startsWith("lane:")) {
     clearAgentPanel();
     renderMailLaneView(viewport, {
@@ -3529,43 +3843,7 @@ function renderViewportRegion(): void {
 
   if (state.activeTabId.startsWith("news-lane:")) {
     clearAgentPanel();
-    renderNewsLaneView(viewport, {
-      onOpenSiteUrl: (url, title, activate = true) => {
-        void handleOpenUrlAsTab(url, title, activate);
-      },
-      onCompareUrls: async (pairs) => {
-        if (!state.activeDetail) return;
-        const cid = state.activeDetail.conversation.id;
-        const compareIds: string[] = [];
-        for (const p of pairs.slice(0, 4)) {
-          const existing = state.activeDetail.tabs.find(
-            (t) => t.is_open && t.url === p.url
-          );
-          if (existing) {
-            compareIds.push(existing.id);
-          } else {
-            const tab = await apiOpenTab(cid, p.url, p.title);
-            compareIds.push(tab.id);
-          }
-        }
-        state.activeDetail = await apiGetConversation(cid);
-        if (compareIds.length >= 2) {
-          state.compareTabIds = compareIds;
-          state.compareMode = true;
-        }
-        renderAllRegions();
-      },
-      onAskInNewsChat: async (prompt) => {
-        state.activeTabId = "chat";
-        state.compareMode = false;
-        renderWorkspaceRegions();
-        await handleSendChatMessage(prompt);
-      },
-      ...getInlineProfileGateHandlers(),
-      onRefreshShell: () => {
-        renderAllRegions();
-      },
-    });
+    renderNewsLaneView(viewport, getNewsViewActions());
     scheduleWebviewLayoutSync();
     return;
   }
@@ -4451,6 +4729,8 @@ function getChatActions() {
         const curMeta =
           state.messageAnswerMeta[msgId] ??
           state.activeDetail?.messages.find((m) => m.id === msgId)
+            ?.answer_meta ??
+          state.newsPerspectivesDetail?.messages.find((m) => m.id === msgId)
             ?.answer_meta;
         const srcRow = curMeta?.sources?.find((s) => s.domain === domain);
         const curPersonal =
@@ -4463,9 +4743,9 @@ function getChatActions() {
           const updatedMeta = await sidecarReweighNewsMeta(curMeta);
           if (updatedMeta) {
             state.messageAnswerMeta[msgId] = updatedMeta;
-            const targetMsg = state.activeDetail?.messages.find(
-              (m) => m.id === msgId
-            );
+            const targetMsg =
+              state.activeDetail?.messages.find((m) => m.id === msgId) ??
+              state.newsPerspectivesDetail?.messages.find((m) => m.id === msgId);
             if (targetMsg) {
               targetMsg.answer_meta = updatedMeta;
             }
@@ -4475,11 +4755,14 @@ function getChatActions() {
       })();
     },
     onOpenNewsLane: (lane: string) => {
-      const nl = (lane || "stories") as NewsLane;
+      const nl: NewsLane = lane === "perspectives" ? "perspectives" : "stories";
       state.newsActiveLane = nl;
       state.activeTabId = `news-lane:${nl}`;
       void refreshNewsState(nl).then(() => renderAllRegions());
       renderAllRegions();
+    },
+    onOpenNewsSettings: (targetTab = "chat") => {
+      void openNewsSettingsConversation(targetTab);
     },
     onSettingsCardCreateProfile: async (msgId: string, cardId: string, name: string, pin: string) => {
       const res = await performProfileUnlockOrCreate({
@@ -4670,6 +4953,9 @@ function getChatActions() {
           await refreshMailState();
           await refreshLists();
         }
+        if (res.refresh_hints?.some((h) => h.startsWith("news_"))) {
+          await refreshNewsState("settings");
+        }
       }
       updateSettingsCardState(msgId, cardId, (c) => ({
         ...c,
@@ -4702,6 +4988,96 @@ function getChatActions() {
     onSettingsCardCancelLanguage: async (_msgId: string, _cardId: string, lang: string) => {
       await sidecarCancelI18nTranslate(lang);
       renderAllRegions();
+    },
+    onNewsSettingsTrackTopic: async (
+      _msgId: string,
+      _cardId: string,
+      name: string,
+      keywords: string[]
+    ) => {
+      const r = await sidecarManageNewsTopic({
+        action: "add",
+        name,
+        keywords: keywords.join(", "),
+        watch: true,
+      });
+      await refreshNewsState("settings");
+      renderAllRegions();
+      showAppToast(
+        r.ok ? t("news.tracked_topic_added", { name }) : `${t("common.error_prefix")} ${r.error ?? ""}`,
+        r.ok ? "info" : "danger"
+      );
+    },
+    onNewsSettingsToggleFeed: async (
+      _msgId: string,
+      _cardId: string,
+      domain: string,
+      enabled: boolean,
+      feedUrl?: string,
+      title?: string
+    ) => {
+      const src = state.newsSources.find((s) => s.domain === domain);
+      const fid = src?.feeds?.[0]?.feed_id;
+      const r = fid
+        ? await sidecarManageNewsFeed({ action: "toggle", feed_id: fid, enabled })
+        : await sidecarManageNewsFeed({
+            domain,
+            feed_url: feedUrl,
+            title: title || domain,
+            enabled,
+          });
+      await refreshNewsState("settings");
+      renderAllRegions();
+      showAppToast(
+        r.ok
+          ? `${title || domain}: ${enabled ? t("chat.ns_enabled_badge") : t("chat.ns_disable_feed")}`
+          : `${t("common.error_prefix")} ${r.error ?? ""}`,
+        r.ok ? "info" : "danger"
+      );
+    },
+    onNewsSettingsSetTrust: async (
+      _msgId: string,
+      _cardId: string,
+      domain: string,
+      personalScore: number | null
+    ) => {
+      const r = await sidecarSetDomainTrust(domain, personalScore);
+      const ok = Boolean(r && r.ok !== false);
+      const effNum = typeof r?.effective === "number" ? r.effective : null;
+      await refreshNewsState("settings");
+      renderAllRegions();
+      showAppToast(
+        ok
+          ? `${domain}: ${personalScore === null ? t("chat.ns_reset_trust") : effNum !== null ? `${effNum.toFixed(2)}/10` : t("common.save")}`
+          : `${t("common.error_prefix")} ${typeof r?.error === "string" ? r.error : ""}`,
+        ok ? "info" : "danger"
+      );
+    },
+    onNewsSettingsAddFeedUrl: async (
+      msgId: string,
+      cardId: string,
+      feedUrl: string,
+      title?: string,
+      domain?: string
+    ) => {
+      const r = await sidecarManageNewsFeed({
+        feed_url: feedUrl,
+        title: title || undefined,
+        domain: domain || undefined,
+      });
+      await refreshNewsState("settings");
+      if (r.ok) {
+        updateSettingsCardState(msgId, cardId, (c) => ({
+          ...c,
+          resolved: true,
+          resolution_note: t("news.added_item", { item: title || feedUrl }),
+        }));
+      }
+      renderAllRegions();
+      showAppToast(
+        r.ok ? t("news.added_item", { item: title || feedUrl }) : `${t("common.error_prefix")} ${r.error ?? ""}`,
+        r.ok ? "info" : "danger"
+      );
     },
   };
 }
@@ -5056,7 +5432,10 @@ async function selectConversation(
     } else if (detail.conversation.origin === "drives") {
       state.activeTabId = "chat";
       state.agentRailOpen = true;
-    } else if (detail.conversation.origin === "settings") {
+    } else if (
+      detail.conversation.origin === "settings" ||
+      detail.conversation.origin === "news_settings"
+    ) {
       state.activeTabId = "chat";
       state.agentRailOpen = false;
     } else if (
@@ -5099,6 +5478,10 @@ async function selectConversation(
     } else if (detail.conversation.origin === "settings") {
       bgTasks.push(
         loadSettingsPanelData().then(() => true)
+      );
+    } else if (detail.conversation.origin === "news_settings") {
+      bgTasks.push(
+        refreshNewsState("settings").then(() => true)
       );
     }
     const results = await Promise.all(bgTasks);
@@ -5362,6 +5745,8 @@ async function handleExecuteCommandRoute(
     await apiEnsureNewsConversation();
     await apiEnsureDrivesConversation();
     await apiEnsureSettingsConversation();
+    await apiEnsureNewsSettingsConversation();
+    await apiEnsureNewsPerspectivesConversation();
   } catch {
     // Non-fatal if DB call fails in browser-only Vite dev preview
   }
@@ -5400,6 +5785,8 @@ async function handleStartSubmission(raw: string): Promise<void> {
     await apiEnsureNewsConversation();
     await apiEnsureDrivesConversation();
     await apiEnsureSettingsConversation();
+    await apiEnsureNewsSettingsConversation();
+    await apiEnsureNewsPerspectivesConversation();
   } catch {
     // Non-fatal if DB call fails in browser-only Vite dev preview
   }
@@ -5424,6 +5811,8 @@ async function startDirectBrowsing(rawUrl: string, tabTitle?: string): Promise<v
     await apiEnsureNewsConversation();
     await apiEnsureDrivesConversation();
     await apiEnsureSettingsConversation();
+    await apiEnsureNewsSettingsConversation();
+    await apiEnsureNewsPerspectivesConversation();
   } catch {
     // Non-fatal if DB call fails in browser-only Vite dev preview
   }
@@ -5439,7 +5828,11 @@ async function handleRecaptureAllTabs(): Promise<void> {
 }
 
 async function handleCreateNewTab(): Promise<void> {
-  if (!state.activeDetail || state.activeDetail.conversation.origin === "settings") {
+  if (
+    !state.activeDetail ||
+    state.activeDetail.conversation.origin === "settings" ||
+    state.activeDetail.conversation.origin === "news_settings"
+  ) {
     const conv = await apiCreateConversation("new session", "direct");
     state.activeDetail = await apiGetConversation(conv.id);
     state.showBrainView = false;
@@ -5461,6 +5854,8 @@ async function handleCreateNewTab(): Promise<void> {
     await apiEnsureNewsConversation();
     await apiEnsureDrivesConversation();
     await apiEnsureSettingsConversation();
+    await apiEnsureNewsSettingsConversation();
+    await apiEnsureNewsPerspectivesConversation();
   } catch {
     // Non-fatal if DB call fails in browser-only Vite dev preview
   }
@@ -5490,6 +5885,8 @@ async function handleCloseTab(tabId: string): Promise<void> {
     await apiEnsureNewsConversation();
     await apiEnsureDrivesConversation();
     await apiEnsureSettingsConversation();
+    await apiEnsureNewsSettingsConversation();
+    await apiEnsureNewsPerspectivesConversation();
   } catch {
     // Non-fatal if DB call fails in browser-only Vite dev preview
   }
@@ -5502,7 +5899,9 @@ async function archiveActiveConversation(): Promise<void> {
     !conv ||
     conv.origin === "mail" ||
     conv.origin === "news" ||
-    conv.origin === "settings"
+    conv.origin === "settings" ||
+    conv.origin === "news_settings" ||
+    conv.origin === "news_perspectives"
   ) {
     return;
   }
@@ -5637,6 +6036,8 @@ async function handleOpenUrlAsTab(
     await apiEnsureNewsConversation();
     await apiEnsureDrivesConversation();
     await apiEnsureSettingsConversation();
+    await apiEnsureNewsSettingsConversation();
+    await apiEnsureNewsPerspectivesConversation();
   } catch {
     // Non-fatal if DB call fails in browser-only Vite dev preview
   }
@@ -6030,7 +6431,9 @@ async function handleSendChatMessage(
   const hasImages = images.length > 0;
   let stagedFiles = [...(sendOpts?.stagedFiles ?? [])];
   const convOrigin = detailSnap.conversation.origin;
-  const isSettingsConv = convOrigin === "settings";
+  const isCoreSettingsConv = convOrigin === "settings";
+  const isNewsSettingsConv = convOrigin === "news_settings";
+  const isSettingsConv = isCoreSettingsConv || isNewsSettingsConv;
   let rawUserText = text;
   if (isSettingsConv && rawUserText.trim()) {
     const extracted = await extractAndStageInlineSettingsSecrets(rawUserText, stagedFiles);
@@ -6542,10 +6945,20 @@ async function handleSendChatMessage(
       state.messageUiCards[savedMsg.id] = streamRes.ui_cards;
     }
     if (
-      isSettingsConv ||
+      isCoreSettingsConv ||
       streamRes.tools_used?.some((t) => t.startsWith("settings_"))
     ) {
       void loadSettingsPanelData().then(() => renderRailRegion());
+    }
+    if (
+      isNewsSettingsConv ||
+      streamRes.tools_used?.some((t) => t.startsWith("news_settings_"))
+    ) {
+      void refreshNewsState("settings").then(() => {
+        renderTabStripRegion();
+        renderRailRegion();
+        renderViewportRegion();
+      });
     }
     await refreshCompletedConversation(convId, savedMsg.id);
 

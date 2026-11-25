@@ -3252,7 +3252,15 @@ class WebSearchSessionHarness:
 
     def _dispatch_tool_call_inner(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         if SATZ_TOOL_REGISTRY.has(name):
-            if getattr(self, "conversation_origin", "chat") != "settings":
+            origin_now = getattr(self, "conversation_origin", "chat")
+            tool_spec = SATZ_TOOL_REGISTRY.get(name)
+            tool_domain = tool_spec.domain if tool_spec is not None else "settings"
+            if tool_domain == "news_settings" and origin_now != "news_settings":
+                return {
+                    "ok": False,
+                    "error": "News Settings tools are restricted to the News Settings workspace conversation.",
+                }
+            if tool_domain != "news_settings" and origin_now != "settings":
                 return {
                     "ok": False,
                     "error": "Settings tools are restricted to the Settings workspace conversation.",

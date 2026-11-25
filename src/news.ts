@@ -1,5 +1,6 @@
 import {
-  sidecarFetchNewsPerspectives,
+  apiEnsureNewsPerspectivesConversation,
+  apiGetConversation,
   sidecarFetchNewsSources,
   sidecarFetchNewsStories,
   sidecarFetchNewsTopics,
@@ -11,6 +12,7 @@ import {
   sidecarSetDomainTrust,
   sidecarTranslateNewsArticle,
 } from "./api";
+import { bindChatThreadEvents, renderMessageBlock, type ChatActions } from "./chat";
 import { drawWordmark, fontsReady } from "./design-system/brand";
 import { icon } from "./design-system/icons";
 import { t, tCount } from "./i18n";
@@ -19,7 +21,6 @@ import {
   formatRelativeTime,
   getResolvedTheme,
   isContentLanguageAllowed,
-  MOD_LABEL,
   state,
 } from "./state";
 import type { NewsLane, NewsStoryCluster } from "./types";
@@ -35,38 +36,29 @@ export interface NewsViewActions {
   onUnlockProfile?: (profileId: string, pin: string) => void | Promise<void>;
   onUnlockProfileKeychain?: (profileId: string) => void | Promise<void>;
   onCreateProfile?: (name: string, pin: string) => void | Promise<void>;
+  onOpenNewsSettings?: (targetTab?: string) => void;
+  onOpenNewsHome?: () => void;
+  onSendPerspectivesTopic?: (topic: string, clusterId?: string) => Promise<void>;
+  perspChatActions?: ChatActions;
   onRefreshShell: () => void;
 }
 
 let newsAutoWarmedThisSession = false;
 const expandedStoryFamilyPills = new Set<string>();
 
-export async function refreshNewsState(lane?: NewsLane): Promise<void> {
+export async function refreshNewsState(
+  lane?: NewsLane | "topics" | "sources" | "settings"
+): Promise<void> {
   const target = lane ?? state.newsActiveLane ?? "stories";
-  if (target === "stories" || target === "foryou" || target === "perspectives") {
+  if (target === "stories") {
     const fetchLane = async () => {
-      if (target === "stories") {
-        const res = await sidecarFetchNewsStories("top", "", false, 30);
-        state.newsStories = res.stories;
-        return res.stories;
-      }
-      if (target === "foryou") {
-        const res = await sidecarFetchNewsStories("foryou", "", state.newsExploreMode, 30);
-        state.newsForYouStories = res.stories;
-        return res.stories;
-      }
-      const res = await sidecarFetchNewsStories("perspectives", "", state.newsExploreMode, 25);
-      state.newsPerspectivesStories = res.stories;
-      if (!state.newsSelectedClusterId && res.stories.length > 0) {
-        state.newsSelectedClusterId = res.stories[0].cluster_id;
-      }
-      if (state.newsSelectedClusterId) {
-        state.newsPerspectiveMatrix = await sidecarFetchNewsPerspectives(
-          state.newsSelectedClusterId,
-          false
-        );
-      }
-      return res.stories;
+      const [storiesRes, topicsRes] = await Promise.all([
+        sidecarFetchNewsStories("top", "", false, 30),
+        sidecarFetchNewsTopics(),
+      ]);
+      state.newsStories = storiesRes.stories;
+      state.newsTopics = topicsRes.topics;
+      return storiesRes.stories;
     };
 
     const initial = await fetchLane();
@@ -74,6 +66,22 @@ export async function refreshNewsState(lane?: NewsLane): Promise<void> {
       newsAutoWarmedThisSession = true;
       await sidecarRefreshNews(false, false);
       await fetchLane();
+    }
+  } else if (target === "perspectives") {
+    const [storiesRes, topicsRes] = await Promise.all([
+      sidecarFetchNewsStories("top", "", false, 15),
+      sidecarFetchNewsTopics(),
+    ]);
+    state.newsPerspectivesStories = storiesRes.stories;
+    if (state.newsStories.length === 0) {
+      state.newsStories = storiesRes.stories;
+    }
+    state.newsTopics = topicsRes.topics;
+    try {
+      const pConv = await apiEnsureNewsPerspectivesConversation();
+      state.newsPerspectivesDetail = await apiGetConversation(pConv.id);
+    } catch {
+      // Sidecar/Tauri DB might still be warming up
     }
   } else if (target === "topics") {
     const res = await sidecarFetchNewsTopics();
@@ -89,6 +97,21 @@ export async function refreshNewsState(lane?: NewsLane): Promise<void> {
     state.newsSources = res.sources;
     state.newsCategories = res.categories;
     state.newsSourcesAsOf = res.as_of;
+  } else if (target === "settings") {
+    const [topicsRes, sourcesRes] = await Promise.all([
+      sidecarFetchNewsTopics(),
+      sidecarFetchNewsSources({
+        q: state.newsSourcesFilterQuery,
+        category: state.newsSourcesFilterCategory,
+        band: state.newsSourcesFilterBand,
+        conflicted: state.newsSourcesConflictedOnly,
+        withRss: state.newsSourcesRssOnly,
+      }),
+    ]);
+    state.newsTopics = topicsRes.topics;
+    state.newsSources = sourcesRes.sources;
+    state.newsCategories = sourcesRes.categories;
+    state.newsSourcesAsOf = sourcesRes.as_of;
   }
 }
 
@@ -111,7 +134,7 @@ function renderBandPillHtml(band: string, conf10: number): string {
 
 function renderStoryCardsHtml(
   stories: NewsStoryCluster[],
-  lane: "stories" | "foryou"
+  lane: "stories"
 ): string {
   if (stories.length === 0) {
     return `
@@ -277,7 +300,7 @@ function renderStoryCardsHtml(
                               : ""
                           }
                           ${
-                            lane === "foryou" && s.topic_tags.length > 0
+                            false
                               ? `<button type="button" class="menu-item" data-news-less-topic="${escapeHtml(s.topic_tags[0])}">${icon("x", "ico-sm")}<span>${escapeHtml(t("news.less_like_this"))}</span></button>`
                               : ""
                           }
@@ -296,96 +319,137 @@ function renderStoryCardsHtml(
 }
 
 function renderPerspectivesLaneHtml(): string {
-  const list = state.newsPerspectivesStories;
-  if (list.length === 0) {
-    return `
-      <div class="card">
-        <div class="muted">
-          ${escapeHtml(t("news.no_persp_stories"))}
+  const topics = state.newsTopics;
+  const recentStories =
+    state.newsPerspectivesStories.length > 0
+      ? state.newsPerspectivesStories
+      : state.newsStories;
+  const detail = state.newsPerspectivesDetail;
+  const stream = state.newsPerspectivesStream;
+  const isStreaming = Boolean(stream);
+  const messages = detail?.messages ?? [];
+
+  const topicChipsHtml = topics
+    .slice(0, 10)
+    .map(
+      (tp) =>
+        `<button type="button" class="pill" ${isStreaming ? "disabled" : ""} data-persp-pick-topic="${escapeHtml(tp.name)}">${escapeHtml(tp.name)}</button>`
+    )
+    .join("");
+
+  const storyChipsHtml = recentStories
+    .slice(0, 5)
+    .map((s) => {
+      const headline = s.translated_headline || s.headline;
+      return `<button type="button" class="pill" ${isStreaming ? "disabled" : ""} data-persp-pick-cluster="${escapeHtml(s.cluster_id)}" data-persp-pick-title="${escapeHtml(headline)}">${escapeHtml(headline.length > 52 ? `${headline.slice(0, 51)}...` : headline)}</button>`;
+    })
+    .join("");
+
+  const messagesHtml = messages
+    .map((m) =>
+      renderMessageBlock(
+        m.id,
+        m.role,
+        m.content,
+        m.model,
+        m.source_ids_json,
+        m.cited_sources ?? state.messageCitedSources[m.id],
+        undefined,
+        m.citation_check,
+        m.citations_ok,
+        m.citations_flagged,
+        m.findings ?? state.messageFindings[m.id],
+        m.brain_sources ?? state.messageBrainSources[m.id],
+        undefined,
+        m.answer_meta ?? state.messageAnswerMeta[m.id],
+        undefined,
+        undefined,
+        undefined,
+        m.ui_cards ?? state.messageUiCards[m.id]
+      )
+    )
+    .join("");
+
+  const streamingHtml = stream
+    ? `
+      <div id="perspectives-stream-row" class="persp-stream-wrap">
+        ${stream.status ? `<div class="msg-status muted">${escapeHtml(stream.status)}</div>` : ""}
+        ${
+          stream.text
+            ? renderMessageBlock(
+                "__persp_stream__",
+                "assistant",
+                stream.text,
+                state.selectedModel,
+                null
+              )
+            : `<div class="msg-bot"><div class="msg-head"><b>${escapeHtml(t("chat.assistant"))}</b> · <span class="badge soft">${escapeHtml(stream.status || t("common.syncing"))}</span></div></div>`
+        }
+      </div>
+    `
+    : "";
+
+  const emptyStateHtml =
+    messages.length === 0 && !stream
+      ? `
+      <div class="card inset persp-empty">
+        <div class="card-h">
+          <b>${escapeHtml(t("news.persp_empty_title"))}</b>
+        </div>
+        <div class="settings-card-note">${escapeHtml(t("news.persp_empty_sub"))}</div>
+        <div class="ns-chip-list">
+          ${
+            topics.length === 0
+              ? `
+            <button type="button" class="pill" data-persp-pick-topic="European energy policy and grid tariffs">European energy policy</button>
+            <button type="button" class="pill" data-persp-pick-topic="Global AI regulation and chip export rules">AI regulation &amp; chips</button>
+            <button type="button" class="pill" data-persp-pick-topic="ECB and Federal Reserve interest rates">Central bank rates</button>
+          `
+              : ""
+          }
         </div>
       </div>
-    `;
-  }
-
-  const selectorHtml = `
-    <div class="card">
-      <div class="form-row">
-        <label class="muted">${escapeHtml(t("news.story_cluster_n", { count: list.length }))}</label>
-        <select id="news-persp-cluster-select" class="select">
-          ${list
-            .map(
-              (s) =>
-                `<option value="${escapeHtml(s.cluster_id)}" ${s.cluster_id === state.newsSelectedClusterId ? "selected" : ""}>${s.families.length} fam · ${s.confidence10.toFixed(1)} · ${escapeHtml(s.headline.slice(0, 72))}</option>`
-            )
-            .join("")}
-        </select>
-        <button id="news-persp-recompute-btn" type="button" class="btn">${escapeHtml(t("news.reanalyze_perspectives"))}</button>
-      </div>
-    </div>
-  `;
-
-  const m = state.newsPerspectiveMatrix;
-  if (!m || !m.ok) {
-    return `${selectorHtml}<div class="card"><span class="muted">${escapeHtml(t("news.select_cluster_persp"))}</span></div>`;
-  }
-
-  const comparePayload = (m.framings ?? [])
-    .flatMap((fr) => fr.sources.slice(0, 1))
-    .slice(0, 4)
-    .map((s) => `${s.url}|||${m.headline}`)
-    .join(";;;");
-
-  const gridCols = Math.max(1, Math.min(3, (m.framings ?? []).length));
+    `
+      : "";
 
   return `
-    ${selectorHtml}
-    <div class="card">
-      <div class="card-h">
-        <b>${escapeHtml(t("news.perspective_spread"))}</b>
-        <span class="truncate muted">${escapeHtml(m.headline)}</span>
-        <span class="end">
-          ${comparePayload ? `<button type="button" class="btn" data-news-compare-urls="${escapeHtml(comparePayload)}">${icon("compare", "ico-sm")}<span>${escapeHtml(t("news.tile_compare", { mod: MOD_LABEL }))}</span></button>` : ""}
-        </span>
-      </div>
-      <div class="muted">${escapeHtml(t("news.analyzer_line", { model: m.analyzer_model, privacy: m.privacy_disclosure }))}</div>
-
-      <div class="section">
-        <div class="label">${escapeHtml(t("news.agreed_facts"))}</div>
-        <ul class="persp-bullets">
-          ${(m.agreed ?? []).map((a) => `<li>${escapeHtml(a)}</li>`).join("")}
-        </ul>
-      </div>
-
-      <div class="persp-grid" style="--cols:${gridCols};">
-        ${(m.framings ?? [])
-          .map(
-            (fr) => `
-          <div class="card inset persp-card">
-            <div class="card-h"><b>${escapeHtml(fr.label)}</b></div>
-            <div class="persp-pills">
-              ${fr.sources
-                .map(
-                  (src) => `
-                <button type="button" class="pill" data-news-open-url="${escapeHtml(src.url)}" data-news-open-title="${escapeHtml(src.title)}" title="${escapeHtml(src.why)}">
-                  ${escapeHtml(src.domain)} · ${src.trust_effective.toFixed(1)} (${escapeHtml(src.category)})${src.conflict ? " · !" : ""}
-                </button>`
-                )
-                .join("")}
-            </div>
-            <ul>
-              ${fr.claims.map((cl) => `<li>${escapeHtml(cl)}</li>`).join("")}
-            </ul>
-          </div>`
-          )
-          .join("")}
+    <div class="persp-shell">
+      <div class="persp-topics-bar">
+        <div class="persp-chips-row">
+          <span class="persp-chips-label">${escapeHtml(t("news.persp_tracked_topics"))}:</span>
+          ${topicChipsHtml || `<span class="muted">${escapeHtml(t("news.no_topics_yet"))}</span>`}
+          <button type="button" class="btn-text end" data-news-open-settings="chat">${icon("settings", "ico-sm")}<span>${escapeHtml(t("news.persp_manage_topics"))}</span></button>
+        </div>
+        ${
+          storyChipsHtml
+            ? `<div class="persp-chips-row">
+                <span class="persp-chips-label">${escapeHtml(t("news.persp_recent_stories"))}:</span>
+                ${storyChipsHtml}
+              </div>`
+            : ""
+        }
       </div>
 
-      <div class="section">
-        <div class="label">${escapeHtml(t("news.blind_spots_heading"))}</div>
-        <ul class="persp-bullets muted">
-          ${(m.blind_spots ?? []).map((b) => `<li>${escapeHtml(b)}</li>`).join("")}
-          <li>${escapeHtml(t("news.counterfactual", { text: m.system_counterfactual }))}</li>
-        </ul>
+      <div class="persp-thread-scroll" id="persp-messages-list">
+        <div class="thread">
+          ${emptyStateHtml}
+          ${messagesHtml}
+          ${streamingHtml}
+        </div>
+      </div>
+
+      <div class="persp-composer">
+        <div class="persp-input-row">
+          <input
+            id="persp-topic-input"
+            type="text"
+            placeholder="${escapeHtml(t("news.persp_topic_ph"))}"
+            ${isStreaming ? "disabled" : ""}
+          />
+          <button id="persp-send-btn" type="button" class="btn primary" ${isStreaming ? "disabled" : ""}>
+            <span>${escapeHtml(t("news.persp_compare_btn"))}</span>
+          </button>
+        </div>
       </div>
     </div>
   `;
@@ -560,7 +624,6 @@ function renderReaderOverlayHtml(): string {
   if (!aid) return "";
   const allArts = [
     ...state.newsStories.flatMap((s) => s.articles ?? []),
-    ...state.newsForYouStories.flatMap((s) => s.articles ?? []),
     ...state.newsPerspectivesStories.flatMap((s) => s.articles ?? []),
   ];
   const art = allArts.find((a) => a.article_id === aid);
@@ -600,14 +663,8 @@ function getNewsLaneSubtitle(lane: NewsLane): string {
   switch (lane) {
     case "stories":
       return t("news.sub_stories");
-    case "foryou":
-      return t("news.sub_foryou");
     case "perspectives":
       return t("news.sub_perspectives");
-    case "topics":
-      return t("news.sub_topics");
-    case "sources":
-      return t("news.sub_sources");
   }
 }
 
@@ -651,19 +708,26 @@ export function renderNewsLaneView(
     return;
   }
 
-  const lane = state.newsActiveLane;
+  const lane: NewsLane = state.newsActiveLane === "perspectives" ? "perspectives" : "stories";
   let bodyHtml = "";
   if (lane === "stories") {
     bodyHtml = renderStoryCardsHtml(state.newsStories, "stories");
-  } else if (lane === "foryou") {
-    bodyHtml = renderStoryCardsHtml(state.newsForYouStories, "foryou");
-  } else if (lane === "perspectives") {
+  } else {
     bodyHtml = renderPerspectivesLaneHtml();
-  } else if (lane === "topics") {
-    bodyHtml = renderTopicsLaneHtml();
-  } else if (lane === "sources") {
-    bodyHtml = renderSourcesLaneHtml();
   }
+
+  const onboardBannerHtml =
+    lane === "stories" && state.newsTopics.length === 0
+      ? `
+      <div class="card inset news-onboard-banner">
+        <div class="card-h">
+          <b>${escapeHtml(t("news.empty_onboard_banner_title"))}</b>
+          <button type="button" class="btn primary sm" data-news-open-settings="chat">${escapeHtml(t("news.open_settings_btn"))}</button>
+        </div>
+        <div class="settings-card-note">${escapeHtml(t("news.empty_onboard_banner_sub"))}</div>
+      </div>
+    `
+      : "";
 
   const nStat = state.sidecar.news;
   const syncAge =
@@ -690,12 +754,10 @@ export function renderNewsLaneView(
           }</p>
         </div>
         <div class="end news-head-actions">
-          <button
-            id="news-explore-toggle-btn"
-            class="btn"
-            type="button"
-            aria-pressed="${state.newsExploreMode ? "true" : "false"}"
-          >${escapeHtml(t("news.explore_toggle", { state: state.newsExploreMode ? t("common.on") : t("common.off") }))}</button>
+          <button class="btn" type="button" data-news-open-settings="chat">
+            ${icon("settings", "ico-sm")}
+            <span>${escapeHtml(t("top.news_settings"))}</span>
+          </button>
           <button id="news-refresh-feeds-btn" class="btn" type="button">
             ${icon("reload", "ico-sm")}
             <span>${escapeHtml(t("news.sync_feeds_btn"))}</span>
@@ -711,16 +773,129 @@ export function renderNewsLaneView(
           ? renderStatusBannerHtml(state.newsStatusMessage)
           : ""
       }
+      ${onboardBannerHtml}
       ${renderReaderOverlayHtml()}
       ${bodyHtml}
     </div>
   `;
 
   paintNewsWordmark();
-  bindNewsViewEvents(container, actions);
+  bindNewsViewEvents(container, actions, () => renderNewsLaneView(container, actions));
 }
 
-function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): void {
+export function renderNewsSettingsManualView(
+  container: HTMLElement,
+  actions: NewsViewActions
+): void {
+  const prof = state.knowledge.profile;
+  const isUnlocked = Boolean(prof?.unlocked && prof?.active_profile);
+  const hasProfiles = (prof?.profiles.length ?? 0) > 0;
+  if (!isUnlocked || !hasProfiles) {
+    container.innerHTML = `
+      <div class="news-view">
+        ${renderInlineProfileGateHtml({
+          iconName: "news",
+          subtitle: t("news.locked_subtitle"),
+        })}
+      </div>
+    `;
+    bindInlineProfileGateEvents(container, {
+      onUnlockProfile: actions.onUnlockProfile,
+      onUnlockProfileKeychain: actions.onUnlockProfileKeychain,
+      onCreateProfile: actions.onCreateProfile,
+    });
+    return;
+  }
+
+  const acc = state.newsSettingsManualAcc;
+  const enabledFeeds = state.newsSources.filter((s) => s.feeds?.some((f) => f.enabled)).length;
+  const totalScored = state.newsSources.length;
+  const nStat = state.sidecar.news;
+
+  container.innerHTML = `
+    <div class="news-view">
+      <div class="view-h">
+        <div>
+          <h1>${escapeHtml(t("news.manual_title"))}</h1>
+          <p>${escapeHtml(t("news.manual_sub"))}</p>
+        </div>
+        <div class="end news-head-actions">
+          <button id="ns-manual-open-chat-btn" class="btn" type="button">
+            ${icon("chat", "ico-sm")}
+            <span>${escapeHtml(t("news.manual_chat_btn"))}</span>
+          </button>
+          <button id="news-refresh-feeds-btn" class="btn" type="button">
+            ${icon("reload", "ico-sm")}
+            <span>${escapeHtml(t("news.sync_feeds_btn"))}</span>
+          </button>
+          <button id="news-refresh-search-btn" class="btn primary" type="button">
+            ${icon("search", "ico-sm")}
+            <span>${escapeHtml(t("news.refresh_web_btn"))}</span>
+          </button>
+          ${state.newsLoading || nStat?.syncing ? `<span class="badge soft">${escapeHtml(t("common.syncing"))}</span>` : ""}
+          <button id="ns-manual-back-news-btn" class="btn" type="button">
+            ${icon("news", "ico-sm")}
+            <span>${escapeHtml(t("top.back_to_news"))}</span>
+          </button>
+        </div>
+      </div>
+
+      ${
+        state.newsStatusMessage
+          ? renderStatusBannerHtml(state.newsStatusMessage)
+          : ""
+      }
+
+      <section class="acc news-manual-acc ${acc.topics ? "" : "closed"}" data-ns-acc="topics">
+        <button class="acc-h" type="button" data-ns-acc-toggle="topics" aria-expanded="${acc.topics ? "true" : "false"}">
+          <span class="rail-acc-chevron">${icon("chev", "ico-sm")}</span>
+          <span class="label">${escapeHtml(t("news.manual_topics_head"))}</span>
+          <span class="acc-count">${escapeHtml(tCount("news.manual_topics_count", state.newsTopics.length))}</span>
+        </button>
+        <div class="acc-body">
+          ${renderTopicsLaneHtml()}
+        </div>
+      </section>
+
+      <section class="acc news-manual-acc ${acc.sources ? "" : "closed"}" data-ns-acc="sources">
+        <button class="acc-h" type="button" data-ns-acc-toggle="sources" aria-expanded="${acc.sources ? "true" : "false"}">
+          <span class="rail-acc-chevron">${icon("chev", "ico-sm")}</span>
+          <span class="label">${escapeHtml(t("news.manual_sources_head"))}</span>
+          <span class="acc-count">${escapeHtml(t("news.manual_sources_count", { enabled: enabledFeeds, total: totalScored }))}</span>
+        </button>
+        <div class="acc-body">
+          ${renderSourcesLaneHtml()}
+        </div>
+      </section>
+    </div>
+  `;
+
+  container.querySelectorAll("[data-ns-acc-toggle]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const k = (btn as HTMLElement).getAttribute("data-ns-acc-toggle") as "topics" | "sources" | null;
+      if (!k) return;
+      state.newsSettingsManualAcc[k] = !state.newsSettingsManualAcc[k];
+      renderNewsSettingsManualView(container, actions);
+    });
+  });
+
+  container.querySelector("#ns-manual-open-chat-btn")?.addEventListener("click", () => {
+    actions.onOpenNewsSettings?.("chat");
+  });
+
+  container.querySelector("#ns-manual-back-news-btn")?.addEventListener("click", () => {
+    actions.onOpenNewsHome?.();
+  });
+
+  bindNewsViewEvents(container, actions, () => renderNewsSettingsManualView(container, actions));
+}
+
+function bindNewsViewEvents(
+  container: HTMLElement,
+  actions: NewsViewActions,
+  onReRender?: () => void
+): void {
+  const reRender = onReRender ?? (() => renderNewsLaneView(container, actions));
   container.querySelectorAll("img.story-thumb").forEach((imgEl) => {
     imgEl.addEventListener("error", () => {
       const card = imgEl.closest(".story");
@@ -733,7 +908,7 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
     void (async () => {
       state.newsLoading = true;
       state.newsStatusMessage = t("news.syncing_feeds_status");
-      renderNewsLaneView(container, actions);
+      reRender();
       const res = await sidecarRefreshNews(true, false, true);
       state.newsLoading = false;
       state.newsStatusMessage = res.ok
@@ -745,8 +920,8 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
             brain: res.brain_synced ?? 0,
           })
         : `${t("common.error_prefix")} ${res.error ?? t("news.feed_refresh_failed")}`;
-      await refreshNewsState(state.newsActiveLane);
-      renderNewsLaneView(container, actions);
+      await refreshNewsState(onReRender ? "settings" : state.newsActiveLane);
+      reRender();
       actions.onRefreshShell();
     })();
   });
@@ -755,7 +930,7 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
     void (async () => {
       state.newsLoading = true;
       state.newsStatusMessage = t("news.polling_web_status");
-      renderNewsLaneView(container, actions);
+      reRender();
       const res = await sidecarRefreshNews(true, true, true);
       state.newsLoading = false;
       state.newsStatusMessage = res.ok
@@ -765,16 +940,16 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
             brain: res.brain_synced ?? 0,
           })
         : `${t("common.error_prefix")} ${res.error ?? t("news.refresh_failed")}`;
-      await refreshNewsState(state.newsActiveLane);
-      renderNewsLaneView(container, actions);
+      await refreshNewsState(onReRender ? "settings" : state.newsActiveLane);
+      reRender();
       actions.onRefreshShell();
     })();
   });
 
-  container.querySelector("#news-explore-toggle-btn")?.addEventListener("click", () => {
-    state.newsExploreMode = !state.newsExploreMode;
-    void refreshNewsState(state.newsActiveLane).then(() => {
-      renderNewsLaneView(container, actions);
+  container.querySelectorAll("[data-news-open-settings]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tab = (btn as HTMLElement).getAttribute("data-news-open-settings") ?? "chat";
+      actions.onOpenNewsSettings?.(tab);
     });
   });
 
@@ -787,7 +962,7 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
       } else {
         expandedStoryFamilyPills.add(cid);
       }
-      renderNewsLaneView(container, actions);
+      reRender();
     });
   });
 
@@ -797,7 +972,7 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
       const cid = (btn as HTMLElement).getAttribute("data-news-story-menu") ?? "";
       if (!cid) return;
       state.newsStoryMenuId = state.newsStoryMenuId === cid ? null : cid;
-      renderNewsLaneView(container, actions);
+      reRender();
     });
   });
 
@@ -859,9 +1034,18 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
       state.newsActiveLane = "perspectives";
       state.activeTabId = "news-lane:perspectives";
       state.newsSelectedClusterId = cid;
-      void refreshNewsState("perspectives").then(() => {
-        actions.onRefreshShell();
-      });
+      const cl = [...state.newsStories, ...state.newsPerspectivesStories].find(
+        (s) => s.cluster_id === cid
+      );
+      const topicPrompt = cl?.translated_headline || cl?.headline || "";
+      actions.onRefreshShell();
+      if (topicPrompt && actions.onSendPerspectivesTopic) {
+        void actions.onSendPerspectivesTopic(topicPrompt, cid);
+      } else {
+        void refreshNewsState("perspectives").then(() => {
+          actions.onRefreshShell();
+        });
+      }
     });
   });
 
@@ -873,7 +1057,7 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
         state.newsStatusMessage = r.ok
           ? t("news.saved_brain_status")
           : `${t("common.error_prefix")} ${r.error ?? t("news.unlock_to_save_brain")}`;
-        renderNewsLaneView(container, actions);
+        reRender();
       });
     });
   });
@@ -885,7 +1069,7 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
       if (!cid) return;
       void sidecarHideNewsCluster(cid).then(async () => {
         await refreshNewsState(state.newsActiveLane);
-        renderNewsLaneView(container, actions);
+        reRender();
       });
     });
   });
@@ -897,8 +1081,8 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
       if (!name) return;
       void sidecarManageNewsTopic({ action: "suppress", name }).then(async () => {
         state.newsStatusMessage = t("news.reduced_topic_status", { name });
-        await refreshNewsState("foryou");
-        renderNewsLaneView(container, actions);
+        await refreshNewsState("stories");
+        reRender();
       });
     });
   });
@@ -907,18 +1091,18 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
     btn.addEventListener("click", () => {
       state.newsReaderArticleId = (btn as HTMLElement).getAttribute("data-news-open-reader") ?? null;
       state.newsReaderShowOriginal = false;
-      renderNewsLaneView(container, actions);
+      reRender();
     });
   });
 
   container.querySelector("#news-reader-close-btn")?.addEventListener("click", () => {
     state.newsReaderArticleId = null;
-    renderNewsLaneView(container, actions);
+    reRender();
   });
 
   container.querySelector("#news-reader-toggle-orig-btn")?.addEventListener("click", () => {
     state.newsReaderShowOriginal = !state.newsReaderShowOriginal;
-    renderNewsLaneView(container, actions);
+    reRender();
   });
 
   container.querySelectorAll("[data-news-toggle-orig]").forEach((btn) => {
@@ -926,7 +1110,7 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
       const cid = (btn as HTMLElement).getAttribute("data-news-toggle-orig") ?? "";
       if (!cid) return;
       state.newsStoryShowOriginal[cid] = !state.newsStoryShowOriginal[cid];
-      renderNewsLaneView(container, actions);
+      reRender();
     });
   });
 
@@ -936,11 +1120,11 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
       const aid = (btn as HTMLElement).getAttribute("data-news-translate") ?? "";
       if (!aid) return;
       state.newsStatusMessage = t("news.translating_article");
-      renderNewsLaneView(container, actions);
+      reRender();
       const targetLang = state.contentTranslationConfig?.primary_language || "";
       void sidecarTranslateNewsArticle(aid, targetLang).then(async (r) => {
         if (r.ok && (r.translated_text || r.title_tr || r.snippet_tr)) {
-          for (const s of [...state.newsStories, ...state.newsForYouStories, ...state.newsPerspectivesStories]) {
+          for (const s of [...state.newsStories, ...state.newsPerspectivesStories]) {
             for (const a of s.articles) {
               if (a.article_id === aid) {
                 if (r.translated_text) a.translated_text = r.translated_text;
@@ -957,30 +1141,57 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
         } else {
           state.newsStatusMessage = `${t("common.error_prefix")} ${r.error ?? t("news.translation_failed")}`;
         }
-        renderNewsLaneView(container, actions);
+        reRender();
       });
     });
   });
 
-  // Perspectives events
-  const perspSel = container.querySelector("#news-persp-cluster-select") as HTMLSelectElement | null;
-  perspSel?.addEventListener("change", () => {
-    state.newsSelectedClusterId = perspSel.value || null;
-    void refreshNewsState("perspectives").then(() => {
-      renderNewsLaneView(container, actions);
+  // Chat-based Perspectives events
+  const perspInput = container.querySelector("#persp-topic-input") as HTMLInputElement | null;
+  const submitPerspectivesTopic = () => {
+    const val = (perspInput?.value ?? "").trim();
+    if (!val || state.newsPerspectivesStream) return;
+    if (perspInput) perspInput.value = "";
+    void actions.onSendPerspectivesTopic?.(val);
+  };
+  container.querySelector("#persp-send-btn")?.addEventListener("click", submitPerspectivesTopic);
+  perspInput?.addEventListener("keydown", (e) => {
+    if ((e as KeyboardEvent).key === "Enter" && !(e as KeyboardEvent).shiftKey) {
+      e.preventDefault();
+      submitPerspectivesTopic();
+    }
+  });
+  container.querySelectorAll("[data-persp-pick-topic]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const topic = (btn as HTMLElement).getAttribute("data-persp-pick-topic") ?? "";
+      if (topic && !state.newsPerspectivesStream) {
+        void actions.onSendPerspectivesTopic?.(topic);
+      }
+    });
+  });
+  container.querySelectorAll("[data-persp-pick-cluster]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const cid = el.getAttribute("data-persp-pick-cluster") ?? "";
+      const title = el.getAttribute("data-persp-pick-title") ?? "";
+      if (title && !state.newsPerspectivesStream) {
+        void actions.onSendPerspectivesTopic?.(title, cid || undefined);
+      }
     });
   });
 
-  container.querySelector("#news-persp-recompute-btn")?.addEventListener("click", () => {
-    if (!state.newsSelectedClusterId) return;
-    state.newsStatusMessage = t("news.reanalyzing_persp");
-    renderNewsLaneView(container, actions);
-    void sidecarFetchNewsPerspectives(state.newsSelectedClusterId, true).then((mat) => {
-      state.newsPerspectiveMatrix = mat;
-      state.newsStatusMessage = mat?.ok ? t("news.persp_updated") : t("news.persp_failed");
-      renderNewsLaneView(container, actions);
+  const perspScroll = container.querySelector("#persp-messages-list") as HTMLElement | null;
+  if (perspScroll) {
+    perspScroll.scrollTop = perspScroll.scrollHeight;
+  }
+  if (actions.perspChatActions) {
+    bindChatThreadEvents(container, actions.perspChatActions, {
+      onStateChange: reRender,
+      activeConvId: state.newsPerspectivesDetail?.conversation.id ?? "",
+      getSources: () => state.newsPerspectivesDetail?.sources ?? [],
+      getMessages: () => state.newsPerspectivesDetail?.messages ?? [],
     });
-  });
+  }
 
   // Topics events
   container.querySelector("#news-topic-add-btn")?.addEventListener("click", () => {
@@ -996,7 +1207,7 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
     }).then(async (r) => {
       state.newsStatusMessage = r.ok ? t("news.tracked_topic_added", { name }) : `${t("common.error_prefix")} ${r.error}`;
       await refreshNewsState("topics");
-      renderNewsLaneView(container, actions);
+      reRender();
       actions.onRefreshShell();
     });
   });
@@ -1007,7 +1218,7 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
       if (!tid) return;
       void sidecarManageNewsTopic({ action: "delete", topic_id: tid }).then(async () => {
         await refreshNewsState("topics");
-        renderNewsLaneView(container, actions);
+        reRender();
         actions.onRefreshShell();
       });
     });
@@ -1016,7 +1227,8 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
   // Sources events
   const reloadSources = () => {
     void refreshNewsState("sources").then(() => {
-      renderNewsLaneView(container, actions);
+      reRender();
+      actions.onRefreshShell();
     });
   };
   const srcQ = container.querySelector("#news-src-search-input") as HTMLInputElement | null;

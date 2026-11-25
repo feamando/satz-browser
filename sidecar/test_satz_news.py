@@ -673,6 +673,113 @@ class TestSatzNewsEngine(unittest.TestCase):
         self.assertIn("Draft accession treaty", matched_src[0].get("snippet", ""))
         self.assertTrue(any(f.get("image_url") == "https://static.euronews.com/articles/montenegro.jpg" for f in ans["findings"]))
 
+    def test_stream_topic_perspectives_finds_dedupes_and_streams(self) -> None:
+        now = time.time()
+        self.rt.passwords.create_profile("Persp Test", "123456")
+        self.rt._refresh_active_profile_brain()
+
+        # Independent families + two AP wire syndicated duplicates + a low-trust/conflicted family
+        self.rt.news.upsert_article(
+            {
+                "url": "https://www.bbc.com/news/europe-grid-100",
+                "domain": "bbc.com",
+                "title": "European power grid investment hits 40 billion euros",
+                "snippet": "Regulators backed new North Sea interconnectors to stabilize industrial tariffs.",
+                "body_text": "Regulators backed new North Sea interconnectors to stabilize industrial tariffs.",
+                "published_at": now - 100,
+            },
+            language="en",
+        )
+        self.rt.news.upsert_article(
+            {
+                "url": "https://www.herald-local.com/europe-grid-dup-1",
+                "domain": "herald-local.com",
+                "title": "Europe expands North Sea power grid",
+                "snippet": "BRUSSELS (AP) - Industrial electricity prices remain contested across member states.",
+                "body_text": "BRUSSELS (AP) - Wire syndication copy covering North Sea power grid.",
+                "published_at": now - 95,
+            },
+            language="en",
+        )
+        self.rt.news.upsert_article(
+            {
+                "url": "https://www.tribune-daily.org/europe-grid-dup-2",
+                "domain": "tribune-daily.org",
+                "title": "North Sea power grid expansion moves ahead",
+                "snippet": "BRUSSELS (AP) - Industrial electricity prices remain contested across member states.",
+                "body_text": "BRUSSELS (AP) - Wire syndication copy covering North Sea power grid.",
+                "published_at": now - 90,
+            },
+            language="en",
+        )
+        self.rt.news.upsert_article(
+            {
+                "url": "https://www.rt.com/business/europe-grid-crisis-300",
+                "domain": "rt.com",
+                "title": "European power grid faces winter cost spike",
+                "snippet": "Critics warn higher grid fees could squeeze factories.",
+                "body_text": "Opposing framing emphasizes consumer tariff increases across Europe.",
+                "published_at": now - 80,
+            },
+            language="en",
+        )
+
+        # Mock web fallback returning an extra independent source + streamed model chunks
+        web_hits = [
+            {
+                "url": "https://www.ft.com/content/eu-power-grid-tariffs",
+                "domain": "ft.com",
+                "title": "Financial Times: EU power grid financing debate",
+                "snippet": "Finance ministries split over sovereign guarantees for cross-border cables.",
+            }
+        ]
+        streamed_tokens = [
+            "### European power grid framing comparison\n\n",
+            "- **Official & public media [1]**: emphasizes long-term North Sea stability.\n",
+            "- **Skeptical framing [2]**: highlights short-term factory tariff pressure.\n",
+        ]
+
+        def fake_stream(model_id: str, sys_p: str, usr_p: str, **_kw):
+            for tok in streamed_tokens:
+                yield {"delta": tok}
+            yield {"__full_raw": "".join(streamed_tokens)}
+
+        self.rt.update_model_management_config({"role_news_analyzer": "gemma:gemma-4-e4b"})
+        with mock.patch.object(self.rt.web, "search", return_value=web_hits), mock.patch.object(
+            self.rt, "_stream_role_prompt", side_effect=fake_stream
+        ):
+            events = list(
+                self.rt.news.stream_topic_perspectives("European power grid tariffs")
+            )
+
+        deltas = [ev["delta"] for ev in events if "delta" in ev]
+        self.assertGreaterEqual(len(deltas), 3)
+        self.assertIn("North Sea stability", "".join(deltas))
+
+        done_evs = [ev for ev in events if ev.get("done")]
+        self.assertEqual(len(done_evs), 1)
+        done = done_evs[0]
+        self.assertTrue(done["ok"])
+        self.assertTrue(done["sources"])
+        # Reuters duplicate across bbc.com & dw.com collapses to a single Reuters wire family
+        wire_dups = [b for b in done.get("blind_spots", []) if "deduped:" in b]
+        self.assertTrue(wire_dups, done.get("blind_spots"))
+        self.assertIn("bbc.com", [s["domain"] for s in done["sources"]])
+        self.assertIn("rt.com", [s["domain"] for s in done["sources"]])
+        self.assertIn("answer_meta", done)
+        self.assertIn("system_counterfactual", done)
+
+        # Template fallback (when no LLM delta is produced) still yields structured perspectives markdown
+        with mock.patch.object(self.rt.web, "search", return_value=[]), mock.patch.object(
+            self.rt, "_stream_role_prompt", return_value=iter([])
+        ):
+            fb_events = list(
+                self.rt.news.stream_topic_perspectives("European power grid tariffs")
+            )
+        fb_done = [ev for ev in fb_events if ev.get("done")][-1]
+        self.assertTrue(fb_done["ok"])
+        self.assertIn("European power grid", fb_done["answer"])
+
 
 if __name__ == "__main__":
     unittest.main()

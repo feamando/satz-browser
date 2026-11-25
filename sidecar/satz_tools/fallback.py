@@ -193,20 +193,20 @@ def maybe_fallback_news_settings_cards(
         )
         return list(getattr(session, "ui_cards", []) or [])
 
-    # 2. Ambiguous or explicit source suggestions / list (e.g. "suggest sources", "good German outlets", "show my sources")
+    # 2. Ambiguous or explicit topic suggestions (check before generic "news" keyword so "suggest news topics" hits topics)
+    if re.search(r"\b(suggest|recommend|ideas|good|interesting|what|which)\b", low) and re.search(
+        r"\b(topic|topics|subject|subjects|interest|interests|follow|track|beat|beats)\b",
+        low,
+    ) and not re.search(r"\b(source|sources|feed|feeds|outlet|outlets|paper|papers|rss)\b", low):
+        REGISTRY.dispatch("news_settings_suggest_topics", {"interest_hint": q}, runtime=runtime, session=session)
+        return list(getattr(session, "ui_cards", []) or [])
+
+    # 3. Ambiguous or explicit source suggestions / list (e.g. "suggest sources", "good German outlets", "show my sources")
     if re.search(r"\b(suggest|recommend|ideas|good|list|show|what|which|find)\b", low) and re.search(
         r"\b(source|sources|feed|feeds|outlet|outlets|paper|papers|rss|news)\b",
         low,
     ):
         REGISTRY.dispatch("news_settings_suggest_sources", {"query": q}, runtime=runtime, session=session)
-        return list(getattr(session, "ui_cards", []) or [])
-
-    # 3. Ambiguous or explicit topic suggestions (e.g. "suggest topics", "what should I follow", "recommend tech beats")
-    if re.search(r"\b(suggest|recommend|ideas|good|interesting|what|which)\b", low) and re.search(
-        r"\b(topic|topics|subject|subjects|interest|interests|follow|track|beat|beats)\b",
-        low,
-    ):
-        REGISTRY.dispatch("news_settings_suggest_topics", {"interest_hint": q}, runtime=runtime, session=session)
         return list(getattr(session, "ui_cards", []) or [])
 
     # 4. Explicit feed URL addition

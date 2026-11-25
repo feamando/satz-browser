@@ -23,7 +23,11 @@ if str(SGS_ROOT) not in sys.path:
 
 from satz_models import SatzSidecarRuntime, make_sidecar_server
 from satz_tools import REGISTRY as SATZ_TOOL_REGISTRY
-from satz_tools.fallback import maybe_fallback_settings_cards
+from satz_tools.fallback import (
+    maybe_fallback_news_settings_cards,
+    maybe_fallback_settings_cards,
+)
+from satz_tools.news_settings import build_news_settings_onboarding_payload
 from satz_tools.settings_staging import (
     clear_ephemeral_settings_state,
     execute_confirm_gate,
@@ -714,6 +718,151 @@ class TestSettingsToolsAndRegistry(unittest.TestCase):
             done2 = [e for e in evs2 if e.get("done")][-1]
             self.assertEqual(done2["brain_sources"], [])
             self.assertEqual(done2["ui_cards"][0]["kind"], "google_oauth_connect_card")
+
+    def test_news_settings_tools_cards_gate_and_trust_rule(self) -> None:
+        self.rt.passwords.create_profile("news_pref_prof", "246810")
+        self.rt._refresh_active_profile_brain()
+
+        # Prompts and active specs route news_settings exclusively to news_settings domain tools
+        ns_specs = SATZ_TOOL_REGISTRY.active_specs(domains=["news_settings"])
+        ns_names = {s["name"] for s in ns_specs}
+        self.assertIn("news_settings_get_summary", ns_names)
+        self.assertIn("news_settings_suggest_topics", ns_names)
+        self.assertIn("news_settings_suggest_sources", ns_names)
+        self.assertIn("news_settings_set_source_trust", ns_names)
+        self.assertNotIn("settings_add_provider", ns_names)
+        self.assertIn(
+            "news settings assistant",
+            build_local_tool_system_addendum(
+                ns_specs,
+                allow_web_tools=False,
+                conversation_origin="news_settings",
+            ).lower(),
+        )
+        self.assertIn(
+            "satz news settings workspace",
+            build_cloud_web_system_addendum(
+                allow_web_tools=False,
+                active_tools=ns_specs,
+                conversation_origin="news_settings",
+            ).lower(),
+        )
+
+        # Empty topics triggers proactive onboarding payload
+        ob = build_news_settings_onboarding_payload(self.rt)
+        self.assertTrue(ob["ok"])
+        self.assertTrue(ob["needs_onboarding"])
+        self.assertEqual(ob["topics_count"], 0)
+        self.assertIn("topics of interest", ob["prompt_text"].lower())
+        self.assertTrue(any(c["kind"] == "news_topic_suggestions_card" for c in ob["ui_cards"]))
+
+        h = self._make_harness(origin="news_settings")
+
+        # 1. Summary card
+        sum_res = h._dispatch_tool_call("news_settings_get_summary", {"focus": "all"})
+        self.assertTrue(sum_res["ok"])
+        self.assertTrue(sum_res["needs_onboarding"])
+        self.assertEqual(h.ui_cards[-1]["kind"], "news_settings_status_card")
+
+        # 2. Ambiguous topic suggestions
+        tp_sug = h._dispatch_tool_call("news_settings_suggest_topics", {"interest_hint": "something interesting"})
+        self.assertTrue(tp_sug["ok"])
+        self.assertGreater(len(tp_sug["suggestions"]), 0)
+        self.assertEqual(h.ui_cards[-1]["kind"], "news_topic_suggestions_card")
+
+        # 3. Add topic + delete topic uses confirm gate
+        tp_add = h._dispatch_tool_call(
+            "news_settings_manage_topic",
+            {"action": "add", "name": "Energy Grid", "keywords": "offshore, tariffs"},
+        )
+        self.assertTrue(tp_add["ok"])
+        topics_now = self.rt.news.list_topics()["topics"]
+        self.assertTrue(any(t["name"] == "Energy Grid" for t in topics_now))
+
+        tp_del = h._dispatch_tool_call("news_settings_manage_topic", {"action": "remove", "name": "Energy Grid"})
+        self.assertTrue(tp_del["confirm_required"])
+        self.assertEqual(h.ui_cards[-1]["kind"], "confirm_gate_card")
+        tok_tp = h.ui_cards[-1]["confirm_token"]
+        g_tp = execute_confirm_gate(self.rt, confirm_token=tok_tp)
+        self.assertTrue(g_tp["ok"])
+        self.assertIn("news_topics", g_tp["refresh_hints"])
+        self.assertFalse(any(t["name"] == "Energy Grid" for t in self.rt.news.list_topics()["topics"]))
+
+        # 4. Suggest German & EU news sources and set strict 30%-capped personal trust
+        src_sug = h._dispatch_tool_call("news_settings_suggest_sources", {"region_or_topic": "German news", "language": "de"})
+        self.assertTrue(src_sug["ok"])
+        self.assertTrue(any(s["language"] == "de" for s in src_sug["suggestions"]))
+        self.assertEqual(h.ui_cards[-1]["kind"], "news_source_suggestions_card")
+
+        trust_res = h._dispatch_tool_call("news_settings_set_source_trust", {"domain": "bbc.com", "personal_score": 2.0})
+        self.assertTrue(trust_res["ok"])
+        self.assertEqual(h.ui_cards[-1]["kind"], "news_source_trust_card")
+        sys_s = float(trust_res["system"])
+        self.assertAlmostEqual(float(trust_res["effective"]), round(0.7 * sys_s + 0.3 * 2.0, 2), places=2)
+
+        trust_rst = h._dispatch_tool_call("news_settings_set_source_trust", {"domain": "bbc.com", "reset": True})
+        self.assertTrue(trust_rst["ok"])
+        self.assertIsNone(trust_rst["personal"])
+
+        # 5. Unknown feed domain emits news_add_feed_card; delete feed uses confirm gate
+        unk_feed = h._dispatch_tool_call("news_settings_manage_source_feed", {"action": "add", "domain": "nytimes.com"})
+        self.assertTrue(unk_feed["needs_feed_url"])
+        self.assertEqual(h.ui_cards[-1]["kind"], "news_add_feed_card")
+
+        added_feed = h._dispatch_tool_call(
+            "news_settings_manage_source_feed",
+            {"action": "add", "domain": "customnews.example", "feed_url": "https://customnews.example/rss.xml", "title": "Custom Example"},
+        )
+        self.assertTrue(added_feed["ok"])
+        del_feed = h._dispatch_tool_call("news_settings_manage_source_feed", {"action": "remove", "domain": "customnews.example"})
+        self.assertTrue(del_feed["confirm_required"])
+        self.assertEqual(h.ui_cards[-1]["kind"], "confirm_gate_card")
+        g_fd = execute_confirm_gate(self.rt, confirm_token=h.ui_cards[-1]["confirm_token"])
+        self.assertTrue(g_fd["ok"])
+        self.assertIn("news_sources", g_fd["refresh_hints"])
+
+        # 6. Deterministic fallback covers ambiguous queries & news_settings skips Brain
+        self.assertEqual(
+            maybe_fallback_news_settings_cards(
+                self.rt, self._make_harness(origin="news_settings"), user_msg="Suggest topics to follow"
+            )[0]["kind"],
+            "news_topic_suggestions_card",
+        )
+        self.assertEqual(
+            maybe_fallback_news_settings_cards(
+                self.rt, self._make_harness(origin="news_settings"), user_msg="Suggest German news sources"
+            )[0]["kind"],
+            "news_source_suggestions_card",
+        )
+        self.assertEqual(
+            maybe_fallback_news_settings_cards(
+                self.rt, self._make_harness(origin="news_settings"), user_msg="Set trust for dw.com to 9"
+            )[0]["kind"],
+            "news_source_trust_card",
+        )
+        def _failing_503_ns(req, timeout=30.0):
+            raise urllib.error.HTTPError(req.full_url, 503, "Service Unavailable", {}, None)
+
+        with mock.patch.object(
+            self.rt.brain,
+            "build_model_context_with_citations",
+            side_effect=AssertionError("Brain lookup must not run in news_settings"),
+        ), mock.patch.object(
+            self.rt, "_resolve_provider_api_key", return_value=("gem-key", "vault")
+        ), mock.patch("urllib.request.urlopen", side_effect=_failing_503_ns):
+            evs = list(
+                self.rt.stream_chat(
+                    [{"role": "user", "content": "Suggest news topics to follow"}],
+                    [],
+                    model_id="gemini:gemini-4-hydrogen",
+                    conversation_id="conv-news-settings",
+                    origin="news_settings",
+                )
+            )
+            done = [e for e in evs if e.get("done")][-1]
+            self.assertEqual(done["brain_sources"], [])
+            self.assertTrue(done.get("ui_cards"))
+            self.assertEqual(done["ui_cards"][0]["kind"], "news_topic_suggestions_card")
 
 
 if __name__ == "__main__":

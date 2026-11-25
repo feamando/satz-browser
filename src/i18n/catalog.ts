@@ -1293,6 +1293,7 @@ export const EN_CATALOG = {
   "news.persp_topic_ph": { text: "Enter a topic or story to compare across news sources..." },
   "news.persp_compare_btn": { text: "Compare" },
   "news.persp_tracked_topics": { text: "Tracked topics" },
+  "news.no_topics_yet": { text: "No tracked topics yet" },
   "news.persp_recent_stories": { text: "Recent stories" },
   "news.persp_manage_topics": { text: "Manage topics & sources" },
   "news.persp_empty_title": { text: "Compare perspectives across independent sources" },
