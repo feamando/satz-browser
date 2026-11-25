@@ -21,10 +21,15 @@ from __future__ import annotations
 
 import argparse
 import collections
+import contextlib
 import hashlib
 import hmac
+import base64
 import html as html_lib
+import io
+import ipaddress
 import json
+import math
 import os
 import queue
 import re
@@ -67,6 +72,8 @@ STATIC_SYSTEM_PROMPT = (
     "- Every time you use a fact from a numbered source in SOURCES, cite it inline as [1], [2], etc.\n"
     "- Every time you use a fact from a numbered Brain item in SATZ BRAIN KNOWLEDGE BASE, cite it inline as [B1], [B2], etc.\n"
     "- When listing videos, articles, products, or web pages that have URLs in SOURCES (such as under [EXTRACTED PAGE ITEMS & IMAGES] or [KEY LINKS ON PAGE]), format each item's title as an inline Markdown link [Title](https://...) followed by its [n] citation.\n"
+    "- When the user asks to unsubscribe from an email sender/newsletter and an email source in SOURCES shows `Unsubscribe Options:`, summarize the sender and detected method with its `[n]` citation and direct them to click Confirm on the Actor Task Card below (never tell them to scroll down and click footer links themselves).\n"
+    "- When a numbered source in SOURCES or the Source Index Manifest is marked `[MANIFEST ONLY]` or cut/truncated and you need exact facts, numbers, or quotes from it, invoke `read_source(n)` (or output `<read_source>{\"n\": 14, \"query\": \"keywords\"}</read_source>` when running locally without tool schemas) BEFORE guessing or writing `[unsourced]`.\n"
     "- Keep answers concise and never use em dashes."
 )
 
@@ -141,6 +148,7 @@ _SENTENCE_INITIAL_SKIP_WORDS = {
     "overall",
     "page",
     "second",
+    "since",
     "source",
     "sources",
     "summary",
@@ -359,6 +367,88 @@ def check_citations(
     }
 
 
+_UNSUB_USER_INTENT_RE = re.compile(
+    r"\b(?:unsub[a-z]*|opt[\s-]?out|abmelden|abbestellen|austragen)\b|"
+    r"\bstop\s+(?:getting|receiving|sending)?\s*(?:these|all|the|more)?\s*(?:emails?|e-mails?|mails?|newsletters?|promos?|marketing)\b",
+    re.I,
+)
+_UNSUB_META_QUESTION_RE = re.compile(
+    r"^\s*(?:what\s+is|what\s+does|how\s+does|why\s+did|did\s+i|have\s+i|don't|do\s+not|never)\b",
+    re.I,
+)
+_UNSUB_MANUAL_ADVICE_RE = re.compile(
+    r"(?:scroll\s+to\s+the\s+(?:very\s+)?bottom|click\s+the\s+unsubscribe\s+link|"
+    r"click\s+on\s+the\s+unsubscribe|provided\s+in\s+(?:their|the)\s+footer|"
+    r"(?:cannot|can't|am\s+unable\s+to|don't\s+have\s+the\s+ability\s+to)\s+unsubscribe)",
+    re.I,
+)
+
+
+def detect_user_unsubscribe_intent(
+    user_msg: str,
+    prior_messages: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """
+    Strictly checks the USER's own message (never page/email sources) for an explicit request
+    to unsubscribe/opt out, and extracts any citation `[n]`, `msg-<id>`, or sender/brand name.
+    """
+    txt = (user_msg or "").strip()
+    if not txt or _UNSUB_META_QUESTION_RE.search(txt) or not _UNSUB_USER_INTENT_RE.search(txt):
+        return {"is_unsubscribe": False, "target_query": "", "cite_idx": None, "message_id": ""}
+
+    cite_m = re.search(r"\[(\d+)\]", txt)
+    cite_idx = int(cite_m.group(1)) if cite_m else None
+    mid_m = re.search(r"satzmail://message/(msg-[a-z0-9]+)\b", txt, flags=re.I)
+    explicit_mid = mid_m.group(1) if mid_m else ""
+
+    # Focus extraction on the sentence containing the unsubscribe verb so trailing follow-up sentences don't pollute target_query
+    focus_clause = txt
+    for clause in re.split(r"[?!;\n]+|(?<!\d)\.(?!\d)", txt):
+        if _UNSUB_USER_INTENT_RE.search(clause):
+            focus_clause = clause
+            break
+
+    cleaned = re.sub(r"\[(\d+)\]", " ", focus_clause)
+    cleaned = re.sub(
+        r"^(?:yes|yeah|yep|sure|ok|okay|please|pls|can\s+you|could\s+you|would\s+you|help\s+me)\b[\s,!]*",
+        "",
+        cleaned,
+        flags=re.I,
+    )
+    # Remove action words / generic nouns to isolate the brand/sender (e.g. 'idealo')
+    cleaned = re.sub(
+        r"\b(?:yes|yeah|please|could|can|would|you|just|me|us|i|want|to|from|of|the|this|that|it|them|"
+        r"these|all|my|unsub[a-z]*|opt[\s-]?out|abmelden|abbestellen|austragen|"
+        r"newsletter|newsletters|email|e-mail|emails|e-mails|mail|mails|promo|promos|marketing|sender)\b",
+        " ",
+        cleaned,
+        flags=re.I,
+    )
+    target_query = re.sub(r"[?!.,:;\"'()]+", " ", cleaned)
+    target_query = re.sub(r"\s+", " ", target_query).strip()
+
+    if not explicit_mid and not target_query and prior_messages:
+        for pm in reversed(prior_messages[-4:]):
+            p_txt = str(pm.get("content") or "")
+            pm_mid = re.search(r"satzmail://message/(msg-[a-z0-9]+)\b", p_txt, flags=re.I)
+            if pm_mid:
+                explicit_mid = pm_mid.group(1)
+                break
+            pm_url_tok = re.search(r"https?://(?:clicks?\.)?([a-z0-9.-]+)", p_txt, flags=re.I)
+            if pm_url_tok:
+                dom_parts = [p for p in pm_url_tok.group(1).split(".") if p not in ("www", "clicks", "news", "mail", "email", "com", "de", "org", "net")]
+                if dom_parts:
+                    target_query = dom_parts[0]
+                    break
+
+    return {
+        "is_unsubscribe": True,
+        "target_query": target_query[:120],
+        "cite_idx": cite_idx,
+        "message_id": explicit_mid,
+    }
+
+
 class SatzSidecarRuntime:
     def __init__(
         self,
@@ -368,6 +458,8 @@ class SatzSidecarRuntime:
         open_tab_char_budget: int = 6000,
         total_context_char_budget: int = 32000,
         bookmark_interval_minutes: float = 30.0,
+        news_interval_minutes: float = 60.0,
+        evals_dir: Path | None = None,
     ):
         self.sgs_root = sgs_root.resolve()
         self.legacy_store_path = store_path.resolve()
@@ -387,6 +479,7 @@ class SatzSidecarRuntime:
             sys.path.insert(0, str(self.sgs_root))
 
         from satz_brain import SatzBrain
+        from satz_google_auth import GoogleOAuthManager
         from satz_mail import SatzMailManager
         from satz_news import SatzNewsEngine
         from satz_passwords import ProfilePasswordManager
@@ -416,6 +509,17 @@ class SatzSidecarRuntime:
         self._current_store_key: str | None = (
             self.passwords.active_profile_id if self.passwords.unlocked else None
         )
+        self._unlock_defer_heavy: bool = False
+        self._unlock_busy_until: float = 0.0
+        self._warmup_gen: int = 0
+        self._resolved_cloud_slugs: dict[tuple[str, str], str] = {}
+        self._gemini_no_thinking_slugs: set[str] = set()
+        self._cloud_bg_cooldown_until: dict[str, float] = {}
+        self._cloud_bg_gate = threading.Semaphore(1)
+        self._cloud_bg_tls = threading.local()
+        self._last_tab_behavior_log: dict[str, float] = {}
+        self._staged_files: dict[str, dict[str, Any]] = {}
+        self._pending_settings_gates: dict[str, dict[str, Any]] = {}
         self.last_migration_counts: dict[str, int] = {}
         self.brain = SatzBrain(
             self.passwords.get_profile_brain_dir(),
@@ -423,8 +527,24 @@ class SatzSidecarRuntime:
             locked=not self.passwords.unlocked,
         )
         self.passwords.on_profile_change = self._refresh_active_profile_brain
+        self.google_auth = GoogleOAuthManager(self)
         self.mail = SatzMailManager(self)
         self.news = SatzNewsEngine(self)
+        from satz_drives import SatzDrivesManager
+        from satz_evals import EvalManager
+        from satz_i18n import SatzI18nManager
+        from satz_providers import SatzProvidersManager
+        from satz_skills import BehaviorMiner, DomainRecipeStore, SkillRunner
+        from satz_translate import SatzContentTranslator
+
+        self.drives = SatzDrivesManager(self)
+        self.recipes = DomainRecipeStore(self)
+        self.behavior = BehaviorMiner(self)
+        self.skills = SkillRunner(self)
+        self.providers = SatzProvidersManager(self)
+        self.translator = SatzContentTranslator(self)
+        self.i18n = SatzI18nManager(self)
+        self.evals = EvalManager(self, evals_dir=evals_dir)
         self._init_satz_tables()
 
         sgs_cache_dir = self.sgs_root / "data" / "planck3_cache"
@@ -435,6 +555,7 @@ class SatzSidecarRuntime:
             self.web.secondary = ["ddgs"]
 
         # Model states and lazy instances (defer `import torch` / CUDA probe until after HTTP port binds)
+        self.gemma_processor = None
         self.gemma_tok = None
         self.gemma_model = None
         self.gemma_loading = False
@@ -467,6 +588,12 @@ class SatzSidecarRuntime:
         self.worker_thread.start()
         self.bookmark_thread = threading.Thread(target=self._bookmark_indexer_loop, daemon=True)
         self.bookmark_thread.start()
+        self.news_wake_event = threading.Event()
+        self.news_sync_lock = threading.Lock()
+        self.news_refresh_interval_secs = max(5.0, float(news_interval_minutes) * 60.0)
+        self.news_sync_in_progress = False
+        self.news_thread = threading.Thread(target=self._news_sync_loop, daemon=True)
+        self.news_thread.start()
 
     def record_error(self, scope: str, err: Exception | str) -> dict[str, Any]:
         entry = {
@@ -761,6 +888,10 @@ class SatzSidecarRuntime:
 
             for st in target_stores.values():
                 self._repair_bookmark_entities_in_store(st.db)
+                st.db.execute(
+                    "INSERT OR REPLACE INTO satz_meta (key, value) VALUES (?, ?)",
+                    ("bookmark_entities_repaired_v1", "1"),
+                )
                 SatzNewsEngine.ensure_news_tables_on_conn(st.db)
                 st.db.commit()
         finally:
@@ -788,10 +919,94 @@ class SatzSidecarRuntime:
         print(f"[satz-sidecar] migrated legacy planck_store.sqlite -> {counts}", flush=True)
         return counts
 
-    def _refresh_active_profile_brain(self) -> None:
+    @contextlib.contextmanager
+    def _fast_http_unlock_context(self, window_sec: float = 4.0):
+        prev = self._unlock_defer_heavy
+        self._unlock_defer_heavy = True
+        self._unlock_busy_until = max(self._unlock_busy_until, time.time() + float(window_sec))
+        try:
+            yield
+        finally:
+            self._unlock_defer_heavy = prev
+
+    def wait_for_unlock_quiet(self, max_wait: float = 3.5) -> None:
+        """Yields Gemma/heavy preload briefly while a profile unlock handshake is active."""
+        deadline = time.time() + max(0.0, float(max_wait))
+        while time.time() < min(self._unlock_busy_until, deadline):
+            time.sleep(0.08)
+
+    def _run_post_unlock_warmup(self, pid: str | None, gen: int) -> None:
+        try:
+            if gen != self._warmup_gen:
+                return
+            is_unlocked = bool(self.passwords.unlocked and self.passwords.active_profile_id == pid and pid)
+            if is_unlocked:
+                with self.store_lock:
+                    if gen != self._warmup_gen or self._current_store_key != pid:
+                        return
+                    if hasattr(self, "news") and self.news is not None:
+                        try:
+                            self.news.seed_starter_feeds(self.store.db)
+                        except Exception as ne:
+                            self.record_error("news_seed_warmup", ne)
+                    try:
+                        rep = self.store.db.execute(
+                            "SELECT value FROM satz_meta WHERE key = 'bookmark_entities_repaired_v1'"
+                        ).fetchone()
+                        if not rep or str(rep["value"]) != "1":
+                            self._repair_bookmark_entities_in_store(self.store.db)
+                            self.store.db.execute(
+                                "INSERT OR REPLACE INTO satz_meta (key, value) VALUES (?, ?)",
+                                ("bookmark_entities_repaired_v1", "1"),
+                            )
+                            self.store.db.commit()
+                    except Exception as re_err:
+                        self.record_error("bookmark_repair_warmup", re_err)
+
+                if hasattr(self, "mail") and self.mail is not None:
+                    try:
+                        self.mail.start_sync_threads_for_unlocked_profile()
+                    except Exception as me:
+                        self.record_error("mail_sync_warmup", me)
+
+                if hasattr(self, "drives") and self.drives is not None:
+                    try:
+                        d_st = self.drives.get_status()
+                        if d_st["google"]["connected"] or d_st["onedrive"]["connected"]:
+                            self.drives.trigger_background_sync()
+                    except Exception as de:
+                        self.record_error("drives_sync_warmup", de)
+
+                # Release Gemma preload priority right after critical DB/sync setup finishes
+                self._unlock_busy_until = 0.0
+
+                if getattr(self, "brain", None) is not None and not self.brain.locked:
+                    try:
+                        self.brain.prewarm_encoder()
+                    except Exception:
+                        pass
+
+                if hasattr(self, "news") and self.news is not None:
+                    try:
+                        self.news.process_top_stories_to_brain(limit=12, force=False)
+                    except Exception as ne:
+                        self.record_error("news_brain_catchup", ne)
+
+                self.bookmark_wake_event.set()
+                self.news_wake_event.set()
+                if hasattr(self, "behavior") and self.behavior is not None:
+                    try:
+                        self.behavior.mine_proposals(min_interval_secs=900.0)
+                    except Exception:
+                        pass
+        finally:
+            self._unlock_busy_until = 0.0
+
+    def _refresh_active_profile_brain(self, defer_heavy: bool | None = None) -> None:
         from satz_brain import SatzBrain
         from src.planck3.store import Store
 
+        use_defer = bool(self._unlock_defer_heavy if defer_heavy is None else defer_heavy)
         with self.store_lock:
             is_unlocked = bool(self.passwords.unlocked and self.passwords.active_profile_id)
             pid = self.passwords.active_profile_id if is_unlocked else None
@@ -799,6 +1014,12 @@ class SatzSidecarRuntime:
                 self._migrate_legacy_shared_store_if_needed(pid)
             target_store_path = self.passwords.get_profile_store_path(pid)
             if getattr(self, "_current_store_key", "__INIT__") != pid:
+                try:
+                    from satz_tools.settings_staging import clear_ephemeral_settings_state
+
+                    clear_ephemeral_settings_state(self)
+                except Exception:
+                    pass
                 carried_meta: list[tuple[str, str]] = []
                 if hasattr(self, "store") and self.store is not None:
                     try:
@@ -816,7 +1037,7 @@ class SatzSidecarRuntime:
                 self.store_path = target_store_path
                 self._current_store_key = pid
                 self._init_satz_tables()
-                if hasattr(self, "news") and self.news is not None:
+                if not use_defer and hasattr(self, "news") and self.news is not None:
                     self.news.seed_starter_feeds(self.store.db)
                 if carried_meta:
                     for mk, mv in carried_meta:
@@ -830,7 +1051,17 @@ class SatzSidecarRuntime:
                                 (mk, mv),
                             )
                     self.store.db.commit()
-                self._repair_bookmark_entities_in_store(self.store.db)
+                if not use_defer:
+                    rep = self.store.db.execute(
+                        "SELECT value FROM satz_meta WHERE key = 'bookmark_entities_repaired_v1'"
+                    ).fetchone()
+                    if not rep or str(rep["value"]) != "1":
+                        self._repair_bookmark_entities_in_store(self.store.db)
+                        self.store.db.execute(
+                            "INSERT OR REPLACE INTO satz_meta (key, value) VALUES (?, ?)",
+                            ("bookmark_entities_repaired_v1", "1"),
+                        )
+                        self.store.db.commit()
                 self.pause_learning = self._load_pause_learning()
 
             self.brain = SatzBrain(
@@ -840,7 +1071,25 @@ class SatzSidecarRuntime:
             )
 
         if hasattr(self, "mail") and self.mail is not None:
-            self.mail.rebind_profile()
+            self.mail.rebind_profile(defer_sync_start=use_defer)
+        if hasattr(self, "drives") and self.drives is not None:
+            self.drives.rebind_profile(defer_sync_start=use_defer)
+
+        if use_defer and is_unlocked:
+            self._warmup_gen += 1
+            gen = self._warmup_gen
+            t = threading.Thread(
+                target=self._run_post_unlock_warmup,
+                args=(pid, gen),
+                daemon=True,
+                name="satz-unlock-warmup",
+            )
+            t.start()
+        elif not use_defer and is_unlocked and hasattr(self, "news") and self.news is not None:
+            try:
+                self.news.process_top_stories_to_brain(limit=12, force=False)
+            except Exception as ne:
+                self.record_error("news_brain_catchup", ne)
 
     def start_gemma_preload(self) -> None:
         """
@@ -848,6 +1097,7 @@ class SatzSidecarRuntime:
         """
         def _preload():
             try:
+                self.wait_for_unlock_quiet(max_wait=4.0)
                 self.ensure_gemma()
                 print("[satz-sidecar] gemma [warm] - preload complete", flush=True)
             except Exception as e:
@@ -874,6 +1124,8 @@ class SatzSidecarRuntime:
                     title TEXT NOT NULL,
                     text TEXT NOT NULL,
                     extra_json TEXT,
+                    findings_json TEXT,
+                    affordances_json TEXT,
                     capture_mode TEXT NOT NULL DEFAULT 'dom',
                     updated_at REAL NOT NULL
                 );
@@ -910,6 +1162,14 @@ class SatzSidecarRuntime:
                     backoff_until REAL DEFAULT 0.0
                 );
 
+                CREATE TABLE IF NOT EXISTS satz_favicons (
+                    origin TEXT PRIMARY KEY,
+                    icon_url TEXT NOT NULL DEFAULT '',
+                    data_url TEXT NOT NULL DEFAULT '',
+                    updated_at REAL NOT NULL DEFAULT 0.0,
+                    failed_at REAL NOT NULL DEFAULT 0.0
+                );
+
                 CREATE TABLE IF NOT EXISTS satz_meta (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -934,6 +1194,31 @@ class SatzSidecarRuntime:
                     created_at REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_satz_watches_conv ON satz_watches(conversation_id);
+
+                CREATE TABLE IF NOT EXISTS satz_harness_signals (
+                    signal_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    query_type TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    source_count INTEGER NOT NULL DEFAULT 0,
+                    chars_cut INTEGER NOT NULL DEFAULT 0,
+                    outcome_signal TEXT NOT NULL,
+                    web_enabled INTEGER NOT NULL DEFAULT 0,
+                    mail_enabled INTEGER NOT NULL DEFAULT 0,
+                    target_model TEXT NOT NULL DEFAULT '',
+                    prompt_preview TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_satz_signals_qtype_model ON satz_harness_signals(query_type, model_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_satz_signals_outcome ON satz_harness_signals(outcome_signal, created_at);
+
+                CREATE TABLE IF NOT EXISTS satz_url_previews (
+                    url TEXT PRIMARY KEY,
+                    domain TEXT NOT NULL DEFAULT '',
+                    title TEXT NOT NULL DEFAULT '',
+                    snippet TEXT NOT NULL DEFAULT '',
+                    image_url TEXT NOT NULL DEFAULT '',
+                    updated_at REAL NOT NULL DEFAULT 0.0
+                );
                 """
             )
             existing_bm_cols = {
@@ -958,7 +1243,16 @@ class SatzSidecarRuntime:
             }
             if "findings_json" not in existing_src_cols:
                 db_conn.execute("ALTER TABLE satz_sources ADD COLUMN findings_json TEXT")
+            if "affordances_json" not in existing_src_cols:
+                db_conn.execute("ALTER TABLE satz_sources ADD COLUMN affordances_json TEXT")
             SatzNewsEngine.ensure_news_tables_on_conn(db_conn)
+            from satz_skills import ensure_skills_tables_on_conn
+            from satz_providers import ensure_provider_tables_on_conn
+            from satz_translate import ensure_translation_tables_on_conn
+
+            ensure_skills_tables_on_conn(db_conn)
+            ensure_provider_tables_on_conn(db_conn)
+            ensure_translation_tables_on_conn(db_conn)
             if hasattr(self, "news") and self.news is not None:
                 self.news.seed_starter_feeds(db_conn)
             # Purge any historical source rows where unclosed <style> blocks polluted trafilatura fallback with raw CSS
@@ -1183,6 +1477,7 @@ class SatzSidecarRuntime:
 
         mail_status = self.mail.get_status() if hasattr(self, "mail") and self.mail else None
         news_status = self.news.get_status() if hasattr(self, "news") and self.news else None
+        drives_status = self.drives.get_status() if hasattr(self, "drives") and self.drives else None
         return {
             "online": True,
             "version": SATZ_SIDECAR_VERSION,
@@ -1198,6 +1493,12 @@ class SatzSidecarRuntime:
             "errors": self.get_errors(),
             "mail": mail_status,
             "news": news_status,
+            "drives": drives_status,
+            "profile": {
+                "unlocked": bool(self.passwords.unlocked),
+                "active_profile_id": self.passwords.active_profile_id if self.passwords.unlocked else None,
+                "unlocking": bool(getattr(self.passwords, "_unlock_in_progress", False)),
+            },
             "watch_badges": self.get_unread_watch_conversations(),
             "model_config": self.get_model_management_config(),
             "digest_revision": self._compute_digest_revision(mail_status, news_status),
@@ -1219,6 +1520,18 @@ class SatzSidecarRuntime:
             cl_row = db.execute(
                 "SELECT COUNT(*), COALESCE(MAX(updated_at), 0) FROM satz_news_clusters WHERE is_hidden = 0"
             ).fetchone()
+            try:
+                nt_row = db.execute(
+                    "SELECT COUNT(*), COALESCE(MAX(updated_at), 0) FROM satz_news_translations"
+                ).fetchone()
+            except Exception:
+                nt_row = (0, 0)
+        tr_lang_sig = ""
+        if getattr(self, "translator", None) is not None:
+            try:
+                tr_lang_sig = str(self.translator.get_preferences().get("primary_language") or "")
+            except Exception:
+                tr_lang_sig = ""
         brain_sig = "0"
         if unlocked and not getattr(self.brain, "locked", True):
             try:
@@ -1245,6 +1558,7 @@ class SatzSidecarRuntime:
             f"bm{round(float(bm_max or 0.0), 3)}:"
             f"w{round(float(w_max or 0.0), 3)}:"
             f"cl{int(cl_row[0])}/{round(float(cl_row[1]), 3)}/{int(n.get('articles') or 0)}:"
+            f"nt{int(nt_row[0])}/{round(float(nt_row[1]), 3)}/{tr_lang_sig}:"
             f"m{m_sig}:b{brain_sig}"
         )
 
@@ -1701,11 +2015,129 @@ class SatzSidecarRuntime:
             return "mistral", clean
         return None
 
+    @staticmethod
+    def _parse_chat_images(
+        raw_images: list[dict[str, Any]] | None,
+        max_images: int = 6,
+    ) -> list[dict[str, Any]]:
+        if not raw_images or not isinstance(raw_images, list):
+            return []
+        from PIL import Image, ImageOps
+
+        fmt_to_mime = {
+            "PNG": "image/png",
+            "JPEG": "image/jpeg",
+            "JPG": "image/jpeg",
+            "WEBP": "image/webp",
+            "GIF": "image/gif",
+        }
+        parsed: list[dict[str, Any]] = []
+        for item in raw_images:
+            if len(parsed) >= max_images:
+                break
+            if not isinstance(item, dict):
+                continue
+            if item.get("pil_image") is not None and item.get("b64") and item.get("mime") and item.get("data_url"):
+                parsed.append(item)
+                continue
+            data_url = str(item.get("data_url") or "").strip()
+            raw_b64 = str(item.get("b64") or "").strip()
+            header_mime = str(item.get("mime") or "").strip().lower()
+            if data_url.startswith("data:") and ";base64," in data_url:
+                header, b64_part = data_url.split(";base64,", 1)
+                header_mime = header[5:].split(";", 1)[0].strip().lower() or header_mime
+                raw_b64 = b64_part.strip()
+            if not raw_b64:
+                continue
+            try:
+                raw_bytes = base64.b64decode(raw_b64, validate=False)
+                if not raw_bytes:
+                    continue
+                with Image.open(io.BytesIO(raw_bytes)) as opened:
+                    opened.load()
+                    orig_fmt = (opened.format or "").upper()
+                    exif_val = None
+                    try:
+                        exif_val = opened.getexif().get(274)
+                    except Exception:
+                        exif_val = None
+                    transposed = ImageOps.exif_transpose(opened)
+                    rgb_img = transposed.convert("RGB")
+
+                    if orig_fmt in fmt_to_mime and exif_val in (None, 1):
+                        mime = fmt_to_mime[orig_fmt]
+                        out_bytes = raw_bytes
+                    else:
+                        buf = io.BytesIO()
+                        save_fmt = orig_fmt if orig_fmt in ("PNG", "JPEG", "WEBP") else "PNG"
+                        if save_fmt == "JPEG":
+                            rgb_img.save(buf, format="JPEG", quality=90)
+                            mime = "image/jpeg"
+                        elif save_fmt == "WEBP":
+                            transposed.save(buf, format="WEBP", quality=90)
+                            mime = "image/webp"
+                        else:
+                            transposed.save(buf, format="PNG")
+                            mime = "image/png"
+                        out_bytes = buf.getvalue()
+            except Exception:
+                continue
+
+            out_b64 = base64.b64encode(out_bytes).decode("ascii")
+            parsed.append(
+                {
+                    "name": str(item.get("name") or "image.png"),
+                    "mime": mime,
+                    "b64": out_b64,
+                    "data_url": f"data:{mime};base64,{out_b64}",
+                    "pil_image": rgb_img,
+                }
+            )
+        return parsed
+
+    def trigger_cloud_cooldown(self, provider_id: str, secs: float = 35.0) -> None:
+        pid = str(provider_id or "").strip().lower()
+        if not pid:
+            return
+        until = time.time() + max(1.0, float(secs))
+        cur = float(self._cloud_bg_cooldown_until.get(pid) or 0.0)
+        if until > cur:
+            self._cloud_bg_cooldown_until[pid] = until
+
+    def cloud_cooldown_remaining(self, provider_id: str) -> float:
+        pid = str(provider_id or "").strip().lower()
+        if not pid:
+            return 0.0
+        return max(0.0, float(self._cloud_bg_cooldown_until.get(pid) or 0.0) - time.time())
+
+    def is_background_cloud_context(self) -> bool:
+        return int(getattr(self._cloud_bg_tls, "depth", 0) or 0) > 0
+
+    def background_cloud_scope(self):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _ctx():
+            self._cloud_bg_tls.depth = int(getattr(self._cloud_bg_tls, "depth", 0) or 0) + 1
+            try:
+                yield
+            finally:
+                self._cloud_bg_tls.depth = max(0, int(getattr(self._cloud_bg_tls, "depth", 0) or 1) - 1)
+
+        return _ctx()
+
     def _generate_with_cloud_provider(
         self,
         model_id: str,
         chat_msgs: list[dict[str, str]],
+        images: list[dict[str, Any]] | None = None,
+        *,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        thinking_budget: int | None = None,
     ) -> str:
+        eff_max_tokens = int(max_tokens) if (max_tokens is not None and int(max_tokens) > 0) else 1536
+        eff_temp = float(temperature) if temperature is not None else 0.2
         parsed = self._parse_cloud_model_id(model_id)
         if not parsed:
             raise RuntimeError(f"Unsupported cloud model identifier: {model_id}")
@@ -1715,8 +2147,29 @@ class SatzSidecarRuntime:
             raise RuntimeError(
                 f"{provider_id.upper()} API key not configured. Open [settings] -> [model management & cloud setup] and save your key to vault.enc."
             )
+        norm_images = self._parse_chat_images(images)
+        req_timeout = 60.0 if norm_images else 30.0
 
         if provider_id == "gemini":
+            from contextlib import nullcontext
+            from satz_web_harness import (
+                _using_patched_urlopen,
+                build_gemini_candidate_slugs,
+                build_gemini_generation_config,
+                format_http_error_summary,
+                is_gemini_auth_error,
+                log_gemini_slug_event,
+                parse_retry_after_secs,
+                read_http_error_body,
+                shared_http_post_json,
+            )
+
+            is_bg = self.is_background_cloud_context()
+            if is_bg and not _using_patched_urlopen():
+                rem_cd = self.cloud_cooldown_remaining("gemini")
+                if rem_cd > 0:
+                    raise RuntimeError(f"HTTP Error 429: Gemini background cooldown ({int(rem_cd)}s remaining)")
+
             sys_parts: list[dict[str, str]] = []
             contents: list[dict[str, Any]] = []
             for m in chat_msgs:
@@ -1729,53 +2182,150 @@ class SatzSidecarRuntime:
                     contents.append({"role": g_role, "parts": [{"text": txt}]})
             if not contents:
                 contents.append({"role": "user", "parts": [{"text": "Hello"}]})
-            payload: dict[str, Any] = {
-                "contents": contents,
-                "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1536},
-            }
-            if sys_parts:
-                payload["systemInstruction"] = {"parts": sys_parts}
+            if norm_images:
+                target_idx = next(
+                    (i for i in range(len(contents) - 1, -1, -1) if contents[i].get("role") == "user"),
+                    len(contents) - 1,
+                )
+                for img in norm_images:
+                    contents[target_idx]["parts"].append(
+                        {"inlineData": {"mimeType": img["mime"], "data": img["b64"]}}
+                    )
 
-            candidate_slugs = [slug]
-            for fb in ("gemini-3.5-flash-lite", "gemini-flash-lite-latest", "gemini-3-flash-preview"):
-                if fb not in candidate_slugs:
-                    candidate_slugs.append(fb)
+            cached_slug = self._resolved_cloud_slugs.get(("gemini", slug))
+            candidate_slugs = build_gemini_candidate_slugs(slug, cached_slug, allow_model_fallback=True)
 
             last_err: Exception | None = None
-            for try_slug in candidate_slugs:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(try_slug)}:generateContent?key={urllib.parse.quote(api_key)}"
-                req = urllib.request.Request(
-                    url,
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                try:
-                    with urllib.request.urlopen(req, timeout=14.0) as resp:
-                        raw = json.loads(resp.read().decode("utf-8", errors="replace"))
-                    cands = raw.get("candidates") or []
-                    if not cands:
-                        raise RuntimeError(f"Gemini ({try_slug}) returned no candidates: {raw}")
-                    parts = ((cands[0].get("content") or {}).get("parts")) or []
-                    return "".join(str(p.get("text") or "") for p in parts).strip()
-                except urllib.error.HTTPError as he:
-                    last_err = he
-                    if he.code in (404, 429, 500, 503):
-                        continue
-                    err_detail = ""
+            attempt_reasons: list[str] = []
+            slug_perm_404 = False
+            gate_ctx = self._cloud_bg_gate if is_bg else nullcontext()
+            tried_429 = 0
+            with gate_ctx:
+                for idx_s, try_slug in enumerate(candidate_slugs):
+                    next_slug = candidate_slugs[idx_s + 1] if (idx_s + 1) < len(candidate_slugs) else None
+                    low_slug = try_slug.lower()
+                    allow_think = (
+                        not _using_patched_urlopen()
+                        and try_slug not in self._gemini_no_thinking_slugs
+                        and any(k in low_slug for k in ("flash", "pro", "2.5", "3", "4"))
+                    )
+                    gen_cfg = build_gemini_generation_config(
+                        try_slug,
+                        temperature=eff_temp,
+                        max_tokens=eff_max_tokens,
+                        allow_thinking=allow_think,
+                        thinking_budget=thinking_budget,
+                        prefer_thinking=(eff_temp > 0.08),
+                    )
+                    payload: dict[str, Any] = {
+                        "contents": contents,
+                        "generationConfig": gen_cfg,
+                    }
+                    if sys_parts:
+                        payload["systemInstruction"] = {"parts": sys_parts}
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(try_slug)}:generateContent?key={urllib.parse.quote(api_key)}"
                     try:
-                        err_detail = he.read().decode("utf-8", errors="replace")[:240]
-                    except Exception:
-                        pass
-                    raise RuntimeError(f"Gemini API error ({he.code} on {try_slug}): {err_detail or he}") from he
-                except Exception as exc:
-                    last_err = exc
-                    continue
-            raise RuntimeError(f"Gemini request failed across candidate models ({candidate_slugs}): {last_err}")
+                        raw = shared_http_post_json(
+                            url,
+                            payload,
+                            {"Content-Type": "application/json"},
+                            timeout=(60.0 if norm_images else 14.0),
+                        )
+                        if try_slug == slug or slug_perm_404:
+                            self._resolved_cloud_slugs[("gemini", slug)] = try_slug
+                        cands = raw.get("candidates") or []
+                        if not cands:
+                            raise RuntimeError(f"Gemini ({try_slug}) returned no candidates: {raw}")
+                        parts = ((cands[0].get("content") or {}).get("parts")) or []
+                        return "".join(
+                            str(p.get("text") or "")
+                            for p in parts
+                            if isinstance(p, dict) and p.get("text") and not p.get("thought")
+                        ).strip() or "".join(str(p.get("text") or "") for p in parts).strip()
+                    except urllib.error.HTTPError as he:
+                        last_err = he
+                        err_detail = read_http_error_body(he, 320)
+                        if he.code == 400 and is_gemini_auth_error(err_detail):
+                            reason_txt = format_http_error_summary(he, err_detail)
+                            log_gemini_slug_event(self, "gemini_fallback", try_slug, reason_txt)
+                            raise RuntimeError(f"Gemini API error ({he.code} on {try_slug}): {err_detail or he}") from he
+                        if he.code == 400 and "thinkingConfig" in gen_cfg:
+                            # Gemini 3+/lite models may return generic INVALID_ARGUMENT without "thinking" in body.
+                            self._gemini_no_thinking_slugs.add(try_slug)
+                            gen_cfg.pop("thinkingConfig", None)
+                            try:
+                                raw = shared_http_post_json(
+                                    url,
+                                    payload,
+                                    {"Content-Type": "application/json"},
+                                    timeout=(60.0 if norm_images else 14.0),
+                                )
+                                if try_slug == slug or slug_perm_404:
+                                    self._resolved_cloud_slugs[("gemini", slug)] = try_slug
+                                cands = raw.get("candidates") or []
+                                if not cands:
+                                    raise RuntimeError(f"Gemini ({try_slug}) returned no candidates: {raw}")
+                                parts = ((cands[0].get("content") or {}).get("parts")) or []
+                                return "".join(str(p.get("text") or "") for p in parts if not p.get("thought")).strip()
+                            except urllib.error.HTTPError as he2:
+                                he = he2
+                                err_detail = read_http_error_body(he2, 320) or err_detail
+                                last_err = RuntimeError(f"Gemini API error ({he.code} on {try_slug}): {err_detail or he}")
+                            except Exception as fb_ex:
+                                reason_txt = format_http_error_summary(fb_ex)
+                                attempt_reasons.append(f"{try_slug} -> {reason_txt}")
+                                log_gemini_slug_event(self, "gemini_fallback", try_slug, reason_txt, next_slug)
+                                last_err = fb_ex
+                                continue
+
+                        reason_txt = format_http_error_summary(he, err_detail)
+                        if he.code == 404 and try_slug == slug:
+                            slug_perm_404 = True
+                        if cached_slug and cached_slug != slug and cached_slug == try_slug:
+                            self._resolved_cloud_slugs.pop(("gemini", slug), None)
+
+                        if he.code == 429:
+                            ra = parse_retry_after_secs(he, default=35.0)
+                            self.trigger_cloud_cooldown("gemini", max(20.0, min(90.0, ra)))
+                            tried_429 += 1
+                            stop_after_429 = not _using_patched_urlopen() and (is_bg or tried_429 >= 2)
+                            attempt_reasons.append(f"{try_slug} -> {reason_txt}")
+                            log_gemini_slug_event(
+                                self,
+                                "gemini_fallback",
+                                try_slug,
+                                reason_txt,
+                                None if stop_after_429 else next_slug,
+                            )
+                            if stop_after_429:
+                                break
+                            if not _using_patched_urlopen():
+                                time.sleep(min(2.0, max(0.6, ra)))
+                            continue
+
+                        if he.code in (400, 404, 500, 503):
+                            attempt_reasons.append(f"{try_slug} -> {reason_txt}")
+                            log_gemini_slug_event(self, "gemini_fallback", try_slug, reason_txt, next_slug)
+                            last_err = RuntimeError(f"Gemini API error ({he.code} on {try_slug}): {err_detail or he}")
+                            continue
+                        log_gemini_slug_event(self, "gemini_fallback", try_slug, reason_txt)
+                        raise RuntimeError(f"Gemini API error ({he.code} on {try_slug}): {err_detail or he}") from he
+                    except Exception as exc:
+                        if cached_slug and cached_slug != slug and cached_slug == try_slug:
+                            self._resolved_cloud_slugs.pop(("gemini", slug), None)
+                        reason_txt = format_http_error_summary(exc)
+                        attempt_reasons.append(f"{try_slug} -> {reason_txt}")
+                        log_gemini_slug_event(self, "gemini_fallback", try_slug, reason_txt, next_slug)
+                        last_err = exc
+                        continue
+            reasons_joined = "; ".join(attempt_reasons) if attempt_reasons else str(last_err)
+            raise RuntimeError(f"Gemini request failed across candidate models ({candidate_slugs}): {reasons_joined}")
 
         if provider_id == "anthropic":
+            from satz_web_harness import shared_http_post_json
+
             sys_texts: list[str] = []
-            anth_msgs: list[dict[str, str]] = []
+            anth_msgs: list[dict[str, Any]] = []
             for m in chat_msgs:
                 role = m.get("role") or "user"
                 txt = str(m.get("content") or "")
@@ -1786,56 +2336,86 @@ class SatzSidecarRuntime:
                     anth_msgs.append({"role": a_role, "content": txt})
             if not anth_msgs:
                 anth_msgs.append({"role": "user", "content": "Hello"})
+            if norm_images:
+                target_idx = next(
+                    (i for i in range(len(anth_msgs) - 1, -1, -1) if anth_msgs[i].get("role") == "user"),
+                    len(anth_msgs) - 1,
+                )
+                cur_txt = str(anth_msgs[target_idx].get("content") or "")
+                anth_msgs[target_idx]["content"] = [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": img["mime"],
+                            "data": img["b64"],
+                        },
+                    }
+                    for img in norm_images
+                ] + [{"type": "text", "text": cur_txt}]
             payload = {
                 "model": slug,
-                "max_tokens": 1536,
-                "temperature": 0.2,
+                "max_tokens": eff_max_tokens,
+                "temperature": eff_temp,
                 "messages": anth_msgs,
             }
             if sys_texts:
                 payload["system"] = "\n\n".join(sys_texts)
-            req = urllib.request.Request(
+            raw = shared_http_post_json(
                 "https://api.anthropic.com/v1/messages",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={
+                payload,
+                {
                     "Content-Type": "application/json",
                     "x-api-key": api_key,
                     "anthropic-version": "2023-06-01",
                 },
-                method="POST",
+                timeout=req_timeout,
             )
-            with urllib.request.urlopen(req, timeout=30.0) as resp:
-                raw = json.loads(resp.read().decode("utf-8", errors="replace"))
             blocks = raw.get("content") or []
             return "".join(str(b.get("text") or "") for b in blocks if b.get("type") == "text").strip()
 
         if provider_id in ("openai", "mistral"):
+            from satz_web_harness import shared_http_post_json
+
             endpoint = (
                 "https://api.openai.com/v1/chat/completions"
                 if provider_id == "openai"
                 else "https://api.mistral.ai/v1/chat/completions"
             )
-            oa_msgs = [
+            oa_msgs: list[dict[str, Any]] = [
                 {"role": m.get("role") or "user", "content": str(m.get("content") or "")}
                 for m in chat_msgs
             ]
+            if norm_images:
+                target_idx = next(
+                    (i for i in range(len(oa_msgs) - 1, -1, -1) if oa_msgs[i].get("role") == "user"),
+                    -1,
+                )
+                if target_idx == -1:
+                    oa_msgs.append({"role": "user", "content": "Hello"})
+                    target_idx = len(oa_msgs) - 1
+                cur_txt = str(oa_msgs[target_idx].get("content") or "")
+                oa_msgs[target_idx]["content"] = [{"type": "text", "text": cur_txt}] + [
+                    {"type": "image_url", "image_url": {"url": img["data_url"]}}
+                    for img in norm_images
+                ]
             payload = {
                 "model": slug,
                 "messages": oa_msgs,
             }
+            if max_tokens is not None and int(max_tokens) > 0:
+                payload["max_tokens"] = eff_max_tokens
             if not slug.lower().startswith(("o1", "o3", "o4")):
-                payload["temperature"] = 0.2
-            req = urllib.request.Request(
+                payload["temperature"] = eff_temp
+            raw = shared_http_post_json(
                 endpoint,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={
+                payload,
+                {
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {api_key}",
                 },
-                method="POST",
+                timeout=req_timeout,
             )
-            with urllib.request.urlopen(req, timeout=30.0) as resp:
-                raw = json.loads(resp.read().decode("utf-8", errors="replace"))
             choices = raw.get("choices") or []
             if not choices:
                 raise RuntimeError(f"{provider_id} returned no choices: {raw}")
@@ -1850,6 +2430,7 @@ class SatzSidecarRuntime:
         user_prompt: str,
         temperature: float = 0.15,
         max_tokens: int = 800,
+        thinking_budget: int | None = None,
     ) -> str:
         """
         Unified single-turn completion helper for structured News roles
@@ -1862,7 +2443,13 @@ class SatzSidecarRuntime:
             {"role": "user", "content": user_prompt},
         ]
         if self._parse_cloud_model_id(model_id) is not None:
-            return self._generate_with_cloud_provider(model_id, msgs).replace("\u2014", "-")
+            return self._generate_with_cloud_provider(
+                model_id,
+                msgs,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                thinking_budget=thinking_budget,
+            ).replace("\u2014", "-")
 
         tok, model = self.ensure_gemma()
         import torch
@@ -1883,10 +2470,123 @@ class SatzSidecarRuntime:
         gen_ids = out_ids[0][inputs["input_ids"].shape[1] :]
         return tok.decode(gen_ids, skip_special_tokens=True).replace("\u2014", "-").strip()
 
+    def _stream_role_prompt(
+        self,
+        model_id: str,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.15,
+        max_tokens: int = 560,
+        thinking_budget: int | None = 0,
+    ):
+        """
+        Streaming counterpart of `_complete_role_prompt` yielding `{'delta': str}` /
+        `{'phase': 'heartbeat'}` events and ending with `{'__full_raw': str}`.
+        Uses existing SSE cloud clients or local Gemma `TextIteratorStreamer`.
+        """
+        msgs = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        if self._parse_cloud_model_id(model_id) is not None:
+            from satz_web_harness import WebSearchSessionHarness, stream_cloud_chat
+
+            h = WebSearchSessionHarness(
+                self,
+                combined_sources=[],
+                hydrated_sources=[],
+                used_source_ids=[],
+                cited_web_sources=[],
+                source_stats_list=[],
+                allow_web_tools=False,
+                user_msg=user_prompt,
+            )
+            full_txt = ""
+            for ev in stream_cloud_chat(
+                h,
+                model_id=model_id,
+                chat_msgs=msgs,
+                allow_web_tools=False,
+                allow_actor_tools=False,
+                thinking_budget=thinking_budget,
+                single_turn=True,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            ):
+                if "__full_raw" in ev:
+                    full_txt = str(ev.get("__full_raw") or "")
+                elif ev.get("delta") or ev.get("phase") == "heartbeat":
+                    yield ev
+            yield {"__full_raw": full_txt.replace("\u2014", "-").strip()}
+            return
+
+        tok, model = self.ensure_gemma()
+        import queue as _q
+        import torch
+        from transformers import TextIteratorStreamer
+
+        inputs = tok.apply_chat_template(
+            msgs,
+            add_generation_prompt=True,
+            return_tensors="pt",
+            return_dict=True,
+        ).to(model.device)
+        streamer = TextIteratorStreamer(tok, skip_prompt=True, skip_special_tokens=True)
+        chunk_q: _q.Queue[str | None] = _q.Queue()
+        gen_err: list[Exception] = []
+
+        def _run_gen() -> None:
+            try:
+                with self.gemma_infer_lock, torch.no_grad():
+                    model.generate(
+                        **inputs,
+                        streamer=streamer,
+                        max_new_tokens=max_tokens,
+                        do_sample=temperature > 0.05,
+                        temperature=temperature if temperature > 0.05 else None,
+                    )
+            except Exception as exc:
+                gen_err.append(exc)
+                try:
+                    streamer.end()
+                except Exception:
+                    pass
+
+        def _pump() -> None:
+            try:
+                for piece in streamer:
+                    if piece:
+                        chunk_q.put(str(piece))
+            finally:
+                chunk_q.put(None)
+
+        gt = threading.Thread(target=_run_gen, daemon=True)
+        pt = threading.Thread(target=_pump, daemon=True)
+        gt.start()
+        pt.start()
+        parts_out: list[str] = []
+        while True:
+            try:
+                piece = chunk_q.get(timeout=5.0)
+            except _q.Empty:
+                yield {"phase": "heartbeat"}
+                continue
+            if piece is None:
+                break
+            clean_p = piece.replace("\u2014", "-")
+            parts_out.append(clean_p)
+            yield {"delta": clean_p}
+        gt.join(timeout=5.0)
+        pt.join(timeout=2.0)
+        if gen_err:
+            raise gen_err[0]
+        yield {"__full_raw": "".join(parts_out).strip()}
+
     # ── Lazy Model Loaders ───────────────────────────────────────────────
     def ensure_gemma(self):
         if self.gemma_model is not None:
             return self.gemma_tok, self.gemma_model
+        self.wait_for_unlock_quiet(max_wait=3.0)
         with self.model_lock:
             if self.gemma_model is not None:
                 return self.gemma_tok, self.gemma_model
@@ -1897,18 +2597,31 @@ class SatzSidecarRuntime:
             try:
                 import torch
                 from satz_brain import _SHARED_ENCODER_LOCK
-                from transformers import AutoModelForCausalLM, AutoTokenizer
+                from transformers import AutoModelForCausalLM, AutoProcessor, AutoTokenizer
 
                 with _SHARED_ENCODER_LOCK:
                     dev = self._detect_gemma_device()
                     self.gemma_device = dev
                     print(f"[satz-sidecar] loading Gemma 4 E4B from {gemma_dir} onto {dev} ...", flush=True)
-                    tok = AutoTokenizer.from_pretrained(str(gemma_dir))
+                    proc = None
+                    try:
+                        proc = AutoProcessor.from_pretrained(str(gemma_dir))
+                    except Exception:
+                        proc = None
+                    tok = getattr(proc, "tokenizer", None) or AutoTokenizer.from_pretrained(str(gemma_dir))
                     if dev == "cuda":
-                        model = AutoModelForCausalLM.from_pretrained(
-                            str(gemma_dir),
-                            dtype=torch.bfloat16,
-                        ).to("cuda:0")
+                        try:
+                            model = AutoModelForCausalLM.from_pretrained(
+                                str(gemma_dir),
+                                dtype=torch.bfloat16,
+                                low_cpu_mem_usage=True,
+                                device_map={"": "cuda:0"},
+                            )
+                        except TypeError:
+                            model = AutoModelForCausalLM.from_pretrained(
+                                str(gemma_dir),
+                                dtype=torch.bfloat16,
+                            ).to("cuda:0")
                     elif dev == "mps":
                         model = AutoModelForCausalLM.from_pretrained(
                             str(gemma_dir),
@@ -1920,6 +2633,7 @@ class SatzSidecarRuntime:
                             dtype=torch.float32,
                         )
                     model.eval()
+                    self.gemma_processor = proc
                     self.gemma_tok = tok
                     self.gemma_model = model
                 return self.gemma_tok, self.gemma_model
@@ -2022,11 +2736,12 @@ class SatzSidecarRuntime:
         source_id: str,
         url: str,
         title: str,
-        html: str | None,
+        html: str | None = None,
         dwell_seconds: float = 0.0,
         visible_text: str | None = None,
         findings: list[dict[str, Any]] | None = None,
         capture_mode: str | None = None,
+        elements: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         from src.planck3.web import domain_of, extract_jsonld, extract_main_text
 
@@ -2036,6 +2751,9 @@ class SatzSidecarRuntime:
         text = ""
         extra_lines: list[str] = []
         extracted_findings: list[dict[str, Any]] = list(findings or [])
+        extracted_elements: list[dict[str, Any]] = [
+            e for e in (elements or []) if isinstance(e, dict)
+        ][:50]
 
         clean_visible = ""
         if visible_text and visible_text.strip():
@@ -2096,6 +2814,17 @@ class SatzSidecarRuntime:
 
         effective_title = (title or domain or url or "untitled").strip()
         now = time.time()
+        if (
+            capture_mode == "dom"
+            and text
+            and url.startswith(("http://", "https://"))
+            and hasattr(self, "behavior")
+            and self.behavior is not None
+        ):
+            last_t = float(self._last_tab_behavior_log.get(url) or 0.0)
+            if (now - last_t) >= 120.0:
+                self._last_tab_behavior_log[url] = now
+                self.behavior.log_event("tab_capture", domain=domain, url=url, query=effective_title, ts=now)
 
         with self.store_lock:
             if source_id:
@@ -2119,11 +2848,24 @@ class SatzSidecarRuntime:
                         except Exception:
                             extracted_findings = []
 
+                if not extracted_elements:
+                    existing_el = self.store.db.execute(
+                        "SELECT affordances_json FROM satz_sources WHERE source_id = ?",
+                        (source_id,),
+                    ).fetchone()
+                    if existing_el and existing_el["affordances_json"]:
+                        try:
+                            parsed_el = json.loads(existing_el["affordances_json"])
+                            if isinstance(parsed_el, list):
+                                extracted_elements = parsed_el[:50]
+                        except Exception:
+                            extracted_elements = []
+
                 self.store.db.execute(
                     """
                     INSERT OR REPLACE INTO satz_sources
-                    (source_id, conversation_id, url, domain, title, text, extra_json, findings_json, capture_mode, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (source_id, conversation_id, url, domain, title, text, extra_json, findings_json, affordances_json, capture_mode, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         source_id,
@@ -2134,6 +2876,7 @@ class SatzSidecarRuntime:
                         text,
                         json.dumps(extra_lines, ensure_ascii=False),
                         json.dumps(extracted_findings[:8], ensure_ascii=False),
+                        json.dumps(extracted_elements[:50], ensure_ascii=False),
                         capture_mode,
                         now,
                     ),
@@ -2278,6 +3021,437 @@ class SatzSidecarRuntime:
                 except Exception:
                     pass
         return []
+
+    @staticmethod
+    def _is_valid_preview_img_url(raw_img: str) -> bool:
+        low = (raw_img or "").strip().lower()
+        if not low.startswith(("http://", "https://")):
+            return False
+        return not any(
+            bad in low
+            for bad in ("sprite", "logo", "favicon", "icon", "avatar", "pixel", "1x1", " tracking", ".svg")
+        )
+
+    @staticmethod
+    def is_safe_preview_url(url: str) -> bool:
+        """Validates public HTTP(S) URLs before issuing outbound preview metadata fetches."""
+        try:
+            parsed = urllib.parse.urlparse((url or "").strip())
+        except Exception:
+            return False
+        if parsed.scheme.lower() not in ("http", "https"):
+            return False
+        host = (parsed.hostname or "").strip().lower().rstrip(".")
+        if not host or host == "localhost" or host.endswith((".localhost", ".local", ".internal", ".invalid", ".test")):
+            return False
+        try:
+            ip = ipaddress.ip_address(host)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+                return False
+        except ValueError:
+            pass
+        return True
+
+    def extract_page_preview_from_html(
+        self,
+        html: str,
+        page_url: str,
+        fallback_title: str = "",
+    ) -> dict[str, str]:
+        """Extracts OpenGraph/Twitter/meta title, snippet, and image URL from HTML."""
+        if not html:
+            return {"title": fallback_title, "snippet": "", "image_url": ""}
+        from html.parser import HTMLParser
+
+        class _HeadPreviewParser(HTMLParser):
+            def __init__(self) -> None:
+                super().__init__(convert_charrefs=True)
+                self.in_title = False
+                self.title_parts: list[str] = []
+                self.meta: dict[str, str] = {}
+
+            def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+                t = tag.lower()
+                if t == "title":
+                    self.in_title = True
+                    return
+                if t == "meta":
+                    amap = {str(k).lower(): str(v or "") for k, v in attrs if k}
+                    key = (amap.get("property") or amap.get("name") or "").strip().lower()
+                    cnt = (amap.get("content") or "").strip()
+                    if key and cnt and key not in self.meta:
+                        self.meta[key] = cnt
+
+            def handle_endtag(self, tag: str) -> None:
+                if tag.lower() == "title":
+                    self.in_title = False
+
+            def handle_data(self, data: str) -> None:
+                if self.in_title and len(self.title_parts) < 8:
+                    self.title_parts.append(data)
+
+        parser = _HeadPreviewParser()
+        try:
+            parser.feed(html[:262_144])
+            parser.close()
+        except Exception:
+            pass
+
+        html_title = re.sub(r"\s+", " ", "".join(parser.title_parts)).strip()[:180]
+        raw_title = (
+            parser.meta.get("og:title")
+            or parser.meta.get("twitter:title")
+            or html_title
+            or fallback_title
+        )
+        title = re.sub(r"\s+", " ", html_lib.unescape(raw_title)).strip()[:180]
+        raw_desc = (
+            parser.meta.get("og:description")
+            or parser.meta.get("twitter:description")
+            or parser.meta.get("description")
+            or ""
+        )
+        snippet = self._clean_digest_snippet(html_lib.unescape(raw_desc), 240)
+
+        image_url = ""
+        for k in ("og:image:secure_url", "og:image", "og:image:url", "twitter:image:src", "twitter:image"):
+            raw_img = parser.meta.get(k) or ""
+            if raw_img and not raw_img.strip().startswith("data:"):
+                cand = urllib.parse.urljoin(page_url or "", raw_img.strip())
+                if self._is_valid_preview_img_url(cand):
+                    image_url = cand
+                    break
+        if not image_url:
+            for fd in self._extract_findings_from_html(html, page_url, title)[:1]:
+                cand = str(fd.get("image_url") or "").strip()
+                if self._is_valid_preview_img_url(cand):
+                    image_url = cand
+                    break
+
+        return {"title": title, "snippet": snippet, "image_url": image_url}
+
+    def _fetch_html_preview(self, url: str, fallback_title: str = "", timeout: float = 2.0) -> dict[str, str]:
+        from src.planck3.web import Web as _PlanckWeb, extract_main_text
+
+        clean_u = (url or "").strip()
+        if not self.is_safe_preview_url(clean_u):
+            return {}
+        html_txt = ""
+        final_u = clean_u
+
+        web_obj = getattr(self, "web", None)
+        is_unpatched_web = (
+            isinstance(web_obj, _PlanckWeb)
+            and "fetch" not in getattr(web_obj, "__dict__", {})
+            and getattr(type(web_obj), "fetch", None) is _PlanckWeb.fetch
+        )
+        if is_unpatched_web:
+            try:
+                web_lock = getattr(self, "web_lock", None) or contextlib.nullcontext()
+                with web_lock:
+                    hit = web_obj.cache.get("pages", clean_u)
+                if isinstance(hit, dict) and hit.get("html"):
+                    html_txt = str(hit.get("html") or "")
+                    final_u = str(hit.get("final_url") or clean_u)
+            except Exception:
+                pass
+
+        online = bool(getattr(getattr(web_obj, "cache", None), "online", True))
+        if not html_txt:
+            if not is_unpatched_web and web_obj is not None:
+                try:
+                    page = web_obj.fetch(clean_u)
+                    if isinstance(page, dict) and page.get("html"):
+                        html_txt = str(page.get("html") or "")
+                        final_u = str(page.get("final_url") or clean_u)
+                except Exception:
+                    return {}
+            elif online:
+                try:
+                    raw_bytes, ctype, resp_u = self._fetch_http_bytes(
+                        clean_u,
+                        accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        max_bytes=163_840,
+                        timeout=timeout,
+                    )
+                    ct_low = (ctype or "").lower()
+                    if raw_bytes and (not ct_low or "html" in ct_low or "xml" in ct_low or "text/" in ct_low):
+                        html_txt = raw_bytes.decode("utf-8", errors="replace")
+                        final_u = resp_u or clean_u
+                except Exception:
+                    return {}
+
+        if not html_txt:
+            return {}
+
+        meta = self.extract_page_preview_from_html(html_txt, final_u, fallback_title=fallback_title)
+        if not meta.get("snippet"):
+            try:
+                main_txt = extract_main_text(html_txt, final_u) or ""
+                if main_txt and not any(
+                    blk in main_txt[:300]
+                    for blk in ("Access Denied", "You don't have permission", "Enable JavaScript and cookies")
+                ):
+                    meta["snippet"] = self._clean_digest_snippet(main_txt, 240)
+            except Exception:
+                pass
+        return meta
+
+    def enrich_url_previews(
+        self,
+        items: list[dict[str, Any]],
+        fetch_missing: bool = True,
+        max_items: int = 8,
+    ) -> dict[str, dict[str, str]]:
+        """Resolves rich preview metadata (title, domain, snippet, image_url, favicon_url) from local DB + bounded HTML fetch."""
+        from concurrent.futures import ThreadPoolExecutor
+        from src.planck3.web import domain_of
+
+        ordered_urls: list[str] = []
+        results: dict[str, dict[str, str]] = {}
+        for raw_it in items or []:
+            if not isinstance(raw_it, dict):
+                continue
+            u = str(raw_it.get("url") or "").strip()
+            if not u.startswith(("http://", "https://")) or u in results:
+                continue
+            _, origin = self._origin_for_url(u)
+            dom = str(raw_it.get("domain") or domain_of(u) or "").lower().removeprefix("www.")
+            img_in = str(raw_it.get("image_url") or "").strip()
+            results[u] = {
+                "url": u,
+                "domain": dom,
+                "title": str(raw_it.get("title") or "").strip()[:180],
+                "snippet": self._clean_digest_snippet(str(raw_it.get("snippet") or ""), 240),
+                "image_url": img_in if self._is_valid_preview_img_url(img_in) else "",
+                "favicon_url": str(raw_it.get("favicon_url") or "").strip(),
+                "_origin": origin,
+            }
+            ordered_urls.append(u)
+            if len(ordered_urls) >= max_items:
+                break
+
+        if not ordered_urls:
+            return {}
+
+        t_target = (
+            self.news._primary_translation_target()
+            if getattr(self, "news", None) is not None
+            else "en"
+        )
+        now_ts = time.time()
+        with self.store_lock:
+            for u in ordered_urls:
+                rec = results[u]
+                variants = tuple(dict.fromkeys([u, u.rstrip("/"), f"{u.rstrip('/')}/"]))
+                ph = ",".join("?" for _ in variants)
+
+                # 1. Previously cached preview metadata
+                try:
+                    pr = self.store.db.execute(
+                        f"SELECT title, domain, snippet, image_url, updated_at FROM satz_url_previews WHERE url IN ({ph}) ORDER BY updated_at DESC LIMIT 1",
+                        variants,
+                    ).fetchone()
+                    if pr and float(pr["updated_at"] or 0.0) >= now_ts - 86400 * 7:
+                        if not rec["title"] and pr["title"]:
+                            rec["title"] = str(pr["title"])[:180]
+                        if not rec["domain"] and pr["domain"]:
+                            rec["domain"] = str(pr["domain"])
+                        if not rec["snippet"] and pr["snippet"]:
+                            rec["snippet"] = self._clean_digest_snippet(str(pr["snippet"]), 240)
+                        if not rec["image_url"] and self._is_valid_preview_img_url(str(pr["image_url"] or "")):
+                            rec["image_url"] = str(pr["image_url"]).strip()
+                except sqlite3.OperationalError:
+                    pass
+
+                # 2. News articles + translations
+                try:
+                    nr = self.store.db.execute(
+                        f"""
+                        SELECT a.title, a.snippet, a.body_text, a.image_url, a.domain,
+                               COALESCE(nt.title_tr, '') AS title_tr,
+                               COALESCE(nt.snippet_tr, '') AS snippet_tr,
+                               COALESCE(nt.body_tr, '') AS body_tr
+                        FROM satz_news_articles a
+                        LEFT JOIN satz_news_translations nt ON nt.article_id = a.article_id AND nt.target_lang = ?
+                        WHERE a.url IN ({ph})
+                        ORDER BY a.published_at DESC
+                        LIMIT 1
+                        """,
+                        (t_target, *variants),
+                    ).fetchone()
+                    if nr:
+                        eff_t = str(nr["title_tr"] or nr["title"] or "").strip()
+                        eff_s = str(nr["snippet_tr"] or nr["body_tr"] or nr["snippet"] or nr["body_text"] or "").strip()
+                        if eff_t and (not rec["title"] or rec["title"] == u):
+                            rec["title"] = eff_t[:180]
+                        if eff_s and not rec["snippet"]:
+                            rec["snippet"] = self._clean_digest_snippet(eff_s, 240)
+                        if not rec["image_url"] and self._is_valid_preview_img_url(str(nr["image_url"] or "")):
+                            rec["image_url"] = str(nr["image_url"]).strip()
+                except sqlite3.OperationalError:
+                    pass
+
+                # 3. Captured satz_sources
+                try:
+                    sr = self.store.db.execute(
+                        f"SELECT title, text, findings_json FROM satz_sources WHERE url IN ({ph}) ORDER BY updated_at DESC LIMIT 1",
+                        variants,
+                    ).fetchone()
+                    if sr:
+                        if (not rec["title"] or rec["title"] == u) and sr["title"]:
+                            rec["title"] = str(sr["title"])[:180]
+                        if not rec["snippet"] and sr["text"]:
+                            rec["snippet"] = self._clean_digest_snippet(str(sr["text"]), 240)
+                        if not rec["image_url"] and sr["findings_json"]:
+                            try:
+                                parsed_f = json.loads(sr["findings_json"])
+                                if isinstance(parsed_f, list):
+                                    for fd in parsed_f:
+                                        if isinstance(fd, dict):
+                                            iu = str(fd.get("image_url") or "").strip()
+                                            if self._is_valid_preview_img_url(iu):
+                                                rec["image_url"] = iu
+                                                break
+                            except Exception:
+                                pass
+                except sqlite3.OperationalError:
+                    pass
+
+                # 4. Cached favicon
+                if not rec["favicon_url"] and rec["_origin"]:
+                    try:
+                        fr = self.store.db.execute(
+                            "SELECT data_url, icon_url FROM satz_favicons WHERE origin = ?",
+                            (rec["_origin"],),
+                        ).fetchone()
+                        if fr:
+                            fav = str(fr["data_url"] or fr["icon_url"] or "").strip()
+                            if fav:
+                                rec["favicon_url"] = fav
+                    except sqlite3.OperationalError:
+                        pass
+
+        online = bool(getattr(getattr(getattr(self, "web", None), "cache", None), "online", True))
+        to_fetch = [
+            u
+            for u in ordered_urls
+            if (not results[u]["image_url"] or not results[u]["snippet"])
+            and self.is_safe_preview_url(u)
+            and (fetch_missing and online)
+        ][:6]
+
+        if to_fetch:
+            fetched_map: dict[str, dict[str, str]] = {}
+            with ThreadPoolExecutor(max_workers=min(4, len(to_fetch))) as pool:
+                futs = {u: pool.submit(self._fetch_html_preview, u, results[u]["title"], 1.8) for u in to_fetch}
+                for u, fut in futs.items():
+                    try:
+                        meta = fut.result(timeout=2.4)
+                        if isinstance(meta, dict) and meta:
+                            fetched_map[u] = meta
+                    except Exception:
+                        pass
+
+            if fetched_map:
+                now_save = time.time()
+                with self.store_lock:
+                    for u, meta in fetched_map.items():
+                        rec = results[u]
+                        if (not rec["title"] or rec["title"] == u) and meta.get("title"):
+                            rec["title"] = str(meta["title"])[:180]
+                        if not rec["snippet"] and meta.get("snippet"):
+                            rec["snippet"] = self._clean_digest_snippet(str(meta["snippet"]), 240)
+                        if not rec["image_url"] and self._is_valid_preview_img_url(str(meta.get("image_url") or "")):
+                            rec["image_url"] = str(meta["image_url"]).strip()
+
+                        if rec["image_url"] or rec["snippet"]:
+                            try:
+                                self.store.db.execute(
+                                    """
+                                    INSERT INTO satz_url_previews (url, domain, title, snippet, image_url, updated_at)
+                                    VALUES (?, ?, ?, ?, ?, ?)
+                                    ON CONFLICT(url) DO UPDATE SET
+                                      title = CASE WHEN LENGTH(excluded.title) > 0 THEN excluded.title ELSE satz_url_previews.title END,
+                                      snippet = CASE WHEN LENGTH(excluded.snippet) > 0 THEN excluded.snippet ELSE satz_url_previews.snippet END,
+                                      image_url = CASE WHEN LENGTH(excluded.image_url) > 0 THEN excluded.image_url ELSE satz_url_previews.image_url END,
+                                      updated_at = excluded.updated_at
+                                    """,
+                                    (u, rec["domain"], rec["title"], rec["snippet"], rec["image_url"], now_save),
+                                )
+                            except sqlite3.OperationalError:
+                                pass
+                        if rec["image_url"]:
+                            try:
+                                self.store.db.execute(
+                                    "UPDATE satz_news_articles SET image_url = ? WHERE url = ? AND COALESCE(image_url, '') = ''",
+                                    (rec["image_url"], u),
+                                )
+                            except sqlite3.OperationalError:
+                                pass
+                    self.store.db.commit()
+
+        clean_out: dict[str, dict[str, str]] = {}
+        for u in ordered_urls:
+            rec = results[u]
+            clean_out[u] = {
+                "url": u,
+                "domain": rec["domain"],
+                "title": rec["title"] or rec["domain"] or u,
+                "snippet": rec["snippet"],
+                "image_url": rec["image_url"],
+                "favicon_url": rec["favicon_url"],
+            }
+        return clean_out
+
+    def merge_previews_into_sources(
+        self,
+        sources: list[dict[str, Any]],
+        findings_out: list[dict[str, Any]] | None = None,
+        seen_finding_imgs: set[str] | None = None,
+        *,
+        max_items: int = 8,
+        max_findings: int = 8,
+        fetch_missing: bool | None = None,
+    ) -> dict[str, dict[str, str]]:
+        """Enriches cited/news source dicts with snippet, image_url, and favicon_url, appending missing findings."""
+        if not sources:
+            return {}
+        allow_fetch = (
+            bool(getattr(getattr(getattr(self, "web", None), "cache", None), "online", False))
+            if fetch_missing is None
+            else bool(fetch_missing)
+        )
+        enriched_map = self.enrich_url_previews(sources, fetch_missing=allow_fetch, max_items=max_items)
+        seen_imgs = seen_finding_imgs if seen_finding_imgs is not None else {
+            str(f.get("image_url") or "") for f in (findings_out or []) if isinstance(f, dict) and f.get("image_url")
+        }
+        for s in sources:
+            u = str(s.get("url") or "").strip()
+            em = enriched_map.get(u)
+            if not em:
+                continue
+            if (not s.get("title") or s["title"] == u) and em.get("title"):
+                s["title"] = em["title"]
+            if not s.get("domain") and em.get("domain"):
+                s["domain"] = em["domain"]
+            if not s.get("snippet") and em.get("snippet"):
+                s["snippet"] = em["snippet"]
+            if not s.get("image_url") and em.get("image_url"):
+                s["image_url"] = em["image_url"]
+            if em.get("favicon_url") and not s.get("favicon_url"):
+                s["favicon_url"] = em["favicon_url"]
+            img_u = str(em.get("image_url") or "").strip()
+            if findings_out is not None and img_u and img_u not in seen_imgs and len(findings_out) < max_findings:
+                seen_imgs.add(img_u)
+                findings_out.append(
+                    {
+                        "image_url": img_u,
+                        "title": str(s.get("title") or u)[:120],
+                        "page_url": u,
+                    }
+                )
+        return enriched_map
 
     def _ingest_worker_loop(self):
         from src.planck3.candidates import rank_passages
@@ -2491,6 +3665,418 @@ class SatzSidecarRuntime:
                 }
             raise
 
+    @staticmethod
+    def _origin_for_url(raw_url: str) -> tuple[str, str]:
+        u = str(raw_url or "").strip()
+        if not u:
+            return "", ""
+        if not u.startswith(("http://", "https://")):
+            if " " not in u and "." in u and "://" not in u:
+                u = f"https://{u}"
+            else:
+                return "", ""
+        parsed = urllib.parse.urlparse(u)
+        if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+            return "", ""
+        return u, f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+
+    @staticmethod
+    def _extract_favicon_candidates_from_html(html_text: str, page_url: str) -> list[str]:
+        from html.parser import HTMLParser
+
+        class _HeadIconParser(HTMLParser):
+            def __init__(self) -> None:
+                super().__init__(convert_charrefs=True)
+                self.base_href = ""
+                self.links: list[dict[str, str]] = []
+
+            def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+                t = tag.lower()
+                attr_map = {str(k).lower(): str(v or "") for k, v in attrs if k}
+                if t == "base" and not self.base_href and attr_map.get("href"):
+                    self.base_href = attr_map["href"].strip()
+                elif t == "link" and attr_map.get("href") and attr_map.get("rel"):
+                    self.links.append(attr_map)
+
+        parser = _HeadIconParser()
+        try:
+            parser.feed(html_text[:262_144])
+            parser.close()
+        except Exception:
+            pass
+
+        base_url = (
+            urllib.parse.urljoin(page_url, parser.base_href)
+            if parser.base_href
+            else page_url
+        )
+
+        scored: list[tuple[int, int, str]] = []
+        for idx, attrs in enumerate(parser.links):
+            rel = attrs.get("rel", "").lower().strip()
+            tokens = rel.split()
+            is_icon = "icon" in tokens or rel == "shortcut icon"
+            is_touch = (
+                "apple-touch-icon" in tokens
+                or "apple-touch-icon-precomposed" in tokens
+                or "fluid-icon" in tokens
+            )
+            if not is_icon and not is_touch:
+                continue
+            href = attrs.get("href", "").strip()
+            if not href:
+                continue
+            if href.startswith("data:image/"):
+                cand = href
+            else:
+                cand = urllib.parse.urljoin(base_url, href)
+                if not cand.startswith(("http://", "https://")):
+                    continue
+
+            score = 50 if is_icon else 22
+            if rel == "icon":
+                score += 8
+            typ = attrs.get("type", "").lower()
+            low_cand = cand.lower().split("?", 1)[0]
+            if "svg" in typ or low_cand.endswith(".svg"):
+                score += 14
+            elif "png" in typ or low_cand.endswith(".png"):
+                score += 12
+            elif "icon" in typ or low_cand.endswith(".ico"):
+                score += 5
+            sizes = attrs.get("sizes", "").lower()
+            sm = re.search(r"(\d+)x(\d+)", sizes)
+            if sm:
+                px = int(sm.group(1))
+                if 24 <= px <= 64:
+                    score += 20
+                elif 0 < px < 24:
+                    score += 6
+                elif 64 < px <= 192:
+                    score += 10
+            scored.append((score, -idx, cand))
+
+        scored.sort(reverse=True)
+        out: list[str] = []
+        seen: set[str] = set()
+        for _, _, cand in scored:
+            if cand not in seen:
+                seen.add(cand)
+                out.append(cand)
+        return out
+
+    @staticmethod
+    def _normalize_favicon_bytes_to_data_url(
+        raw_bytes: bytes,
+        content_type: str = "",
+        source_url: str = "",
+    ) -> str | None:
+        if not raw_bytes or len(raw_bytes) > 524_288:
+            return None
+        head_low = raw_bytes[:512].lstrip().lower()
+        ct_low = str(content_type or "").lower()
+        src_low = str(source_url or "").lower().split("?", 1)[0]
+
+        is_svg = (
+            "svg" in ct_low
+            or src_low.endswith(".svg")
+            or (b"<svg" in raw_bytes[:2048].lower() and b"<html" not in head_low)
+        )
+        if is_svg:
+            try:
+                svg_txt = raw_bytes.decode("utf-8", errors="ignore").strip()
+            except Exception:
+                return None
+            if "<svg" not in svg_txt.lower():
+                return None
+            svg_txt = re.sub(r"(?is)<script\b[^>]*>.*?</script>", "", svg_txt)
+            svg_txt = re.sub(r"(?is)<foreignObject\b[^>]*>.*?</foreignObject>", "", svg_txt)
+            svg_txt = re.sub(r"(?i)\son[a-z]+\s*=\s*\"[^\"]*\"", "", svg_txt)
+            svg_txt = re.sub(r"(?i)\son[a-z]+\s*=\s*'[^']*'", "", svg_txt)
+            svg_txt = re.sub(r"(?i)javascript\s*:", "", svg_txt)
+            clean_svg = svg_txt.encode("utf-8")
+            if not clean_svg or len(clean_svg) > 65_536:
+                return None
+            return f"data:image/svg+xml;base64,{base64.b64encode(clean_svg).decode('ascii')}"
+
+        if "text/html" in ct_low or head_low.startswith((b"<html", b"<!doctype")):
+            return None
+
+        try:
+            from PIL import Image, ImageOps
+
+            with Image.open(io.BytesIO(raw_bytes)) as opened:
+                opened.load()
+                fmt = (opened.format or "").upper()
+                w, h = opened.size
+                if fmt in ("PNG", "WEBP", "GIF") and max(w, h) <= 64 and len(raw_bytes) <= 24_576:
+                    mime = f"image/{fmt.lower()}"
+                    return f"data:{mime};base64,{base64.b64encode(raw_bytes).decode('ascii')}"
+
+                rgba = opened.convert("RGBA")
+                if max(rgba.size) > 32:
+                    resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.BICUBIC)
+                    rgba = ImageOps.contain(rgba, (32, 32), resample)
+                buf = io.BytesIO()
+                rgba.save(buf, format="PNG", optimize=True)
+                out_bytes = buf.getvalue()
+                if not out_bytes:
+                    return None
+                return f"data:image/png;base64,{base64.b64encode(out_bytes).decode('ascii')}"
+        except Exception:
+            return None
+
+    def _fetch_http_bytes(self, url: str, accept: str, max_bytes: int = 524_288, timeout: float = 4.5) -> tuple[bytes, str, str]:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0"
+            ),
+            "Accept": accept,
+        }
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            final_url = str(resp.geturl() or url)
+            ct = str(resp.headers.get("Content-Type") or "")
+            raw = resp.read(max_bytes)
+            return raw, ct, final_url
+
+    def _normalize_favicon_data_url_input(self, data_url: str) -> str | None:
+        raw_str = str(data_url or "").strip()
+        if not raw_str.startswith("data:image/") or ";base64," not in raw_str:
+            return None
+        header, b64_part = raw_str.split(";base64,", 1)
+        mime = header[5:].split(";", 1)[0].strip().lower()
+        try:
+            raw_bytes = base64.b64decode(b64_part.strip(), validate=False)
+        except Exception:
+            return None
+        return self._normalize_favicon_bytes_to_data_url(raw_bytes, content_type=mime, source_url="")
+
+    def resolve_site_favicon(
+        self,
+        url: str,
+        icon_url: str | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        norm_url, origin = self._origin_for_url(url)
+        if not norm_url or not origin:
+            return {"url": url, "origin": "", "favicon_url": None}
+
+        now = time.time()
+        with self.store_lock:
+            row = self.store.db.execute(
+                "SELECT icon_url, data_url, updated_at, failed_at FROM satz_favicons WHERE origin = ?",
+                (origin,),
+            ).fetchone()
+        if row is not None and not force:
+            cached_data = str(row["data_url"] or "")
+            upd_ts = float(row["updated_at"] or 0.0)
+            fail_ts = float(row["failed_at"] or 0.0)
+            if cached_data and (now - upd_ts) < 14 * 86400:
+                return {"url": norm_url, "origin": origin, "favicon_url": cached_data, "cached": True}
+            if not icon_url and fail_ts > 0.0 and (now - fail_ts) < 3600:
+                return {"url": norm_url, "origin": origin, "favicon_url": None, "cached": True}
+
+        hint = str(icon_url or "").strip()
+        if hint.startswith("data:image/"):
+            norm_data = self._normalize_favicon_data_url_input(hint)
+            if norm_data:
+                with self.store_lock:
+                    self.store.db.execute(
+                        """
+                        INSERT INTO satz_favicons (origin, icon_url, data_url, updated_at, failed_at)
+                        VALUES (?, ?, ?, ?, 0.0)
+                        ON CONFLICT(origin) DO UPDATE SET
+                            icon_url = excluded.icon_url,
+                            data_url = excluded.data_url,
+                            updated_at = excluded.updated_at,
+                            failed_at = 0.0
+                        """,
+                        (origin, "data:", norm_data, now),
+                    )
+                    self.store.db.commit()
+                return {"url": norm_url, "origin": origin, "favicon_url": norm_data, "cached": False}
+
+        candidates: list[str] = []
+        seen_cands: set[str] = set()
+
+        def _add_cand(c: str) -> None:
+            cs = str(c or "").strip()
+            if cs and cs not in seen_cands and cs.startswith(("http://", "https://", "data:image/")):
+                seen_cands.add(cs)
+                candidates.append(cs)
+
+        if hint.startswith(("http://", "https://")):
+            _add_cand(hint)
+
+        parsed_u = urllib.parse.urlparse(norm_url)
+        html_targets = [norm_url]
+        root_url = f"{origin}/"
+        if parsed_u.path not in ("", "/"):
+            html_targets.append(root_url)
+
+        # If no direct HTTP icon hint succeeded, probe page/origin HTML `<link rel~="icon">`
+        if not candidates:
+            for target_page in html_targets:
+                try:
+                    raw_html, ct, final_page = self._fetch_http_bytes(
+                        target_page,
+                        accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        max_bytes=262_144,
+                        timeout=4.5,
+                    )
+                    if "html" in ct.lower() or b"<head" in raw_html[:4096].lower():
+                        html_txt = raw_html.decode("utf-8", errors="ignore")
+                        found = self._extract_favicon_candidates_from_html(html_txt, final_page)
+                        for fc in found:
+                            _add_cand(fc)
+                        if found:
+                            break
+                except Exception:
+                    continue
+
+        _add_cand(f"{origin}/favicon.ico")
+
+        winning_src = ""
+        winning_data: str | None = None
+        for cand in candidates[:4]:
+            if cand.startswith("data:image/"):
+                norm_data = self._normalize_favicon_data_url_input(cand)
+                if norm_data:
+                    winning_src = "data:"
+                    winning_data = norm_data
+                    break
+                continue
+            try:
+                raw_img, ct, final_img_url = self._fetch_http_bytes(
+                    cand,
+                    accept="image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5",
+                    max_bytes=524_288,
+                    timeout=4.5,
+                )
+                norm_data = self._normalize_favicon_bytes_to_data_url(
+                    raw_img,
+                    content_type=ct,
+                    source_url=final_img_url or cand,
+                )
+                if norm_data:
+                    winning_src = final_img_url or cand
+                    winning_data = norm_data
+                    break
+            except Exception:
+                continue
+
+        # If a provided hint failed, retry HTML root + /favicon.ico before giving up
+        if winning_data is None and hint:
+            for target_page in html_targets:
+                try:
+                    raw_html, ct, final_page = self._fetch_http_bytes(
+                        target_page,
+                        accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        max_bytes=262_144,
+                        timeout=4.5,
+                    )
+                    if "html" in ct.lower() or b"<head" in raw_html[:4096].lower():
+                        html_txt = raw_html.decode("utf-8", errors="ignore")
+                        for cand in self._extract_favicon_candidates_from_html(html_txt, final_page)[:2]:
+                            if cand in seen_cands:
+                                continue
+                            raw_img, img_ct, final_img_url = self._fetch_http_bytes(
+                                cand,
+                                accept="image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5",
+                                max_bytes=524_288,
+                                timeout=4.5,
+                            )
+                            norm_data = self._normalize_favicon_bytes_to_data_url(
+                                raw_img, content_type=img_ct, source_url=final_img_url or cand
+                            )
+                            if norm_data:
+                                winning_src = final_img_url or cand
+                                winning_data = norm_data
+                                break
+                        if winning_data:
+                            break
+                except Exception:
+                    continue
+
+        with self.store_lock:
+            if winning_data:
+                self.store.db.execute(
+                    """
+                    INSERT INTO satz_favicons (origin, icon_url, data_url, updated_at, failed_at)
+                    VALUES (?, ?, ?, ?, 0.0)
+                    ON CONFLICT(origin) DO UPDATE SET
+                        icon_url = excluded.icon_url,
+                        data_url = excluded.data_url,
+                        updated_at = excluded.updated_at,
+                        failed_at = 0.0
+                    """,
+                    (origin, winning_src, winning_data, now),
+                )
+            else:
+                self.store.db.execute(
+                    """
+                    INSERT INTO satz_favicons (origin, icon_url, data_url, updated_at, failed_at)
+                    VALUES (?, '', '', 0.0, ?)
+                    ON CONFLICT(origin) DO UPDATE SET
+                        failed_at = excluded.failed_at
+                    """,
+                    (origin, now),
+                )
+            self.store.db.commit()
+
+        return {"url": norm_url, "origin": origin, "favicon_url": winning_data, "cached": False}
+
+    def resolve_favicons_batch(
+        self,
+        items: list[dict[str, Any]],
+        force: bool = False,
+    ) -> dict[str, Any]:
+        from concurrent.futures import ThreadPoolExecutor
+
+        normalized: list[tuple[str, str | None]] = []
+        seen: set[tuple[str, str]] = set()
+        for it in (items or [])[:24]:
+            if isinstance(it, str):
+                u = it.strip()
+                ic = None
+            elif isinstance(it, dict):
+                u = str(it.get("url") or "").strip()
+                ic = str(it.get("icon_url") or "").strip() or None
+            else:
+                continue
+            if not u:
+                continue
+            key = (u, ic or "")
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append((u, ic))
+
+        icons: dict[str, str] = {}
+        by_origin: dict[str, str] = {}
+        if not normalized:
+            return {"ok": True, "icons": icons, "by_origin": by_origin}
+
+        with ThreadPoolExecutor(max_workers=min(4, len(normalized))) as pool:
+            futs = [(u, pool.submit(self.resolve_site_favicon, u, ic, force)) for u, ic in normalized]
+            for orig_u, fut in futs:
+                try:
+                    res = fut.result(timeout=12.0)
+                    data_url = res.get("favicon_url")
+                    org = str(res.get("origin") or "")
+                    if data_url:
+                        icons[orig_u] = data_url
+                        if res.get("url"):
+                            icons[str(res["url"])] = data_url
+                        if org:
+                            by_origin[org] = data_url
+                except Exception:
+                    continue
+
+        return {"ok": True, "icons": icons, "by_origin": by_origin}
+
     def run_bookmark_index_pass(self, now: float | None = None) -> dict[str, int]:
         """
         Section 3.4 (M10): Executes one pass over `satz_bookmarks`:
@@ -2682,6 +4268,46 @@ class SatzSidecarRuntime:
             except Exception as we:
                 self.record_error("watch_loop", we)
 
+    def run_news_sync_pass(
+        self,
+        force: bool = False,
+        include_topic_search: bool = False,
+        process_brain: bool = True,
+        fetcher: Any = None,
+    ) -> dict[str, Any]:
+        if getattr(self, "_closed", False):
+            return {"ok": False, "closed": True}
+        if self.pause_learning and not force:
+            return {"ok": True, "paused": True, "fetched_feeds": 0, "articles_ingested": 0, "brain_synced": 0}
+        with self.news_sync_lock:
+            self.news_sync_in_progress = True
+            try:
+                res = self.news.refresh_news_feeds(
+                    force=force,
+                    include_topic_search=include_topic_search,
+                    fetcher=fetcher,
+                    process_to_brain=process_brain,
+                    min_interval_secs=self.news_refresh_interval_secs,
+                )
+                return res
+            finally:
+                self.news_sync_in_progress = False
+
+    def _news_sync_loop(self):
+        # Allow sidecar startup/Gemma preload and short tests to complete cleanly before background feed ping
+        self.news_wake_event.wait(timeout=12.0)
+        while not getattr(self, "_closed", False):
+            self.news_wake_event.clear()
+            if getattr(self, "_closed", False):
+                break
+            if not self.pause_learning:
+                try:
+                    self.run_news_sync_pass(force=False, include_topic_search=False, process_brain=True)
+                except Exception as e:
+                    self.record_error("news_sync_loop", e)
+            wait_secs = min(300.0, float(getattr(self, "news_refresh_interval_secs", 3600.0)))
+            self.news_wake_event.wait(timeout=wait_secs)
+
     def close(self) -> None:
         self._closed = True
         try:
@@ -2702,6 +4328,20 @@ class SatzSidecarRuntime:
             self.bookmark_wake_event.set()
         except Exception:
             pass
+        try:
+            self.news_wake_event.set()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "google_auth", None) is not None:
+                self.google_auth.stop_pending_servers()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "drives", None) is not None:
+                self.drives.close()
+        except Exception:
+            pass
         with self.store_lock:
             try:
                 self.store.close()
@@ -2713,8 +4353,72 @@ class SatzSidecarRuntime:
         except Exception:
             pass
 
+    def get_source_affordances(self, source_id: str, url: str = "") -> list[dict[str, Any]]:
+        if (
+            (source_id and (source_id.startswith("mail:") or source_id.startswith("drive:")))
+            or (url and url.startswith("satzmail://"))
+        ):
+            return []
+        with self.store_lock:
+            row = None
+            if source_id:
+                row = self.store.db.execute(
+                    "SELECT affordances_json FROM satz_sources WHERE source_id = ?",
+                    (source_id,),
+                ).fetchone()
+            if (row is None or not row["affordances_json"]) and url:
+                row = self.store.db.execute(
+                    "SELECT affordances_json FROM satz_sources WHERE url = ? ORDER BY updated_at DESC LIMIT 1",
+                    (url,),
+                ).fetchone()
+            if row and row["affordances_json"]:
+                try:
+                    parsed = json.loads(row["affordances_json"])
+                    if isinstance(parsed, list):
+                        return parsed
+                except Exception:
+                    return []
+        return []
+
+    def call_webview_bridge(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        timeout: float = 8.0,
+    ) -> dict[str, Any]:
+        """Calls the Tauri WebView2/WKWebView loopback bridge when running inside the desktop shell."""
+        hook = getattr(self, "webview_bridge_hook", None)
+        if callable(hook):
+            try:
+                res = hook(method, path, payload)
+                return res if isinstance(res, dict) else {"ok": False, "error": "invalid hook response"}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        bridge_url = (os.environ.get("SATZ_WEBVIEW_BRIDGE_URL") or "").strip().rstrip("/")
+        bridge_tok = (os.environ.get("SATZ_WEBVIEW_BRIDGE_TOKEN") or "").strip()
+        if not bridge_url or not bridge_tok:
+            return {"ok": False, "unavailable": True, "error": "WebView bridge not configured."}
+
+        target_url = f"{bridge_url}{path}"
+        headers = {"X-Satz-Bridge-Token": bridge_tok}
+        data_bytes: bytes | None = None
+        if payload is not None:
+            data_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(target_url, data=data_bytes, headers=headers, method=method.upper())
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8", errors="replace"))
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def get_source_capture_mode(self, source_id: str, url: str) -> str:
-        if (source_id and source_id.startswith("mail:")) or (url and url.startswith("satzmail://")):
+        if (
+            (source_id and (source_id.startswith("mail:") or source_id.startswith("drive:")))
+            or (url and url.startswith("satzmail://"))
+        ):
             return "dom"
         with self.store_lock:
             row = None
@@ -2732,7 +4436,18 @@ class SatzSidecarRuntime:
                 return str(row["capture_mode"])
         return "dom"
 
+    @staticmethod
+    def _get_mail_detail_lite(mail_obj: Any, message_id: str) -> dict[str, Any]:
+        """Hydrates local SQLite email fields without blocking IMAP fetches or Brain entity scans."""
+        try:
+            return mail_obj.get_message_detail(message_id, fetch_remote=False, lite=True)
+        except TypeError:
+            return mail_obj.get_message_detail(message_id)
+
     def get_source_text(self, source_id: str, url: str, title: str = "") -> tuple[str, list[str]]:
+        if source_id and source_id.startswith("drive:") and getattr(self, "drives", None) is not None:
+            return self.drives.get_source_text_for_chat(source_id), []
+
         # Section 4.6 (M13): Email tab source text comes directly from `mail.sqlite` `parts` (new text first, then quote)
         mail_msg_id = ""
         if source_id and source_id.startswith("mail:"):
@@ -2741,7 +4456,7 @@ class SatzSidecarRuntime:
             mail_msg_id = url.split("message/")[-1].split("/")[0].split("?")[0].strip()
 
         if mail_msg_id and getattr(self, "mail", None) is not None and self.passwords.unlocked:
-            detail = self.mail.get_message_detail(mail_msg_id)
+            detail = self._get_mail_detail_lite(self.mail, mail_msg_id)
             if detail.get("ok"):
                 m = detail["message"]
                 parts = m.get("parts") or {}
@@ -2755,10 +4470,17 @@ class SatzSidecarRuntime:
                         for a in atts
                     ]
                     att_line = f"Attachments: {', '.join(att_names)}\n"
+                unsub = m.get("unsubscribe") or {}
+                unsub_line = ""
+                if unsub.get("available") and unsub.get("methods"):
+                    top_m = unsub["methods"][0]
+                    target_disp = str(top_m.get("url") or top_m.get("mailto") or "")[:180]
+                    unsub_line = f"Unsubscribe Options: {top_m.get('type')} ({top_m.get('label')}) -> {target_disp}\n"
                 header_line = (
                     f"From: {m.get('from_name') or ''} <{m.get('from_addr') or ''}>\n"
                     f"Subject: {m.get('subject') or ''}\n"
                     f"{att_line}"
+                    f"{unsub_line}"
                 )
                 combined_mail = f"{header_line}\n{new_t}"
                 if quote_t:
@@ -2841,20 +4563,37 @@ class SatzSidecarRuntime:
             if not u or u in seen_urls:
                 continue
             seen_urls.add(u)
+            f_img = ""
+            for fd in self.get_source_findings(u, u):
+                fimg = str(fd.get("image_url") or "")
+                if fimg and not f_img and self._is_valid_preview_img_url(fimg):
+                    f_img = fimg
+                if fimg and fimg not in seen_finding_imgs and len(answer_findings) < 8:
+                    seen_finding_imgs.add(fimg)
+                    answer_findings.append(fd)
             sources_out.append(
                 {
                     "url": u,
                     "title": s.get("title") or s.get("domain") or u,
                     "domain": s.get("domain") or "",
+                    "snippet": self._clean_digest_snippet(str(s.get("snippet") or s.get("text") or ""), 240),
+                    "image_url": f_img,
                 }
             )
-            for fd in self.get_source_findings(u, u):
-                fimg = str(fd.get("image_url") or "")
-                if fimg and fimg not in seen_finding_imgs and len(answer_findings) < 8:
-                    seen_finding_imgs.add(fimg)
-                    answer_findings.append(fd)
             if len(sources_out) >= 6:
                 break
+
+        if sources_out:
+            try:
+                self.merge_previews_into_sources(
+                    sources_out,
+                    answer_findings,
+                    seen_finding_imgs,
+                    max_items=6,
+                    max_findings=8,
+                )
+            except Exception:
+                pass
 
         return {
             "answer": res.get("answer_text") or chat_answer(turn),
@@ -2955,20 +4694,283 @@ class SatzSidecarRuntime:
         }
 
     # ── /chat Context Assembly & Streaming with Gemma 4 E4B ──────────────
+    @staticmethod
+    def _extract_one_line_summary(text: str, title: str = "", max_chars: int = 150) -> str:
+        """Extracts a compact 1-line summary (preserving email From/Subject when present) for Tier-1 Manifest."""
+        from src.planck3.candidates import split_sentences
+
+        raw = str(text or "").strip()
+        if not raw:
+            return (title or "empty source")[:max_chars]
+
+        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+        from_val = ""
+        subj_val = ""
+        body_lines: list[str] = []
+        for ln in lines[:24]:
+            low = ln.lower()
+            if low.startswith("from:") and not from_val:
+                from_val = ln.split(":", 1)[1].strip()[:60]
+            elif low.startswith("subject:") and not subj_val:
+                subj_val = ln.split(":", 1)[1].strip()[:75]
+            elif low.startswith(("attachments:", "unsubscribe options:", "--- quoted thread ---", "date:", "to:")):
+                continue
+            else:
+                body_lines.append(ln)
+
+        body_preview = " ".join(body_lines)[:600]
+        if not body_preview:
+            body_preview = " ".join(lines)[:600]
+        sents = split_sentences(body_preview) if body_preview else []
+        first_sent = (sents[0] if sents else body_preview).strip()
+        first_sent = re.sub(r"\s+", " ", first_sent)
+
+        if from_val or subj_val:
+            head = " · ".join(p for p in (f"From {from_val}" if from_val else "", subj_val) if p)
+            combined = f"{head}: {first_sent}" if (head and first_sent) else (head or first_sent)
+        else:
+            combined = first_sent or title
+
+        combined = re.sub(r"\s+", " ", combined).strip()
+        if len(combined) > max_chars:
+            return combined[: max_chars - 3].rstrip() + "..."
+        return combined
+
+    def _score_sources_bm25_embedding(
+        self,
+        question: str,
+        items: list[dict[str, Any]],
+    ) -> list[float]:
+        """Ranks valid sources via hybrid BM25 lexical matching + Planck embedding cosine similarity."""
+        n = len(items)
+        if n <= 1:
+            return [1.0] * n
+
+        q_clean = str(question or "").strip()
+        q_terms = re.findall(r"[a-zA-Z0-9\u00c0-\u017f_]{2,}", q_clean.lower())
+        if not q_terms:
+            return [1.0 + (0.05 if it["is_open_tab"] else 0.0) - (idx * 0.001) for idx, it in enumerate(items)]
+
+        # 1. BM25 over title + domain + leading text window
+        doc_tokens: list[list[str]] = []
+        df: dict[str, int] = collections.Counter()
+        for it in items:
+            blob = f"{it['title']} {it['domain']} {it['text'][:6000]}".lower()
+            toks = re.findall(r"[a-zA-Z0-9\u00c0-\u017f_]{2,}", blob)
+            doc_tokens.append(toks)
+            for term in set(toks):
+                df[term] += 1
+
+        avg_dl = max(1.0, sum(len(t) for t in doc_tokens) / max(1, n))
+        k1 = 1.2
+        b = 0.75
+        bm25_scores: list[float] = []
+        for idx, toks in enumerate(doc_tokens):
+            tf_map = collections.Counter(toks)
+            dl = len(toks)
+            sc = 0.0
+            for qt in q_terms:
+                f = tf_map.get(qt, 0)
+                if f <= 0:
+                    continue
+                n_qi = df.get(qt, 0)
+                idf = math.log(1.0 + (n - n_qi + 0.5) / (n_qi + 0.5))
+                denom = f + k1 * (1.0 - b + b * (dl / avg_dl))
+                sc += idf * ((f * (k1 + 1.0)) / max(1e-9, denom))
+            # Mild boost if domain/title matches query directly
+            dom_low = str(items[idx]["domain"] or "").lower()
+            title_low = str(items[idx]["title"] or "").lower()
+            for qt in q_terms:
+                if len(qt) >= 3 and (qt in dom_low or qt in title_low):
+                    sc += 0.35
+            bm25_scores.append(sc)
+
+        max_bm25 = max(bm25_scores) if bm25_scores else 0.0
+        norm_bm25 = [s / max_bm25 if max_bm25 > 0 else 0.0 for s in bm25_scores]
+
+        # 2. Embedding cosine similarity (only when source volume actually overflows budget)
+        total_raw = sum(len(it["text"]) for it in items)
+        emb_scores = [0.0] * n
+        if total_raw > self.total_context_char_budget:
+            try:
+                enc = self.brain._get_encoder() if getattr(self, "brain", None) is not None else None
+                if enc is not None:
+                    texts_to_enc = [q_clean] + [
+                        f"{it['title']} ({it['domain']})\n{it['text'][:800]}"
+                        for it in items
+                    ]
+                    vecs = enc.encode(texts_to_enc, normalize_embeddings=True)
+                    q_vec = vecs[0]
+                    raw_emb: list[float] = []
+                    for i in range(n):
+                        d_vec = vecs[i + 1]
+                        dot = float(sum(float(a) * float(b) for a, b in zip(q_vec, d_vec)))
+                        raw_emb.append(max(0.0, dot))
+                    max_emb = max(raw_emb) if raw_emb else 0.0
+                    if max_emb > 0:
+                        emb_scores = [s / max_emb for s in raw_emb]
+            except Exception:
+                emb_scores = [0.0] * n
+
+        has_emb = any(s > 0.0 for s in emb_scores)
+        combined: list[float] = []
+        for idx, it in enumerate(items):
+            base = (0.60 * norm_bm25[idx] + 0.40 * emb_scores[idx]) if has_emb else norm_bm25[idx]
+            tab_bias = 0.02 if it["is_open_tab"] else 0.0
+            tie_break = (n - idx) * 1e-4
+            combined.append(base + tab_bias + tie_break)
+        return combined
+
+    def _build_source_snippet(
+        self,
+        question: str,
+        item: dict[str, Any],
+        char_cap: int,
+    ) -> tuple[str, bool]:
+        """Extracts an excerpt up to `char_cap` from an open tab or closed web source, returning `(snippet, was_cut)`."""
+        from src.planck3.candidates import rank_passages, split_sentences
+        from src.planck3.util import norm_text
+        from src.planck3.web import query_keys
+
+        text = item["text"]
+        url = item["url"]
+        domain = item["domain"]
+        title = item["title"]
+        is_open_tab = item["is_open_tab"]
+        keys = query_keys(question)
+
+        if is_open_tab:
+            tab_budget = min(self.open_tab_char_budget, char_cap)
+            if len(text) <= tab_budget:
+                return text[:tab_budget], False
+            lede = text[: min(1500, tab_budget)]
+            rest_text = text[1500:]
+            rest_budget = max(0, tab_budget - len(lede) - 2)
+            ranked_parts: list[str] = []
+            if rest_budget > 0 and rest_text.strip():
+                doc = {
+                    "url": url,
+                    "domain": domain,
+                    "title": title,
+                    "trust": 0.7,
+                    "text": rest_text,
+                }
+                ranked = rank_passages(
+                    question or title or domain,
+                    [doc],
+                    k=8,
+                    per_source=8,
+                    min_score=0.01,
+                )
+                used_len = 0
+                if ranked:
+                    for p in ranked:
+                        p_txt = str(p.get("text") or "").strip()
+                        if not p_txt:
+                            continue
+                        if used_len + len(p_txt) + 1 <= rest_budget:
+                            ranked_parts.append(p_txt)
+                            used_len += len(p_txt) + 1
+                        else:
+                            rem_slice = rest_budget - used_len
+                            if rem_slice > 80:
+                                ranked_parts.append(p_txt[:rem_slice])
+                            break
+                else:
+                    sents = split_sentences(rest_text)
+                    scored_sents = (
+                        sorted(
+                            sents,
+                            key=lambda s: sum(1 for k in keys if k in norm_text(s).split()),
+                            reverse=True,
+                        )
+                        if keys
+                        else sents
+                    )
+                    for s in scored_sents[:8]:
+                        if used_len + len(s) + 1 <= rest_budget:
+                            ranked_parts.append(s)
+                            used_len += len(s) + 1
+                        else:
+                            break
+            snippet = (lede + "\n\n" + "\n".join(ranked_parts)).strip()[:tab_budget] if ranked_parts else lede
+            return snippet, True
+
+        was_cut = len(text) > min(2400, char_cap)
+        doc = {"url": url, "domain": domain, "title": title, "trust": 0.7, "text": text}
+        ranked = rank_passages(question, [doc], k=3, per_source=3, min_score=0.05)
+        if ranked:
+            snippet = "\n".join(p["text"] for p in ranked)
+        else:
+            sents = split_sentences(text)
+            if keys:
+                scored = sorted(
+                    sents,
+                    key=lambda s: sum(1 for k in keys if k in norm_text(s).split()),
+                    reverse=True,
+                )
+                snippet = "\n".join(scored[:3])
+            else:
+                snippet = "\n".join(sents[:3])
+        return snippet[: min(2400, char_cap)], was_cut
+
+    @staticmethod
+    def _parse_read_source_calls(raw_text: str) -> list[dict[str, Any]]:
+        """Parses `<read_source>{...}</read_source>` or `<read_source n="14"/>` emitted by local Gemma."""
+        calls: list[dict[str, Any]] = []
+        block_re = re.compile(r"<read_source\b([^>]*)>(.*?)</read_source>", flags=re.IGNORECASE | re.DOTALL)
+        self_re = re.compile(r"<read_source\b([^>]*)/?>", flags=re.IGNORECASE | re.DOTALL)
+
+        consumed_spans: list[tuple[int, int]] = []
+        for m in block_re.finditer(raw_text or ""):
+            consumed_spans.append((m.start(), m.end()))
+            attrs = str(m.group(1) or "")
+            body = str(m.group(2) or "").strip()
+            parsed: dict[str, Any] = {}
+            if body.startswith("{"):
+                try:
+                    obj = json.loads(body)
+                    if isinstance(obj, dict):
+                        parsed.update(obj)
+                except Exception:
+                    pass
+            elif body.isdigit():
+                parsed["n"] = int(body)
+            m_n = re.search(r'\bn\s*=\s*["\']?(\d+)', attrs, flags=re.IGNORECASE)
+            if m_n and "n" not in parsed:
+                parsed["n"] = int(m_n.group(1))
+            m_q = re.search(r'\bquery\s*=\s*["\']([^"\']+)["\']', attrs, flags=re.IGNORECASE)
+            if m_q and "query" not in parsed:
+                parsed["query"] = m_q.group(1)
+            if "n" in parsed:
+                calls.append(parsed)
+
+        for m in self_re.finditer(raw_text or ""):
+            if any(s <= m.start() < e for s, e in consumed_spans):
+                continue
+            attrs = str(m.group(1) or "")
+            m_n = re.search(r'\bn\s*=\s*["\']?(\d+)', attrs, flags=re.IGNORECASE)
+            if m_n:
+                call_obj: dict[str, Any] = {"n": int(m_n.group(1))}
+                m_q = re.search(r'\bquery\s*=\s*["\']([^"\']+)["\']', attrs, flags=re.IGNORECASE)
+                if m_q:
+                    call_obj["query"] = m_q.group(1)
+                calls.append(call_obj)
+        return calls
+
     def assemble_chat_context(
         self,
         question: str,
         sources: list[dict[str, Any]],
     ) -> tuple[str, list[str], list[dict[str, Any]]]:
         """
-        Assembles context from:
-        1. Open authenticated browser tabs in full (up to open_tab_char_budget each)
-        2. Additional web/checked sources (best 3 passages each)
+        Assembles 2-tier context without silently dropping tail sources:
+        Tier 1: Compact Index Manifest ([1]..[N] sender/title/1-line summary + metadata)
+        Tier 2: Full/compressed excerpts prioritized for top BM25 + embedding matches
         3. Relevant historical passages from the local Planck SQLite store
         Returns (context_str, used_source_ids, hydrated_sources).
         """
         from satz_brain import neutralize_brain_directives_in_source
-        from src.planck3.candidates import rank_passages, split_sentences
         from src.planck3.util import norm_text
         from src.planck3.web import domain_of, query_keys
 
@@ -2979,9 +4981,9 @@ class SatzSidecarRuntime:
         hydrated_sources: list[dict[str, Any]] = []
         seen_urls: set[str] = set()
 
+        # Pass 1: hydrate/filter valid non-blocked sources without dropping tail items on budget cutoff
+        valid_items: list[dict[str, Any]] = []
         for src in sources:
-            if total_chars >= self.total_context_char_budget:
-                break
             sid = str(src.get("id") or "")
             url = str(src.get("url") or "")
             title = str(src.get("title") or url)
@@ -3006,115 +5008,129 @@ class SatzSidecarRuntime:
             if url:
                 seen_urls.add(url)
 
-            remaining = self.total_context_char_budget - total_chars
-            chars_captured = len(text)
-            was_cut = False
-
-            if is_open_tab:
-                tab_budget = min(self.open_tab_char_budget, remaining)
-                if len(text) <= self.open_tab_char_budget:
-                    snippet = text[:tab_budget]
-                else:
-                    was_cut = True
-                    lede = text[: min(1500, tab_budget)]
-                    rest_text = text[1500:]
-                    rest_budget = max(0, tab_budget - len(lede) - 2)
-                    ranked_parts: list[str] = []
-                    if rest_budget > 0 and rest_text.strip():
-                        doc = {
-                            "url": url,
-                            "domain": domain,
-                            "title": title,
-                            "trust": 0.7,
-                            "text": rest_text,
-                        }
-                        ranked = rank_passages(
-                            question or title or domain,
-                            [doc],
-                            k=8,
-                            per_source=8,
-                            min_score=0.01,
-                        )
-                        used_len = 0
-                        if ranked:
-                            for p in ranked:
-                                p_txt = str(p.get("text") or "").strip()
-                                if not p_txt:
-                                    continue
-                                if used_len + len(p_txt) + 1 <= rest_budget:
-                                    ranked_parts.append(p_txt)
-                                    used_len += len(p_txt) + 1
-                                else:
-                                    rem_slice = rest_budget - used_len
-                                    if rem_slice > 80:
-                                        ranked_parts.append(p_txt[:rem_slice])
-                                    break
-                        else:
-                            sents = split_sentences(rest_text)
-                            scored_sents = (
-                                sorted(
-                                    sents,
-                                    key=lambda s: sum(1 for k in keys if k in norm_text(s).split()),
-                                    reverse=True,
-                                )
-                                if keys
-                                else sents
-                            )
-                            for s in scored_sents[:8]:
-                                if used_len + len(s) + 1 <= rest_budget:
-                                    ranked_parts.append(s)
-                                    used_len += len(s) + 1
-                                else:
-                                    break
-                    snippet = (lede + "\n\n" + "\n".join(ranked_parts)).strip()[:tab_budget] if ranked_parts else lede
-            else:
-                was_cut = len(text) > 2400
-                doc = {"url": url, "domain": domain, "title": title, "trust": 0.7, "text": text}
-                ranked = rank_passages(question, [doc], k=3, per_source=3, min_score=0.05)
-                if ranked:
-                    snippet = "\n".join(p["text"] for p in ranked)
-                else:
-                    sents = split_sentences(text)
-                    if keys:
-                        scored = sorted(
-                            sents,
-                            key=lambda s: sum(1 for k in keys if k in norm_text(s).split()),
-                            reverse=True,
-                        )
-                        snippet = "\n".join(scored[:3])
-                    else:
-                        snippet = "\n".join(sents[:3])
-                snippet = snippet[: min(2400, remaining)]
-
-            if not snippet.strip():
-                continue
-
-            snippet = neutralize_brain_directives_in_source(snippet)
-
-            cite_num = len(used_source_ids) + 1
-            used_source_ids.append(sid)
             src_findings = src.get("findings") if isinstance(src.get("findings"), list) else self.get_source_findings(sid, url)
             src_capture_mode = str(src.get("capture_mode") or "") or self.get_source_capture_mode(sid, url)
-            hydrated_sources.append(
+            summary_line = neutralize_brain_directives_in_source(
+                self._extract_one_line_summary(text, title=title)
+            )
+            valid_items.append(
                 {
                     "id": sid,
                     "url": url,
                     "title": title,
                     "domain": domain,
-                    "text": snippet,
-                    "full_text": text,
-                    "chars_captured": chars_captured,
-                    "chars_sent": len(snippet),
-                    "was_cut": was_cut,
-                    "capture_mode": src_capture_mode,
                     "is_open_tab": is_open_tab,
+                    "text": text,
+                    "chars_captured": len(text),
                     "findings": src_findings,
+                    "capture_mode": src_capture_mode,
+                    "summary": summary_line,
                 }
             )
-            tab_tag = "LIVE OPEN BROWSER TAB" if is_open_tab else "WEB SOURCE"
-            block = f"[{cite_num}] ({tab_tag}) {domain} ({title}) - {url}\n{snippet}"
-            blocks.append(block)
-            total_chars += len(block)
+
+        if valid_items:
+            n_valid = len(valid_items)
+            scores = self._score_sources_bm25_embedding(question, valid_items)
+            rank_order = sorted(range(n_valid), key=lambda idx: scores[idx], reverse=True)
+
+            # Decide whether Tier-1 Manifest will be shown (always when >=3 sources, or when total overflows budget)
+            est_total_excerpt_chars = sum(
+                min(len(it["text"]), self.open_tab_char_budget if it["is_open_tab"] else 2400) + 120
+                for it in valid_items
+            )
+            need_manifest = (n_valid >= 3) or (est_total_excerpt_chars > self.total_context_char_budget)
+            est_manifest_chars = (
+                sum(len(it["title"]) + len(it["domain"]) + len(it["summary"]) + 96 for it in valid_items) + 120
+                if need_manifest
+                else 0
+            )
+            tier2_budget = max(2400, self.total_context_char_budget - est_manifest_chars - 300)
+            tier2_used = 0
+
+            allocations: dict[int, dict[str, Any]] = {}
+            for idx in rank_order:
+                it = valid_items[idx]
+                remaining_t2 = tier2_budget - tier2_used
+                if remaining_t2 >= 280:
+                    snippet_raw, was_cut = self._build_source_snippet(question, it, remaining_t2)
+                    snippet_safe = neutralize_brain_directives_in_source(snippet_raw).strip()
+                    if snippet_safe:
+                        tier_label = "excerpt" if (was_cut or len(snippet_safe) < len(it["text"])) else "full"
+                        header_overhead = len(it["domain"]) + len(it["title"]) + len(it["url"]) + 42
+                        tier2_used += len(snippet_safe) + header_overhead
+                        allocations[idx] = {
+                            "tier": tier_label,
+                            "snippet": snippet_safe,
+                            "was_cut": was_cut,
+                        }
+                        continue
+
+                # Exhausted Tier-2 budget: preserve in Tier-1 Manifest instead of dropping silently!
+                manifest_summary = (
+                    f"[MANIFEST SUMMARY] {it['domain']} ({it['title']}) - {it['url']} | {it['summary']}"
+                )
+                allocations[idx] = {
+                    "tier": "manifest",
+                    "snippet": manifest_summary,
+                    "was_cut": True,
+                }
+
+            manifest_lines: list[str] = []
+            excerpt_blocks: list[str] = []
+            for idx, it in enumerate(valid_items):
+                cite_num = idx + 1
+                alloc = allocations[idx]
+                tier = alloc["tier"]
+                snippet = alloc["snippet"]
+                was_cut = bool(alloc["was_cut"])
+                chars_sent = len(snippet)
+
+                used_source_ids.append(it["id"])
+                hydrated_sources.append(
+                    {
+                        "id": it["id"],
+                        "url": it["url"],
+                        "title": it["title"],
+                        "domain": it["domain"],
+                        "text": snippet,
+                        "full_text": it["text"],
+                        "chars_captured": it["chars_captured"],
+                        "chars_sent": chars_sent,
+                        "was_cut": was_cut,
+                        "capture_mode": it["capture_mode"],
+                        "is_open_tab": it["is_open_tab"],
+                        "context_tier": tier,
+                        "findings": it["findings"],
+                    }
+                )
+
+                kind_tag = (
+                    "MAIL"
+                    if (it["id"].startswith("mail:") or it["url"].startswith("satzmail://"))
+                    else ("OPEN TAB" if it["is_open_tab"] else "WEB")
+                )
+                tier_tag = {
+                    "full": "FULL BELOW",
+                    "excerpt": "EXCERPT BELOW",
+                    "manifest": "MANIFEST ONLY - call read_source to expand",
+                }[tier]
+                manifest_lines.append(
+                    f"[{cite_num}] ({kind_tag} | {tier_tag}) {it['domain']} | {it['title'][:64]} | {it['chars_captured']:,} chars: {it['summary']}"
+                )
+
+                if tier in ("full", "excerpt"):
+                    tab_tag = "LIVE OPEN BROWSER TAB" if it["is_open_tab"] else "WEB SOURCE"
+                    excerpt_blocks.append(f"[{cite_num}] ({tab_tag}) {it['domain']} ({it['title']}) - {it['url']}\n{snippet}")
+
+            if need_manifest or any(allocations[i]["tier"] == "manifest" for i in range(n_valid)):
+                manifest_block = (
+                    f"SOURCE INDEX MANIFEST (ALL {n_valid} CAPTURED SOURCES - ranked excerpts follow; "
+                    f"call `read_source(n)` to read any MANIFEST ONLY or cut source in full):\n"
+                    + "\n".join(manifest_lines)
+                )
+                blocks.append(manifest_block)
+            blocks.extend(excerpt_blocks)
+            total_chars = sum(len(b) for b in blocks)
 
         # 2. If active profile is unlocked, check if stored .env credentials can extract live data for the open tabs
         if question and self.passwords.unlocked:
@@ -3138,15 +5154,29 @@ class SatzSidecarRuntime:
                 except Exception as pe:
                     self.record_error("credential_extract", f"{tgt}: {pe}")
 
-        # 3. Also pull relevant passages from persistent SQLite knowledge store & continuously-indexed bookmarks
+        # 3. Also pull relevant passages from persistent SQLite knowledge store, synced news sources, & continuously-indexed bookmarks
         if question and total_chars < self.total_context_char_budget - 1000:
             kb_lines: list[str] = []
             try:
+                from datetime import datetime, timezone
+
+                q_low_ctx = question.lower()
+                wants_recent_news = any(
+                    w in q_low_ctx for w in ("news", "story", "stories", "headline", "today", "latest", "recent", "world", "briefing")
+                )
+                only_mail_sources = bool(valid_items) and all(
+                    it["id"].startswith("mail:") or it["url"].startswith("satzmail://")
+                    for it in valid_items
+                )
                 with self.store_lock:
                     stored_hits = self.store.local_passages(question, k=4)
-                    bm_rows = self.store.db.execute(
-                        "SELECT url, domain, title, text FROM satz_sources WHERE source_id LIKE 'bookmark:%' ORDER BY updated_at DESC LIMIT 12"
-                    ).fetchall()
+                    bm_rows = (
+                        []
+                        if (only_mail_sources and not wants_recent_news)
+                        else self.store.db.execute(
+                            "SELECT source_id, url, domain, title, text, updated_at FROM satz_sources WHERE source_id LIKE 'bookmark:%' OR source_id LIKE 'news:%' ORDER BY updated_at DESC LIMIT 24"
+                        ).fetchall()
+                    )
                 for hp in stored_hits:
                     hurl = str(hp.get("url") or "")
                     htext = neutralize_brain_directives_in_source(str(hp.get("text") or "").strip())
@@ -3165,14 +5195,28 @@ class SatzSidecarRuntime:
                     btext = neutralize_brain_directives_in_source(str(bmr["text"] or "").strip())
                     if not btext or (burl and burl in seen_urls):
                         continue
+                    bsid = str(bmr["source_id"] or "")
                     bdom = str(bmr["domain"] or domain_of(burl) or "bookmark")
                     btitle = str(bmr["title"] or burl)
-                    if any(k in norm_text(f"{btitle} {bdom} {btext[:600]}") for k in keys) or bdom.lower() in question.lower():
-                        kb_lines.append(f"- (BOOKMARK INDEXED: {bdom} · {btitle} - {burl}): {btext[:600]}")
+                    is_news_src = bsid.startswith("news:")
+                    matches_kw = any(k in norm_text(f"{btitle} {bdom} {btext[:600]}") for k in keys) or (bdom.lower() in q_low_ctx)
+                    if matches_kw or (is_news_src and wants_recent_news):
+                        if is_news_src:
+                            upd_ts = float(bmr["updated_at"] or 0.0)
+                            ts_lbl = (
+                                datetime.fromtimestamp(upd_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%MZ")
+                                if upd_ts > 0
+                                else "synced"
+                            )
+                            kb_lines.append(f"- (SYNCED NEWS · {ts_lbl} · {bdom} · {btitle} - {burl}): {btext[:600]}")
+                        else:
+                            kb_lines.append(f"- (BOOKMARK INDEXED: {bdom} · {btitle} - {burl}): {btext[:600]}")
             except Exception as kbe:
                 self.record_error("local_passages", kbe)
             if kb_lines:
-                blocks.append("STORED PASSAGES & CONTINUOUSLY INDEXED BOOKMARKS:\n" + "\n".join(kb_lines[:6]))
+                kb_cap = max(600, min(3600, self.total_context_char_budget - total_chars))
+                kb_block = "STORED PASSAGES, SYNCED NEWS & INDEXED BOOKMARKS:\n" + "\n".join(kb_lines[:6])
+                blocks.append(kb_block[:kb_cap])
 
         return "\n\n".join(blocks), used_source_ids, hydrated_sources
 
@@ -3181,8 +5225,9 @@ class SatzSidecarRuntime:
         user_msg: str,
         brain_context: str,
         context_str: str,
-        prior_messages: list[dict[str, str]],
+        prior_messages: list[dict[str, Any]],
         conversation_summary: str = "",
+        image_count: int = 0,
     ) -> list[dict[str, str]]:
         """
         Section 3.2 (M9):
@@ -3201,12 +5246,26 @@ class SatzSidecarRuntime:
         for pm in prior_messages[-6:]:
             role_lbl = "User" if pm.get("role") == "user" else "Assistant"
             content_str = str(pm.get("content") or "").strip()
-            if content_str:
-                history_lines.append(f"{role_lbl}: {content_str[:800]}")
+            pm_imgs = pm.get("images")
+            img_tag = (
+                f"[Attached {len(pm_imgs)} image(s)] "
+                if isinstance(pm_imgs, list) and len(pm_imgs) > 0
+                else ""
+            )
+            combined_hist = f"{img_tag}{content_str}".strip()
+            if combined_hist:
+                history_lines.append(f"{role_lbl}: {combined_hist[:800]}")
         if history_lines:
             prompt_sections.append("CONVERSATION HISTORY:\n" + "\n".join(history_lines))
 
-        prompt_sections.append(f"USER REQUEST: {user_msg}")
+        if image_count > 0:
+            prompt_sections.append(
+                f"ATTACHED IMAGES:\nThe user attached {image_count} image(s) to this request. "
+                "Inspect the attached image(s) carefully and refer directly to what is visible in them."
+            )
+
+        effective_req = user_msg or ("Describe and analyze the attached image(s)." if image_count > 0 else "")
+        prompt_sections.append(f"USER REQUEST: {effective_req}")
         user_prompt = "\n\n".join(prompt_sections)
 
         has_sources = bool(context_str and context_str.strip())
@@ -3276,30 +5335,113 @@ class SatzSidecarRuntime:
 
     def stream_chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         sources: list[dict[str, Any]],
         web_enabled: bool = False,
         conversation_summary: str = "",
         mail_enabled: bool = False,
         model_id: str = "gemma-4-e4b",
+        conversation_id: str = "",
+        images: list[dict[str, Any]] | None = None,
+        open_tabs: list[dict[str, Any]] | None = None,
+        user_overrode_model: bool = False,
+        origin: str = "chat",
+        staged_files: list[dict[str, Any]] | None = None,
+        drives_enabled: bool = False,
     ):
         """Generator yielding SSE dicts: {'delta': ...} then {'done': True, 'source_ids': [...], 'ms': ...}."""
         from src.planck3.candidates import main_entity
         from src.planck3.web import domain_of
 
         t0 = time.perf_counter()
+        norm_origin = str(origin or "").strip().lower()
+        is_settings_origin = norm_origin == "settings"
+        is_news_settings_origin = norm_origin == "news_settings"
+        is_any_settings_origin = is_settings_origin or is_news_settings_origin
         user_msg = ""
-        for m in reversed(messages):
+        last_user_idx = -1
+        raw_current_images: list[dict[str, Any]] | None = images if images else None
+        for idx in range(len(messages) - 1, -1, -1):
+            m = messages[idx]
             if m.get("role") == "user":
                 user_msg = str(m.get("content") or "").strip()
+                last_user_idx = idx
+                if raw_current_images is None and isinstance(m.get("images"), list):
+                    raw_current_images = m.get("images")
                 break
 
-        if user_msg and not self.pause_learning:
+        if is_any_settings_origin:
+            if is_settings_origin:
+                from satz_tools.settings_staging import extract_and_stage_inline_secrets
+
+                user_msg, staged_files = extract_and_stage_inline_secrets(self, user_msg, staged_files)
+            route_decision = {
+                "query_type": "news_settings" if is_news_settings_origin else "settings",
+                "model": str(model_id or "gemma-4-e4b"),
+                "web_enabled": bool(web_enabled),
+                "mail_enabled": False,
+                "escalated": False,
+                "reason": "",
+            }
+        else:
+            route_decision = self.resolve_chat_route(
+                prompt=user_msg,
+                selected_model=model_id,
+                web_enabled=web_enabled,
+                mail_enabled=mail_enabled,
+                sources=sources,
+                user_overrode_model=user_overrode_model,
+            )
+        effective_model_id = str(route_decision["model"] or model_id or "gemma-4-e4b")
+        effective_web_enabled = bool(route_decision["web_enabled"])
+        effective_mail_enabled = bool(route_decision["mail_enabled"])
+        if route_decision.get("escalated"):
+            yield {
+                "status": f"auto-routed to {effective_model_id}"
+                + (" + web" if effective_web_enabled and not web_enabled else "")
+                + (" + mail" if effective_mail_enabled and not mail_enabled else "")
+                + (f" ({route_decision.get('reason')})" if route_decision.get("reason") else ""),
+                "phase": "routing",
+                "routing_info": route_decision,
+            }
+        model_id = effective_model_id
+        web_enabled = effective_web_enabled
+        mail_enabled = effective_mail_enabled
+
+        active_images = self._parse_chat_images(raw_current_images)
+        prior_cutoff = last_user_idx if last_user_idx >= 0 else max(0, len(messages) - 1)
+        prior = [m for m in messages[:prior_cutoff] if m.get("role") in ("user", "assistant")]
+        if is_settings_origin and prior:
+            from satz_tools.settings_staging import redact_inline_secrets_text
+
+            prior = [
+                {**pm, "content": redact_inline_secrets_text(str(pm.get("content") or ""))}
+                for pm in prior
+            ]
+
+        if not active_images:
+            for pm in reversed(prior[-3:]):
+                if pm.get("role") == "user" and isinstance(pm.get("images"), list) and pm.get("images"):
+                    carried = self._parse_chat_images(pm.get("images"), max_images=2)
+                    if carried:
+                        active_images = carried
+                        break
+
+        if user_msg and not self.pause_learning and not is_any_settings_origin:
             with self.store_lock:
                 self.store.log_query(user_msg, main_entity(user_msg))
+            if hasattr(self, "behavior") and self.behavior is not None:
+                dom0 = str((sources[0] or {}).get("domain") or "") if sources else ""
+                self.behavior.log_event("chat_prompt", domain=dom0, query=user_msg)
 
         combined_sources = list(sources)
         cited_web_sources: list[dict[str, str]] = []
+
+        unsub_intent = (
+            {"is_unsubscribe": False}
+            if is_any_settings_origin
+            else detect_user_unsubscribe_intent(user_msg, prior)
+        )
 
         # Avoid running a generic public web search when the user is asking about
         # their open tab / email / account / inbox / page or asking to summarize / store something.
@@ -3312,6 +5454,7 @@ class SatzSidecarRuntime:
         )
         is_personal_or_tab_query = bool(
             has_mail_or_app_tab
+            or unsub_intent["is_unsubscribe"]
             or re.search(
                 r"\b(my\s+(?:latest\s+)?(?:email|inbox|mail|account|calendar|messages|address|tab|page|order|package)|"
                 r"(?:latest|newest|recent|unread|first|last)\s+(?:email|emails|mail|mails|message|messages|thread|order)|"
@@ -3324,19 +5467,57 @@ class SatzSidecarRuntime:
         )
 
         # Section 4.1 & 4.8 (M14): Inject mail sources from `mail.sqlite` when `mail_enabled` is on
-        # or when `is_personal_or_tab_query` matches and mail accounts exist.
-        if getattr(self, "mail", None) is not None and self.passwords.unlocked:
+        # or when `is_personal_or_tab_query` / explicit unsubscribe matches and mail accounts exist.
+        if not is_any_settings_origin and getattr(self, "mail", None) is not None and self.passwords.unlocked:
             existing_sids = {str(s.get("id") or "") for s in combined_sources}
             mail_candidates: list[dict[str, Any]] = []
-            if mail_enabled and user_msg:
-                search_res = self.mail.search_messages(user_msg, limit=5)
-                mail_candidates = list(search_res.get("rows") or [])
+            if unsub_intent["is_unsubscribe"]:
+                q_unsub = unsub_intent.get("target_query") or ""
+                mid_unsub = unsub_intent.get("message_id") or ""
+                c_idx = unsub_intent.get("cite_idx")
+                if not mid_unsub and c_idx and 1 <= c_idx <= len(combined_sources):
+                    cs_hit = combined_sources[c_idx - 1]
+                    cs_id = str(cs_hit.get("id") or "")
+                    cs_u = str(cs_hit.get("url") or "")
+                    if cs_id.startswith("mail:"):
+                        mid_unsub = cs_id.split("mail:", 1)[1].strip()
+                    elif cs_u.startswith("satzmail://message/"):
+                        mid_unsub = cs_u.split("satzmail://message/", 1)[1].split("/")[0].strip()
+                t_hits = self.mail.find_unsubscribe_targets(query=q_unsub, message_id=mid_unsub, limit=5)
+                for th in t_hits:
+                    t_mid = str(th.get("message_id") or "")
+                    t_sid = f"mail:{t_mid}"
+                    if t_mid and t_sid not in existing_sids:
+                        existing_sids.add(t_sid)
+                        combined_sources.insert(
+                            0,
+                            {
+                                "id": t_sid,
+                                "url": f"satzmail://message/{t_mid}",
+                                "title": f"{th.get('from_name') or th.get('from_addr')}: {th.get('subject')}",
+                                "domain": "mail",
+                                "is_open_tab": True,
+                            },
+                        )
+            is_explicit_mail_query = bool(
+                re.search(
+                    r"\b(email|emails|mail|mails|inbox|thread|unread|action\s+items?|deal\s+with\s+today)\b",
+                    user_msg,
+                    re.IGNORECASE,
+                )
+            )
+            if (mail_enabled or is_explicit_mail_query) and user_msg:
+                if hasattr(self.mail, "query_mail_for_chat_context"):
+                    mail_candidates = list(self.mail.query_mail_for_chat_context(user_msg, limit=6) or [])
+                if not mail_candidates:
+                    search_res = self.mail.search_messages(user_msg, limit=5)
+                    mail_candidates = list(search_res.get("rows") or [])
                 if not mail_candidates:
                     # Fallback to token search over non-stopwords
                     q_words = [
                         w
                         for w in re.findall(r"[A-Za-z0-9äöüÄÖÜß]{3,}", user_msg)
-                        if w.lower() not in {"what", "when", "where", "does", "with", "from", "have", "need", "deal", "today", "your", "this", "that"}
+                        if w.lower() not in {"what", "when", "where", "does", "with", "from", "have", "need", "deal", "today", "your", "this", "that", "give", "latest", "work", "action", "items", "email", "emails", "mail", "mails"}
                     ]
                     for qw in q_words[:3]:
                         sub_res = self.mail.search_messages(qw, limit=5)
@@ -3347,20 +5528,13 @@ class SatzSidecarRuntime:
                                     break
                         if len(mail_candidates) >= 5:
                             break
-            is_explicit_mail_query = bool(
-                re.search(
-                    r"\b(email|emails|mail|mails|inbox|thread|unread|deal\s+with\s+today)\b",
-                    user_msg,
-                    re.IGNORECASE,
-                )
-            )
-            if (mail_enabled or is_explicit_mail_query) and not mail_candidates and not existing_sids:
+            if (mail_enabled or is_explicit_mail_query) and not mail_candidates:
                 triage = self.mail.get_triage_set()
                 for ts in (triage.get("sources") or [])[:5]:
                     if ts["id"] not in existing_sids:
                         existing_sids.add(ts["id"])
                         combined_sources.append(ts)
-            for mc in mail_candidates[:5]:
+            for mc in mail_candidates[:6]:
                 mid = str(mc.get("id") or "")
                 sid = f"mail:{mid}"
                 if mid and sid not in existing_sids:
@@ -3375,14 +5549,37 @@ class SatzSidecarRuntime:
                         }
                     )
 
+        # Inject unified Cloud Drives sources (`drives.sqlite` + `SatzBrain`) when in `conv-drives`,
+        # when `drives_enabled` is toggled on, or when user explicitly asks about Drive / OneDrive / Docs.
+        is_drives_origin = str(origin or "").strip().lower() == "drives" or conversation_id == "conv-drives"
+        is_explicit_drives_query = bool(
+            re.search(
+                r"\b(google\s+drive|onedrive|my\s+drive|cloud\s+drive|cloud\s+drives|shared\s+with\s+me|"
+                r"google\s+docs?|google\s+sheets?|google\s+slides?)\b",
+                user_msg,
+                re.IGNORECASE,
+            )
+        )
+        effective_drives_enabled = bool(drives_enabled or is_drives_origin or is_explicit_drives_query)
+        if not is_any_settings_origin and effective_drives_enabled and getattr(self, "drives", None) is not None and self.passwords.unlocked:
+            existing_drive_sids = {str(s.get("id") or "") for s in combined_sources}
+            drive_sources = self.drives.build_chat_sources(user_msg, limit=8)
+            for ds in drive_sources:
+                ds_id = str(ds.get("id") or "")
+                if ds_id and ds_id not in existing_drive_sids:
+                    existing_drive_sids.add(ds_id)
+                    combined_sources.append(ds)
+            if drive_sources:
+                is_personal_or_tab_query = True
+
         from satz_web_harness import (
             WebSearchSessionHarness,
             is_explicit_web_search_request,
             resolve_web_search_query,
             stream_cloud_chat,
+            stream_local_gemma_chat,
         )
 
-        prior = [m for m in messages[:-1] if m.get("role") in ("user", "assistant")]
         explicit_web_req = is_explicit_web_search_request(user_msg, prior)
         cloud_parsed = self._parse_cloud_model_id(model_id)
         resolved_search_q = resolve_web_search_query(user_msg, prior) if (explicit_web_req or web_enabled) else user_msg
@@ -3398,6 +5595,18 @@ class SatzSidecarRuntime:
             )
         )
 
+        # If asking for news while web_enabled is off, prefer fast local hourly-synced news cache when populated
+        has_synced_news_cache = False
+        if not web_enabled and not explicit_web_req and getattr(self, "news", None) is not None and user_msg:
+            if re.search(r"\b(news|headlines|top\s+stories|world\s+news|briefing)\b", user_msg, re.IGNORECASE):
+                try:
+                    n_st = self.news.get_status()
+                    last_ns = float(n_st.get("last_sync_at") or 0.0)
+                    if n_st.get("clusters", 0) >= 3 and last_ns > 0 and (time.time() - last_ns) <= self.news_refresh_interval_secs:
+                        has_synced_news_cache = True
+                except Exception:
+                    pass
+
         # Check if an open live WebView2 tab already navigated to a search/catalogue page with real items
         has_live_search_tab = False
         for s in combined_sources:
@@ -3409,12 +5618,27 @@ class SatzSidecarRuntime:
                         has_live_search_tab = True
                         break
 
-        should_run_web = explicit_web_req or (web_enabled and not (is_personal_or_tab_query and len(combined_sources) > 0)) or (
-            is_site_discovery_query and not is_personal_or_tab_query and not has_live_search_tab
+        should_run_web = (
+            bool(web_enabled)
+            if is_settings_origin
+            else False
+            if is_news_settings_origin
+            else (
+                explicit_web_req
+                or (web_enabled and not (is_personal_or_tab_query and len(combined_sources) > 0))
+                or (
+                    is_site_discovery_query
+                    and not active_images
+                    and not is_personal_or_tab_query
+                    and not has_live_search_tab
+                    and not has_synced_news_cache
+                )
+            )
         )
 
+        img_status = f", {len(active_images)} image(s)" if active_images else ""
         yield {
-            "status": f"reading {len(combined_sources)} open tab source(s) & local brain...",
+            "status": f"reading {len(combined_sources)} open tab source(s){img_status} & local brain...",
             "phase": "context",
         }
 
@@ -3468,10 +5692,24 @@ class SatzSidecarRuntime:
 
         context_rank_q = resolved_search_q if (explicit_web_req and resolved_search_q) else user_msg
         context_str, used_source_ids, hydrated_sources = self.assemble_chat_context(context_rank_q, combined_sources)
-        brain_context, brain_sources = self.brain.build_model_context_with_citations(
-            context_rank_q,
-            hydrated_sources or combined_sources,
-        )
+        if is_any_settings_origin:
+            brain_context, brain_sources = "", []
+        else:
+            brain_char_budget = 2400 if (cloud_parsed is not None and len(context_str) >= 1500) else 3400
+            brain_context, brain_sources = self.brain.build_model_context_with_citations(
+                context_rank_q,
+                hydrated_sources or combined_sources,
+                max_chars=brain_char_budget,
+            )
+        if hasattr(self, "recipes") and self.recipes is not None and combined_sources:
+            try:
+                recipe_hints = self.recipes.format_prompt_hints(
+                    [str(s.get("url") or "") for s in combined_sources]
+                )
+                if recipe_hints:
+                    brain_context = f"{brain_context}\n\n{recipe_hints}" if brain_context else recipe_hints
+            except Exception:
+                pass
 
         hydrated_by_id = {hs["id"]: hs for hs in hydrated_sources}
         source_stats_list: list[dict[str, Any]] = []
@@ -3486,6 +5724,7 @@ class SatzSidecarRuntime:
                     "chars_sent": hs.get("chars_sent", len(hs.get("text", ""))),
                     "was_cut": hs.get("was_cut", False),
                     "capture_mode": hs.get("capture_mode", "dom"),
+                    "context_tier": hs.get("context_tier", "full"),
                 }
             )
         for cs in combined_sources:
@@ -3504,32 +5743,52 @@ class SatzSidecarRuntime:
                 }
             )
 
-        cloud_harness: WebSearchSessionHarness | None = None
-        if cloud_parsed is not None:
-            cloud_harness = WebSearchSessionHarness(
-                self,
-                combined_sources=combined_sources,
-                hydrated_sources=hydrated_sources,
-                used_source_ids=used_source_ids,
-                cited_web_sources=cited_web_sources,
-                source_stats_list=source_stats_list,
-            )
-            if explicit_web_req and (resolved_search_q or user_msg):
-                q_init = resolved_search_q or user_msg
-                yield {
-                    "status": f"searching web sources for '{q_init[:48]}'...",
-                    "phase": "web_search",
-                }
-                init_res = cloud_harness.execute_web_search(q_init, max_results=5)
-                if init_res.get("results"):
-                    extra_blocks = [
-                        f"[{idx_i}] (WEB SOURCE) {hs['domain']} ({hs['title']}) - {hs['url']}\n{hs['text']}"
-                        for idx_i, hs in enumerate(hydrated_sources, 1)
-                        if hs.get("id") not in hydrated_by_id
-                    ]
-                    if extra_blocks:
-                        joined_extra = "\n\n".join(extra_blocks)
-                        context_str = f"{context_str}\n\n{joined_extra}".strip() if context_str else joined_extra
+        prepared_tasks: list[dict[str, Any]] = []
+        allow_unsub_fallback = bool(
+            not is_any_settings_origin
+            and unsub_intent["is_unsubscribe"]
+            and self.passwords.unlocked
+            and getattr(self, "mail", None) is not None
+        )
+
+        session_harness = WebSearchSessionHarness(
+            self,
+            combined_sources=combined_sources,
+            hydrated_sources=hydrated_sources,
+            used_source_ids=used_source_ids,
+            cited_web_sources=cited_web_sources,
+            source_stats_list=source_stats_list,
+            conversation_id=conversation_id,
+            brain_sources=brain_sources,
+            open_tabs=open_tabs,
+            allow_web_tools=bool(should_run_web),
+            user_msg=user_msg,
+            prior_messages=prior,
+            conversation_origin=(
+                "news_settings"
+                if is_news_settings_origin
+                else "settings"
+                if is_settings_origin
+                else "chat"
+            ),
+            staged_files=staged_files,
+        )
+        if cloud_parsed is not None and explicit_web_req and (resolved_search_q or user_msg):
+            q_init = resolved_search_q or user_msg
+            yield {
+                "status": f"searching web sources for '{q_init[:48]}'...",
+                "phase": "web_search",
+            }
+            init_res = session_harness.execute_web_search(q_init, max_results=5)
+            if init_res.get("results"):
+                extra_blocks = [
+                    f"[{idx_i}] (WEB SOURCE) {hs['domain']} ({hs['title']}) - {hs['url']}\n{hs['text']}"
+                    for idx_i, hs in enumerate(hydrated_sources, 1)
+                    if hs.get("id") not in hydrated_by_id
+                ]
+                if extra_blocks:
+                    joined_extra = "\n\n".join(extra_blocks)
+                    context_str = f"{context_str}\n\n{joined_extra}".strip() if context_str else joined_extra
 
         yield {
             "status": f"assembled {len(used_source_ids)} source(s) ({len(context_str):,} chars) + {len(brain_sources)} brain item(s)",
@@ -3538,55 +5797,224 @@ class SatzSidecarRuntime:
             "brain_sources": brain_sources,
         }
 
+        effective_user_msg = user_msg or (
+            "Describe and analyze the attached image(s)." if active_images else ""
+        )
         chat_msgs = self.build_ordered_chat_messages(
-            user_msg=user_msg,
+            user_msg=effective_user_msg,
             brain_context=brain_context,
             context_str=context_str,
             prior_messages=prior,
             conversation_summary=conversation_summary,
+            image_count=len(active_images),
         )
 
         full_raw = ""
         emitted_len = 0
         in_brain_tag = False
 
-        if cloud_parsed is not None and cloud_harness is not None:
+        if cloud_parsed is not None:
             prov_id, prov_slug = cloud_parsed
             web_note = " + web_search harness" if should_run_web else " (web: off)"
+            img_note = f", {len(active_images)} image(s)" if active_images else ""
             yield {
-                "status": f"calling {prov_id}:{prov_slug}{web_note} ({len(used_source_ids)} source(s), {len(context_str):,} chars)...",
+                "status": f"calling {prov_id}:{prov_slug}{web_note} ({len(used_source_ids)} source(s), {len(context_str):,} chars{img_note})...",
                 "phase": "generating",
             }
             pre_stat_count = len(source_stats_list)
-            for ev in stream_cloud_chat(
-                cloud_harness,
-                model_id=model_id,
-                chat_msgs=chat_msgs,
-                allow_web_tools=bool(should_run_web),
-            ):
-                if "__full_raw" in ev:
-                    full_raw = str(ev["__full_raw"] or "")
+            pre_brain_count = len(brain_sources)
+            cloud_pending = ""
+            streaming_phase_sent = False
+            stopped_for_brain_tag = False
+            emitted_text_parts: list[str] = []
+            settings_cloud_fallback_handled = False
+            try:
+                cloud_tb = (
+                    0
+                    if (
+                        mail_enabled
+                        or route_decision.get("query_type")
+                        in ("mail_query", "url_or_navigation", "tab_qa", "general_chat")
+                    )
+                    else 256
+                )
+                for ev in stream_cloud_chat(
+                    session_harness,
+                    model_id=model_id,
+                    chat_msgs=chat_msgs,
+                    allow_web_tools=bool(should_run_web),
+                    allow_actor_tools=True,
+                    images=active_images or None,
+                    thinking_budget=cloud_tb,
+                ):
+                    if "__full_raw" in ev:
+                        full_raw = str(ev["__full_raw"] or "")
+                    elif "delta" in ev:
+                        if stopped_for_brain_tag:
+                            continue
+                        cloud_pending += str(ev["delta"] or "")
+                        partial_tag = re.search(
+                            r"(?:```(?:xml|json|html)?\s*)?<brain_store\b",
+                            cloud_pending,
+                            flags=re.IGNORECASE,
+                        )
+                        if partial_tag:
+                            head = cloud_pending[: partial_tag.start()].rstrip()
+                            if head:
+                                if not streaming_phase_sent:
+                                    yield {"status": "streaming response tokens...", "phase": "streaming"}
+                                    streaming_phase_sent = True
+                                yield {"delta": head}
+                                emitted_text_parts.append(head)
+                                emitted_len += len(head)
+                            cloud_pending = ""
+                            stopped_for_brain_tag = True
+                        elif len(cloud_pending) > 26:
+                            flush = cloud_pending[:-26]
+                            cloud_pending = cloud_pending[-26:]
+                            if not streaming_phase_sent:
+                                yield {"status": "streaming response tokens...", "phase": "streaming"}
+                                streaming_phase_sent = True
+                            yield {"delta": flush}
+                            emitted_text_parts.append(flush)
+                            emitted_len += len(flush)
+                    else:
+                        yield ev
+            except Exception as cloud_exc:
+                if not is_any_settings_origin or emitted_len > 0:
+                    raise
+                self.record_error("settings_cloud_fallback", cloud_exc)
+                if is_news_settings_origin:
+                    from satz_tools.fallback import maybe_fallback_news_settings_cards
+
+                    fb_cards = maybe_fallback_news_settings_cards(
+                        self,
+                        session_harness,
+                        user_msg=user_msg,
+                    )
                 else:
-                    yield ev
-            if len(source_stats_list) > pre_stat_count:
-                yield {
-                    "status": f"retrieved {len(source_stats_list) - pre_stat_count} web source(s)...",
-                    "phase": "context_ready",
-                    "source_stats": source_stats_list,
-                    "brain_sources": brain_sources,
-                }
-            fence_or_tag = re.search(
-                r"(?:```(?:xml|json|html)?\s*)?<brain_store\b",
-                full_raw,
-                flags=re.IGNORECASE,
-            )
-            tag_pos = fence_or_tag.start() if fence_or_tag else -1
-            visible_cloud = full_raw[:tag_pos].rstrip() if tag_pos != -1 else full_raw
-            if visible_cloud:
-                yield {"status": "streaming response tokens...", "phase": "streaming"}
-                yield {"delta": visible_cloud}
-                emitted_len = len(visible_cloud)
-            in_brain_tag = True
+                    from satz_tools.fallback import maybe_fallback_settings_cards
+
+                    fb_cards = maybe_fallback_settings_cards(
+                        self,
+                        session_harness,
+                        user_msg=user_msg,
+                        staged_files=staged_files,
+                    )
+                if fb_cards:
+                    card0 = fb_cards[0]
+                    note = (
+                        f"Cloud model temporarily unavailable ({type(cloud_exc).__name__}); prepared "
+                        f"**{card0.get('title') or 'Settings card'}** below. "
+                        f"{card0.get('subtitle') or ''}"
+                    ).strip()
+                    full_raw = note
+                    yield {"status": "cloud unavailable; prepared Settings action locally", "phase": "fallback"}
+                    yield {"delta": note}
+                    emitted_len = len(note)
+                    in_brain_tag = True
+                    settings_cloud_fallback_handled = True
+                elif self.gemma_model is not None:
+                    model_id = "gemma-4-e4b"
+                    yield {
+                        "status": "cloud model unavailable; switching to local gemma-4-e4b...",
+                        "phase": "fallback",
+                    }
+                    tok, model = self.ensure_gemma()
+                    for ev in stream_local_gemma_chat(
+                        session_harness,
+                        tok=tok,
+                        model=model,
+                        gemma_infer_lock=self.gemma_infer_lock,
+                        chat_msgs=chat_msgs,
+                        allow_web_tools=False,
+                        allow_actor_tools=True,
+                        active_images=active_images or None,
+                        gemma_processor=self.gemma_processor,
+                        gemma_dir=self._gemma_dir(),
+                        brain_sources=[],
+                    ):
+                        if "__full_raw" in ev:
+                            full_raw = str(ev["__full_raw"] or "")
+                            emitted_len = int(ev.get("__emitted_len") or 0)
+                            in_brain_tag = bool(ev.get("__in_brain_tag", True))
+                        else:
+                            yield ev
+                    settings_cloud_fallback_handled = True
+                else:
+                    raise
+
+            if not settings_cloud_fallback_handled:
+                if session_harness.prepared_tasks:
+                    prepared_tasks.extend(session_harness.prepared_tasks)
+                elif allow_unsub_fallback:
+                    prep_unsub = self.prepare_mail_unsubscribe_task(
+                        conversation_id=conversation_id or "default",
+                        target_query=str(unsub_intent.get("target_query") or ""),
+                        message_id=str(unsub_intent.get("message_id") or ""),
+                        cite_idx=unsub_intent.get("cite_idx"),
+                        sources=hydrated_sources or combined_sources,
+                    )
+                    if isinstance(prep_unsub.get("task"), dict):
+                        prepared_tasks.append(prep_unsub["task"])
+                if (
+                    len(source_stats_list) > pre_stat_count
+                    or len(brain_sources) > pre_brain_count
+                    or session_harness.expanded_source_indices
+                    or session_harness.tab_list_updated
+                ):
+                    status_msg = (
+                        f"retrieved {len(source_stats_list) - pre_stat_count} web/mail source(s)..."
+                        if len(source_stats_list) > pre_stat_count
+                        else (
+                            f"expanded {len(session_harness.expanded_source_indices)} source(s)..."
+                            if session_harness.expanded_source_indices
+                            else "updated tool context..."
+                        )
+                    )
+                    yield {
+                        "status": status_msg,
+                        "phase": "context_ready",
+                        "source_stats": source_stats_list,
+                        "brain_sources": brain_sources,
+                        "tab_list_updated": session_harness.tab_list_updated,
+                    }
+                fence_or_tag = re.search(
+                    r"(?:```(?:xml|json|html)?\s*)?<brain_store\b",
+                    full_raw,
+                    flags=re.IGNORECASE,
+                )
+                tag_pos = fence_or_tag.start() if fence_or_tag else -1
+                visible_cloud = full_raw[:tag_pos].rstrip() if tag_pos != -1 else full_raw
+                replaced_for_actor = False
+                if prepared_tasks and visible_cloud and _UNSUB_MANUAL_ADVICE_RE.search(visible_cloud):
+                    t0_card = prepared_tasks[0]
+                    gate_st = next((st for st in (t0_card.get("steps") or []) if st.get("kind") == "send_gate"), None)
+                    gate_desc = str((gate_st or {}).get("action_summary") or t0_card.get("goal") or "Action")
+                    visible_cloud = (
+                        f"Prepared a Task Card below ({gate_desc}). "
+                        f"Click **Confirm** on the card to execute it."
+                    )
+                    full_raw = visible_cloud if tag_pos == -1 else f"{visible_cloud}\n{full_raw[tag_pos:]}"
+                    replaced_for_actor = True
+                if emitted_len == 0:
+                    if visible_cloud:
+                        if not streaming_phase_sent:
+                            yield {"status": "streaming response tokens...", "phase": "streaming"}
+                        yield {"delta": visible_cloud}
+                        emitted_len = len(visible_cloud)
+                elif replaced_for_actor:
+                    yield {"delta": f"\n\n{visible_cloud}"}
+                    emitted_len += len(visible_cloud) + 2
+                else:
+                    emitted_so_far = "".join(emitted_text_parts)
+                    tail_rem = visible_cloud[len(emitted_so_far) :] if visible_cloud.startswith(emitted_so_far) else ""
+                    if tail_rem:
+                        if not streaming_phase_sent:
+                            yield {"status": "streaming response tokens...", "phase": "streaming"}
+                        yield {"delta": tail_rem}
+                        emitted_len += len(tail_rem)
+                in_brain_tag = True
         else:
             if self.gemma_model is None:
                 yield {
@@ -3611,97 +6039,35 @@ class SatzSidecarRuntime:
                 if load_err:
                     raise load_err[0]
             tok, model = self.ensure_gemma()
-            import torch
-            from transformers import TextIteratorStreamer
 
+            img_note = f", {len(active_images)} image(s)" if active_images else ""
             yield {
-                "status": f"running gemma-4-e4b prefill over {len(used_source_ids)} source(s) ({len(context_str):,} chars)...",
+                "status": f"running gemma-4-e4b prefill over {len(used_source_ids)} source(s) ({len(context_str):,} chars{img_note})...",
                 "phase": "generating",
             }
 
-            inputs = tok.apply_chat_template(
-                chat_msgs,
-                add_generation_prompt=True,
-                return_tensors="pt",
-                return_dict=True,
-            ).to(model.device)
+            for ev in stream_local_gemma_chat(
+                session_harness,
+                tok=tok,
+                model=model,
+                gemma_infer_lock=self.gemma_infer_lock,
+                chat_msgs=chat_msgs,
+                allow_web_tools=bool(should_run_web),
+                allow_actor_tools=True,
+                active_images=active_images or None,
+                gemma_processor=self.gemma_processor,
+                gemma_dir=self._gemma_dir(),
+                brain_sources=brain_sources,
+            ):
+                if "__full_raw" in ev:
+                    full_raw = str(ev["__full_raw"] or "")
+                    emitted_len = int(ev.get("__emitted_len") or 0)
+                    in_brain_tag = bool(ev.get("__in_brain_tag", True))
+                else:
+                    yield ev
 
-            streamer = TextIteratorStreamer(tok, skip_prompt=True, skip_special_tokens=True)
-            gen_kwargs = dict(
-                **inputs,
-                streamer=streamer,
-                max_new_tokens=1024,
-                do_sample=False,
-            )
-
-            gen_errors: list[str] = []
-            chunk_queue: queue.Queue[str | None] = queue.Queue()
-
-            def _generate():
-                try:
-                    with self.gemma_infer_lock, torch.no_grad():
-                        model.generate(**gen_kwargs)
-                except Exception as exc:
-                    gen_errors.append(str(exc))
-                    try:
-                        streamer.end()
-                    except Exception:
-                        pass
-
-            def _pump_streamer():
-                try:
-                    for piece in streamer:
-                        chunk_queue.put(piece)
-                finally:
-                    chunk_queue.put(None)
-
-            gen_thread = threading.Thread(target=_generate, daemon=True)
-            pump_thread = threading.Thread(target=_pump_streamer, daemon=True)
-            gen_thread.start()
-            pump_thread.start()
-
-            first_token_seen = False
-
-            while True:
-                try:
-                    chunk = chunk_queue.get(timeout=5.0)
-                except queue.Empty:
-                    yield {"phase": "heartbeat"}
-                    continue
-                if chunk is None:
-                    break
-                if not chunk:
-                    continue
-                if not first_token_seen:
-                    first_token_seen = True
-                    yield {
-                        "status": "streaming response tokens...",
-                        "phase": "streaming",
-                    }
-                cleaned = chunk.replace("\u2014", "-")
-                full_raw += cleaned
-
-                if not in_brain_tag:
-                    tag_pos = full_raw.find("<brain_store")
-                    if tag_pos != -1:
-                        in_brain_tag = True
-                        if tag_pos > emitted_len:
-                            delta_out = full_raw[emitted_len:tag_pos]
-                            emitted_len = tag_pos
-                            if delta_out:
-                                yield {"delta": delta_out}
-                    else:
-                        # Hold back a small tail in case '<brain_store' is being split across tokens
-                        safe_end = max(emitted_len, len(full_raw) - 14)
-                        if safe_end > emitted_len:
-                            delta_out = full_raw[emitted_len:safe_end]
-                            emitted_len = safe_end
-                            if delta_out:
-                                yield {"delta": delta_out}
-
-            gen_thread.join(timeout=5.0)
-            if gen_errors:
-                raise RuntimeError(gen_errors[0])
+            if session_harness.prepared_tasks:
+                prepared_tasks.extend(session_harness.prepared_tasks)
 
         # Flush any remaining text and execute any <brain_store> directives
         primary_url = str(hydrated_sources[0].get("url") or "") if hydrated_sources else ""
@@ -3717,7 +6083,7 @@ class SatzSidecarRuntime:
                 yield {"delta": tail}
 
         # Guarantee fulfillment if user explicitly asked to store/save/remember something
-        if not self.pause_learning:
+        if not self.pause_learning and not is_any_settings_origin:
             stored_entities = self.brain.ensure_explicit_store_fulfilled(
                 user_msg=user_msg,
                 assistant_msg=cleaned_final,
@@ -3731,6 +6097,80 @@ class SatzSidecarRuntime:
                 for e in stored_entities
             ]
             yield {"delta": "".join(confirm_lines)}
+
+        # Deterministic fallback for Settings & News Settings turns if a small/local model emitted zero tool calls
+        if is_any_settings_origin and not getattr(session_harness, "ui_cards", None):
+            try:
+                if is_news_settings_origin:
+                    from satz_tools.fallback import maybe_fallback_news_settings_cards
+
+                    fb_cards = maybe_fallback_news_settings_cards(
+                        self,
+                        session_harness,
+                        user_msg=user_msg,
+                    )
+                else:
+                    from satz_tools.fallback import maybe_fallback_settings_cards
+
+                    fb_cards = maybe_fallback_settings_cards(
+                        self,
+                        session_harness,
+                        user_msg=user_msg,
+                        staged_files=staged_files,
+                    )
+                if fb_cards:
+                    card0 = fb_cards[0]
+                    default_sub = (
+                        "Review the interactive card below to update your News Settings."
+                        if is_news_settings_origin
+                        else "Review and complete the card to apply cleanly into encrypted vault.enc."
+                    )
+                    note = (
+                        f"Prepared **{card0.get('title') or 'Settings card'}** below. "
+                        f"{card0.get('subtitle') or default_sub}"
+                    ).strip()
+                    if not (cleaned_final or "").strip():
+                        cleaned_final = note
+                        yield {"delta": note}
+                        emitted_len += len(note)
+                    elif len(fb_cards) > 0 and "below" not in cleaned_final.lower():
+                        add_note = f"\n\n{note}"
+                        cleaned_final = f"{cleaned_final.rstrip()}{add_note}"
+                        yield {"delta": add_note}
+                        emitted_len += len(add_note)
+            except Exception as fb_exc:
+                self.record_error("settings_fallback", fb_exc)
+
+        # Ensure gated Actor unsubscribe task is prepared when requested by user (covers local Gemma too)
+        if allow_unsub_fallback and not prepared_tasks:
+            prep_unsub = self.prepare_mail_unsubscribe_task(
+                conversation_id=conversation_id or "default",
+                target_query=str(unsub_intent.get("target_query") or ""),
+                message_id=str(unsub_intent.get("message_id") or ""),
+                cite_idx=unsub_intent.get("cite_idx"),
+                sources=hydrated_sources or combined_sources,
+            )
+            if isinstance(prep_unsub.get("task"), dict):
+                prepared_tasks.append(prep_unsub["task"])
+        if allow_unsub_fallback and prepared_tasks:
+            t0_card = prepared_tasks[0]
+            gate_st = next((st for st in (t0_card.get("steps") or []) if st.get("kind") == "send_gate"), None)
+            gate_desc = str((gate_st or {}).get("action_summary") or t0_card.get("goal") or "Unsubscribe")
+            if _UNSUB_MANUAL_ADVICE_RE.search(cleaned_final or "") or not (cleaned_final or "").strip():
+                cleaned_final = (
+                    f"Prepared an Actor Task Card below ({gate_desc}). "
+                    f"Click **Confirm** on the card to execute the unsubscribe automatically."
+                )
+                if emitted_len > 0:
+                    yield {"delta": f"\n\n{cleaned_final}"}
+                else:
+                    yield {"delta": cleaned_final}
+                    emitted_len = len(cleaned_final)
+            elif not re.search(r"\bconfirm\b|task\s*card", cleaned_final or "", re.I):
+                note = f"\n\nPrepared an Actor Task Card below ({gate_desc}). Click **Confirm** on the card to execute the unsubscribe automatically."
+                cleaned_final = f"{cleaned_final.rstrip()}{note}"
+                yield {"delta": note}
+                emitted_len += len(note)
 
         # M20 §6: If no tab sources are present (`len(hydrated_sources) == 0`) and `brain_sources`
         # were injected (`[B1]`, `[B2]`), normalize any bare `[1]` within `1..len(brain_sources)` to `[B1]`
@@ -3784,7 +6224,7 @@ class SatzSidecarRuntime:
 
         # Collect inline email cards (and their attachments) for any referenced mail:<id> sources
         email_cards: list[dict[str, Any]] = []
-        if getattr(self, "mail", None) is not None and self.passwords.unlocked:
+        if not is_any_settings_origin and getattr(self, "mail", None) is not None and self.passwords.unlocked:
             seen_mail_ids: set[str] = set()
             for hs in hydrated_sources:
                 sid = str(hs.get("id") or "")
@@ -3797,10 +6237,11 @@ class SatzSidecarRuntime:
                 if not mid or mid in seen_mail_ids:
                     continue
                 seen_mail_ids.add(mid)
-                det = self.mail.get_message_detail(mid)
+                det = self._get_mail_detail_lite(self.mail, mid)
                 if det.get("ok") and det.get("message"):
                     m_obj = det["message"]
                     parts_obj = m_obj.get("parts") or {}
+                    unsub_m = m_obj.get("unsubscribe") or {}
                     email_cards.append(
                         {
                             "message_id": mid,
@@ -3814,25 +6255,78 @@ class SatzSidecarRuntime:
                             "body_text": str(parts_obj.get("new") or m_obj.get("body_text") or "")[:4000],
                             "quoted_text": str(parts_obj.get("quote") or "")[:2000],
                             "attachments": m_obj.get("attachments") or [],
+                            "can_unsubscribe": bool(unsub_m.get("available")),
+                            "unsubscribe_method": str(unsub_m.get("preferred_method") or ""),
                         }
                     )
                 if len(email_cards) >= 6:
                     break
 
-        all_preview_sources: list[dict[str, str]] = list(cited_web_sources)
-        seen_prev_urls = {str(x.get("url") or "").strip() for x in all_preview_sources if x.get("url")}
-        for hs in hydrated_sources:
-            h_url = str(hs.get("url") or "").strip()
-            if h_url.startswith(("http://", "https://")) and h_url not in seen_prev_urls:
-                seen_prev_urls.add(h_url)
-                all_preview_sources.append(
-                    {
-                        "url": h_url,
-                        "title": str(hs.get("title") or h_url),
-                    }
+        hydrated_by_url = {
+            str(hs.get("url") or "").strip(): hs
+            for hs in hydrated_sources
+            if str(hs.get("url") or "").strip()
+        }
+        all_preview_sources: list[dict[str, str]] = []
+        seen_prev_urls: set[str] = set()
+        for raw_prev in [*cited_web_sources, *hydrated_sources]:
+            p_url = str(raw_prev.get("url") or "").strip()
+            if not p_url.startswith(("http://", "https://")) or p_url in seen_prev_urls:
+                continue
+            seen_prev_urls.add(p_url)
+            hs_match = hydrated_by_url.get(p_url) or {}
+            p_dom = str(raw_prev.get("domain") or hs_match.get("domain") or "").strip()
+            p_snip = self._clean_digest_snippet(
+                str(raw_prev.get("snippet") or hs_match.get("snippet") or hs_match.get("summary") or ""),
+                240,
+            )
+            p_img = str(raw_prev.get("image_url") or "").strip()
+            if not p_img:
+                for fd in hs_match.get("findings") or []:
+                    if isinstance(fd, dict) and self._is_valid_preview_img_url(str(fd.get("image_url") or "")):
+                        p_img = str(fd["image_url"]).strip()
+                        break
+            all_preview_sources.append(
+                {
+                    "url": p_url,
+                    "title": str(raw_prev.get("title") or hs_match.get("title") or p_url),
+                    "domain": p_dom,
+                    "snippet": p_snip,
+                    "image_url": p_img,
+                }
+            )
+        if all_preview_sources:
+            try:
+                self.merge_previews_into_sources(
+                    all_preview_sources,
+                    collected_findings,
+                    seen_finding_imgs,
+                    max_items=8,
+                    max_findings=8,
                 )
+            except Exception:
+                pass
 
         ms = int((time.perf_counter() - t0) * 1000)
+        chars_cut_total = sum(
+            max(0, int(st.get("chars_captured") or 0) - int(st.get("chars_sent") or 0))
+            for st in source_stats_list
+            if st.get("was_cut")
+        )
+        flagged_cnt = int(cite_res.get("citations_flagged") or 0)
+        try:
+            self.record_harness_signal(
+                query_type=route_decision.get("query_type") or "",
+                prompt=user_msg,
+                model_id=model_id,
+                source_count=len(used_source_ids),
+                chars_cut=chars_cut_total,
+                outcome_signal="citations_flagged" if flagged_cnt > 0 else "success",
+                web_enabled=web_enabled,
+                mail_enabled=mail_enabled,
+            )
+        except Exception:
+            pass
         done_payload: dict[str, Any] = {
             "done": True,
             "source_ids": used_source_ids,
@@ -3843,6 +6337,15 @@ class SatzSidecarRuntime:
             "citations_flagged": cite_res["citations_flagged"],
             "annotated_text": cite_res["annotated_text"],
             "source_stats": source_stats_list,
+            "effective_model": model_id,
+            "effective_web": web_enabled,
+            "effective_mail": mail_enabled,
+            "routing_info": route_decision,
+            "tools_used": [
+                str(t.get("name") or "")
+                for t in getattr(session_harness, "tool_trace", [])
+                if t.get("name")
+            ],
         }
         if collected_findings:
             done_payload["findings"] = collected_findings
@@ -3854,6 +6357,12 @@ class SatzSidecarRuntime:
             done_payload["stored_entities"] = stored_entities
         if proposals:
             done_payload["proposals"] = proposals
+        if prepared_tasks:
+            done_payload["tasks"] = prepared_tasks
+        if getattr(session_harness, "ui_cards", None):
+            done_payload["ui_cards"] = session_harness.ui_cards
+        if session_harness.tab_list_updated:
+            done_payload["tab_list_updated"] = True
         yield done_payload
 
     def get_conversation_source_previews(self, conversation_id: str) -> dict[str, Any]:
@@ -3968,14 +6477,23 @@ class SatzSidecarRuntime:
             }
 
         try:
+            t_target = (
+                self.news._primary_translation_target()
+                if getattr(self, "news", None) is not None
+                else "en"
+            )
             news_rows = self.store.db.execute(
                 """
-                SELECT url, snippet, body_text, image_url, published_at
-                FROM satz_news_articles
-                WHERE url IS NOT NULL AND url != ''
-                ORDER BY published_at DESC
+                SELECT ar.url,
+                       COALESCE(NULLIF(nt.snippet_tr, ''), NULLIF(nt.body_tr, ''), ar.snippet, ar.body_text) AS eff_snippet,
+                       ar.image_url, ar.published_at
+                FROM satz_news_articles ar
+                LEFT JOIN satz_news_translations nt ON nt.article_id = ar.article_id AND nt.target_lang = ?
+                WHERE ar.url IS NOT NULL AND ar.url != ''
+                ORDER BY ar.published_at DESC
                 LIMIT 120
-                """
+                """,
+                (t_target,),
             ).fetchall()
             for nr in news_rows:
                 norm_u = self._norm_digest_url(str(nr["url"] or ""))
@@ -3987,9 +6505,7 @@ class SatzSidecarRuntime:
                     meta_by_url[norm_u] = {
                         "image_url": img if _is_valid_img(img) else "",
                         "images": [img] if _is_valid_img(img) else [],
-                        "snippet": self._clean_digest_snippet(
-                            str(nr["snippet"] or nr["body_text"] or ""), 260
-                        ),
+                        "snippet": self._clean_digest_snippet(str(nr["eff_snippet"] or ""), 260),
                         "ts": float(nr["published_at"] or 0.0),
                     }
                 elif not existing.get("image_url") and _is_valid_img(img):
@@ -4003,8 +6519,47 @@ class SatzSidecarRuntime:
         from src.planck3.digest import build_digest
         from src.planck3.web import domain_of
 
+        prefetched_triage: dict[str, Any] | None = None
+        prefetched_recent_mail: list[dict[str, Any]] = []
+        if getattr(self, "mail", None) is not None and self.passwords.unlocked:
+            try:
+                prefetched_triage = self.mail.get_triage_set()
+                t_mail_lang = self.mail._primary_translation_target()
+                with self.mail.db_lock:
+                    mconn = self.mail._ensure_connection()
+                    recent_rows = mconn.execute(
+                        """
+                        SELECT m.id, m.from_name, m.from_addr, m.subject, m.snippet, m.body_text, m.date, m.seen,
+                               COALESCE(l.label, 'email') AS label,
+                               COALESCE(p.text, m.body_text) AS new_text,
+                               COALESCE(mt.subject_tr, '') AS translated_subject,
+                               COALESCE(mt.snippet_tr, '') AS translated_snippet
+                        FROM messages m
+                        LEFT JOIN labels l ON l.message_id = m.id
+                        LEFT JOIN parts p ON p.message_id = m.id AND p.kind = 'new'
+                        LEFT JOIN message_translations mt ON mt.message_id = m.id AND mt.target_lang = ?
+                        WHERE m.hidden = 0 AND UPPER(m.folder) = 'INBOX'
+                          AND COALESCE(l.label, 'email') IN ('email', 'ping')
+                        ORDER BY m.seen ASC, m.date DESC
+                        LIMIT 6
+                        """,
+                        (t_mail_lang,),
+                    ).fetchall()
+                    prefetched_recent_mail = [dict(rr) for rr in recent_rows]
+            except Exception as me:
+                self.record_error("digest_mail", me)
+
         with self.store_lock:
-            self._repair_bookmark_entities_in_store(self.store.db)
+            rep_row = self.store.db.execute(
+                "SELECT value FROM satz_meta WHERE key = 'bookmark_entities_repaired_v1'"
+            ).fetchone()
+            if not rep_row or str(rep_row["value"]) != "1":
+                self._repair_bookmark_entities_in_store(self.store.db)
+                self.store.db.execute(
+                    "INSERT OR REPLACE INTO satz_meta (key, value) VALUES (?, ?)",
+                    ("bookmark_entities_repaired_v1", "1"),
+                )
+                self.store.db.commit()
             raw = build_digest(self.store)
             visual_map = self._load_digest_visuals_map()
             candidates: list[dict[str, Any]] = []
@@ -4098,16 +6653,22 @@ class SatzSidecarRuntime:
                 )
 
             # Section 4.1 (M14): Include Mail triage & newly arrived messages in `For you` (/digest)
-            if getattr(self, "mail", None) is not None and self.passwords.unlocked:
+            if prefetched_triage is not None:
                 try:
-                    triage = self.mail.get_triage_set()
+                    triage = prefetched_triage
                     seen_mail_ids: set[str] = set()
                     mail_added = 0
 
                     def _mail_snippet(em_obj: dict[str, Any]) -> str:
                         ask = str(em_obj.get("ask") or "").strip()
                         due = str(em_obj.get("due_date") or "").strip()
-                        body_preview = str(em_obj.get("snippet") or em_obj.get("new_text") or "").strip()
+                        body_preview = str(
+                            em_obj.get("translated_snippet")
+                            or em_obj.get("snippet")
+                            or em_obj.get("translated_new_text")
+                            or em_obj.get("new_text")
+                            or ""
+                        ).strip()
                         prefix = ""
                         if ask:
                             prefix = f"Action: {ask}" + (f" (due {due})" if due else "")
@@ -4119,17 +6680,19 @@ class SatzSidecarRuntime:
                         mid = str(em["id"])
                         seen_mail_ids.add(mid)
                         sender = str(em.get("from_name") or em.get("from_addr") or "mail")
+                        mail_subj = str(em.get("translated_subject") or em.get("subject") or "(no subject)")
                         mail_added += 1
                         candidates.append(
                             {
                                 "entity": sender,
                                 "reason": f"reply waiting · {sender}",
-                                "title": f"reply waiting: {em.get('subject')}",
+                                "title": f"reply waiting: {mail_subj}",
                                 "url": f"satzmail://message/{mid}",
                                 "domain": "mail",
                                 "kind": "mail_reply",
                                 "summary": _mail_snippet(em),
                                 "ts": float(em.get("date") or 0.0),
+                                "_tr_already": bool(em.get("translated_subject") or em.get("translated_snippet")),
                             }
                         )
 
@@ -4142,10 +6705,12 @@ class SatzSidecarRuntime:
                             o_parts.append(str(ord_item["total"]))
                         if ord_item.get("tracking_number"):
                             o_parts.append(f"tracking {ord_item['tracking_number']}")
-                        if ord_item.get("subject"):
-                            o_parts.append(str(ord_item["subject"]))
-                        if ord_item.get("snippet"):
-                            o_parts.append(str(ord_item["snippet"]))
+                        ord_subj = str(ord_item.get("translated_subject") or ord_item.get("subject") or "")
+                        ord_snip = str(ord_item.get("translated_snippet") or ord_item.get("snippet") or "")
+                        if ord_subj:
+                            o_parts.append(ord_subj)
+                        if ord_snip:
+                            o_parts.append(ord_snip)
                         o_snip = self._clean_digest_snippet(" · ".join(p for p in o_parts if p), 260)
                         candidates.append(
                             {
@@ -4157,6 +6722,7 @@ class SatzSidecarRuntime:
                                 "kind": "mail_order",
                                 "summary": o_snip,
                                 "ts": float(ord_item.get("date") or 0.0),
+                                "_tr_already": bool(ord_item.get("translated_subject") or ord_item.get("translated_snippet")),
                             }
                         )
 
@@ -4166,8 +6732,10 @@ class SatzSidecarRuntime:
                         mail_added += 1
                         exp_lbl = pr_item.get("expiry") or "soon"
                         val_str = f" ({pr_item['discount_value']})" if pr_item.get("discount_value") else ""
+                        pr_subj = str(pr_item.get("translated_subject") or pr_item.get("subject") or "")
+                        pr_snip_txt = str(pr_item.get("translated_snippet") or pr_item.get("snippet") or "")
                         p_snip = self._clean_digest_snippet(
-                            f"Code: {pr_item.get('voucher_code')}{val_str} · {pr_item.get('subject') or ''} · {pr_item.get('snippet') or ''}",
+                            f"Code: {pr_item.get('voucher_code')}{val_str} · {pr_subj} · {pr_snip_txt}",
                             260,
                         )
                         candidates.append(
@@ -4180,6 +6748,7 @@ class SatzSidecarRuntime:
                                 "kind": "mail_promo",
                                 "summary": p_snip,
                                 "ts": float(pr_item.get("date") or 0.0),
+                                "_tr_already": bool(pr_item.get("translated_subject") or pr_item.get("translated_snippet")),
                             }
                         )
 
@@ -4188,39 +6757,25 @@ class SatzSidecarRuntime:
                         mid = str(em["id"])
                         seen_mail_ids.add(mid)
                         sender = str(em.get("from_name") or em.get("from_addr") or "mail")
+                        mail_subj = str(em.get("translated_subject") or em.get("subject") or "(no subject)")
                         mail_added += 1
                         candidates.append(
                             {
                                 "entity": sender,
                                 "reason": f"unread email · {sender}",
-                                "title": f"mail: {em.get('subject') or '(no subject)'}",
+                                "title": f"mail: {mail_subj}",
                                 "url": f"satzmail://message/{mid}",
                                 "domain": "mail",
                                 "kind": "mail_recent",
                                 "summary": _mail_snippet(em),
                                 "ts": float(em.get("date") or 0.0),
+                                "_tr_already": bool(em.get("translated_subject") or em.get("translated_snippet")),
                             }
                         )
 
                     # Fallback: most recent unseen ping or latest inbox messages if fewer than 3 mail items added
-                    if mail_added < 3:
-                        with self.mail.db_lock:
-                            mconn = self.mail._ensure_connection()
-                            recent_rows = mconn.execute(
-                                """
-                                SELECT m.id, m.from_name, m.from_addr, m.subject, m.snippet, m.body_text, m.date, m.seen,
-                                       COALESCE(l.label, 'email') AS label,
-                                       COALESCE(p.text, m.body_text) AS new_text
-                                FROM messages m
-                                LEFT JOIN labels l ON l.message_id = m.id
-                                LEFT JOIN parts p ON p.message_id = m.id AND p.kind = 'new'
-                                WHERE m.hidden = 0 AND UPPER(m.folder) = 'INBOX'
-                                  AND COALESCE(l.label, 'email') IN ('email', 'ping')
-                                ORDER BY m.seen ASC, m.date DESC
-                                LIMIT 6
-                                """
-                            ).fetchall()
-                        for rr in recent_rows:
+                    if mail_added < 3 and prefetched_recent_mail:
+                        for rr in prefetched_recent_mail:
                             mid = str(rr["id"])
                             if mid in seen_mail_ids:
                                 continue
@@ -4229,18 +6784,19 @@ class SatzSidecarRuntime:
                             sender = str(rr["from_name"] or rr["from_addr"] or "mail")
                             prefix = "ping" if lbl == "ping" else "mail"
                             state_tag = "unread" if not rr["seen"] else "received"
+                            r_subj = str(rr["translated_subject"] or rr["subject"] or "(no subject)")
+                            r_snip = str(rr["translated_snippet"] or rr["snippet"] or rr["new_text"] or "")
                             candidates.append(
                                 {
                                     "entity": sender,
                                     "reason": f"{state_tag} {lbl} · {sender}",
-                                    "title": f"{prefix}: {rr['subject'] or '(no subject)'}",
+                                    "title": f"{prefix}: {r_subj}",
                                     "url": f"satzmail://message/{mid}",
                                     "domain": "mail",
                                     "kind": "mail_ping" if lbl == "ping" else "mail_recent",
-                                    "summary": self._clean_digest_snippet(
-                                        str(rr["snippet"] or rr["new_text"] or ""), 260
-                                    ),
+                                    "summary": self._clean_digest_snippet(r_snip, 260),
                                     "ts": float(rr["date"] or 0.0),
+                                    "_tr_already": bool(rr["translated_subject"] or rr["translated_snippet"]),
                                 }
                             )
                             mail_added += 1
@@ -4288,20 +6844,46 @@ class SatzSidecarRuntime:
                         )
                         if reasons:
                             reason_txt = f"{reason_txt} · {reasons[0]}"
+                        disp_headline = str(
+                            st.get("translated_headline")
+                            or lead_art.get("title_tr")
+                            or st.get("headline")
+                            or lead_art.get("title")
+                            or "news story"
+                        )
+                        disp_summary_raw = str(
+                            st.get("translated_summary_md")
+                            or lead_art.get("snippet_tr")
+                            or st.get("summary_md")
+                            or lead_art.get("snippet")
+                            or ""
+                        )
+                        disp_summary = re.sub(
+                            r"\s+\[\d+\]",
+                            "",
+                            self._clean_digest_snippet(disp_summary_raw, 260),
+                        ).strip()
                         candidates.append(
                             {
                                 "entity": ", ".join(tags) if tags else art_dom,
                                 "reason": reason_txt,
-                                "title": str(st.get("headline") or lead_art.get("title") or "news story"),
+                                "title": disp_headline,
                                 "url": art_url,
                                 "domain": art_dom,
                                 "kind": "news_story",
-                                "summary": self._clean_digest_snippet(
-                                    str(st.get("summary_md") or lead_art.get("snippet") or ""), 260
-                                ),
+                                "summary": disp_summary,
                                 "image_url": lead_img,
                                 "images": img_list[:3],
                                 "ts": float(st.get("updated_at") or 0.0),
+                                "_tr_already": bool(
+                                    st.get("translated_headline") or lead_art.get("title_tr")
+                                ),
+                                "_tr_lang": str(
+                                    st.get("translation_source_lang")
+                                    or lead_art.get("language")
+                                    or "en"
+                                ),
+                                "_tr_art_id": str(lead_art.get("article_id") or ""),
                             }
                         )
                 except Exception as ne:
@@ -4475,7 +7057,109 @@ class SatzSidecarRuntime:
                 if len(items) >= 12:
                     break
 
-            return {"items": items[:12], "digest": raw}
+        final_items = items[:12]
+        self._translate_digest_items_if_needed(final_items)
+        for it in final_items:
+            it.pop("_tr_already", None)
+            it.pop("_tr_lang", None)
+            it.pop("_tr_art_id", None)
+        return {"items": final_items, "digest": raw}
+
+    def _translate_digest_items_if_needed(self, items: list[dict[str, Any]]) -> None:
+        """Translates non-allowed-language Home digest items into primary_language outside store_lock."""
+        translator = getattr(self, "translator", None)
+        if translator is None or not items:
+            return
+        try:
+            prefs = translator.get_preferences()
+            if not prefs.get("unlocked"):
+                return
+            resolved = translator.resolve_translation_model(prefs["model_preference"])
+            is_mocked = "_complete_role_prompt" in getattr(self, "__dict__", {})
+            if not (
+                resolved.get("is_cloud")
+                or getattr(self, "gemma_model", None) is not None
+                or is_mocked
+            ):
+                return
+
+            from satz_translate import detect_language
+
+            tgt_lang = prefs["primary_language"]
+            segs: dict[str, str] = {}
+            meta: dict[int, tuple[str, str, str, str]] = {}
+            prefix_re = re.compile(
+                r"^((?:reply waiting|order [^:]+|code expires [^:]+|mail|ping|changed|watch):\s+)(.+)$",
+                re.I,
+            )
+            for idx, it in enumerate(items):
+                if it.get("_tr_already"):
+                    continue
+                kind = str(it.get("kind") or "")
+                if kind == "news_story" and not prefs.get("auto_translate_news", True):
+                    continue
+                if kind.startswith("mail_") and not prefs.get("auto_translate_mail", True):
+                    continue
+                raw_title = str(it.get("title") or "").strip()
+                raw_sum = str(it.get("summary") or "").strip()
+                if not raw_title and not raw_sum:
+                    continue
+                m_pfx = prefix_re.match(raw_title)
+                pfx = m_pfx.group(1) if m_pfx else ""
+                core_title = m_pfx.group(2).strip() if m_pfx else raw_title
+                hint_l = str(it.get("_tr_lang") or "en")
+                eff_l = detect_language(f"{core_title}\n{raw_sum}", hint_lang=hint_l)
+                if translator.is_language_allowed(eff_l, prefs=prefs):
+                    continue
+                meta[idx] = (eff_l, pfx, str(it.get("_tr_art_id") or ""), kind)
+                if core_title:
+                    segs[f"dt:{idx}"] = core_title[:240]
+                if raw_sum:
+                    segs[f"ds:{idx}"] = raw_sum[:320]
+
+            if not segs:
+                return
+
+            tr_res = translator.translate_segments(
+                segs,
+                target_lang=tgt_lang,
+                context_hint="Home For You digest card titles and short summaries",
+            )
+            tr_map = tr_res.get("translations") or {}
+            model_id = str(tr_res.get("model") or resolved["model_id"])
+            now_ts = time.time()
+            news_updates: list[tuple[str, str, str, str, str, str, float]] = []
+            for idx, (src_l, pfx, art_id, kind) in meta.items():
+                t_tr = str(tr_map.get(f"dt:{idx}") or "").strip()
+                s_tr = str(tr_map.get(f"ds:{idx}") or "").strip()
+                it = items[idx]
+                if t_tr:
+                    it["title"] = f"{pfx}{t_tr}" if pfx else t_tr
+                if s_tr:
+                    it["summary"] = self._clean_digest_snippet(s_tr, 260)
+                if kind == "news_story" and art_id and (t_tr or s_tr):
+                    news_updates.append((art_id, tgt_lang, src_l, t_tr, s_tr, model_id, now_ts))
+
+            if news_updates:
+                with self.store_lock:
+                    for upd in news_updates:
+                        self.store.db.execute(
+                            """
+                            INSERT INTO satz_news_translations
+                              (article_id, target_lang, source_lang, title_tr, snippet_tr, body_tr, model_id, updated_at)
+                            VALUES (?, ?, ?, ?, ?, '', ?, ?)
+                            ON CONFLICT(article_id, target_lang) DO UPDATE SET
+                              source_lang = excluded.source_lang,
+                              title_tr = CASE WHEN LENGTH(excluded.title_tr) > 0 THEN excluded.title_tr ELSE satz_news_translations.title_tr END,
+                              snippet_tr = CASE WHEN LENGTH(excluded.snippet_tr) > 0 THEN excluded.snippet_tr ELSE satz_news_translations.snippet_tr END,
+                              model_id = excluded.model_id,
+                              updated_at = excluded.updated_at
+                            """,
+                            upd,
+                        )
+                    self.store.db.commit()
+        except Exception as exc:
+            self.record_error("digest_translate", exc)
 
     def get_knowledge_summary(self) -> dict[str, Any]:
         with self.store_lock:
@@ -4648,6 +7332,7 @@ class SatzSidecarRuntime:
                 "pause_learning": self.pause_learning,
                 "queue_len": self.ingest_queue.qsize(),
                 "brain": self.brain.get_brain_summary(),
+                "drives": self.drives.get_status() if hasattr(self, "drives") and self.drives else None,
                 "bookmarks_indexed": self.get_bookmarks_status(),
                 "profile": self.passwords.list_profiles(),
                 "vault": self.passwords.get_active_vault_summary(),
@@ -4655,6 +7340,11 @@ class SatzSidecarRuntime:
                 "top_topics": top_topics,
                 "passages": passages,
                 "this_week": this_week[:30],
+                "skill_proposals": self.behavior.list_proposals() if hasattr(self, "behavior") else [],
+                "domain_recipes_count": len(self.recipes.list_recipes(limit=100)) if hasattr(self, "recipes") else 0,
+                "recipes": self.recipes.list_recipes(limit=25) if hasattr(self, "recipes") else [],
+                "evals": self.evals.list_evals()[:25] if hasattr(self, "evals") else [],
+                "evals_count": len(self.evals.list_evals()) if hasattr(self, "evals") else 0,
             }
 
     def set_domain_trust(self, domain: str, personal_score: float | None) -> dict[str, Any]:
@@ -4778,8 +7468,18 @@ class SatzSidecarRuntime:
                         pass
 
                 scored_passages: list[tuple[float, sqlite3.Row]] = []
+                now_p = time.time()
+                wants_recent_p = any(
+                    w in q_low
+                    for w in ("latest", "recent", "today", "news", "story", "stories", "breaking", "current")
+                )
                 for i, r in enumerate(cand_rows):
                     total_sc = lex_scores[i] + (sim_scores[i] * 2.5 if sim_scores[i] > 0.15 else 0.0)
+                    ts_p = float(r["ts"] or 0.0)
+                    if ts_p > 0.0 and total_sc > 0.15:
+                        age_h = max(0.0, (now_p - ts_p) / 3600.0)
+                        rec_w = 2.0 if wants_recent_p else 0.5
+                        total_sc += rec_w * math.exp(-age_h / 48.0)
                     if total_sc > 0.25:
                         scored_passages.append((total_sc, r))
 
@@ -4815,6 +7515,400 @@ class SatzSidecarRuntime:
             "brain_ranking": self.brain.get_encoder_status()["label"],
         }
 
+    @staticmethod
+    def classify_query_type(
+        prompt: str,
+        sources: list[dict[str, Any]] | None = None,
+        web_enabled: bool = False,
+        mail_enabled: bool = False,
+    ) -> str:
+        """Deterministically bucket a prompt into a canonical `query_type` for harness telemetry & routing."""
+        raw = str(prompt or "").strip()
+        low = raw.lower()
+        srcs = sources or []
+        has_mail_src = any(
+            str(s.get("id") or "").startswith("mail:") or str(s.get("url") or "").startswith("satzmail://")
+            for s in srcs
+            if isinstance(s, dict)
+        )
+        has_web_tab = any(
+            not (str(s.get("id") or "").startswith("mail:") or str(s.get("url") or "").startswith("satzmail://"))
+            for s in srcs
+            if isinstance(s, dict)
+        )
+        if re.match(r"^(?:https?://)?[a-z0-9.-]+\.[a-z]{2,}(?:/|\s|$)", low):
+            return "url_or_navigation"
+        if re.search(
+            r"\b(email|emails|mail|mails|inbox|unread|outbox|reply\s+to|sender|newsletter|unsubscribe|order|tracking|paket|bestellung|voucher)\b",
+            low,
+        ) or (has_mail_src and not has_web_tab) or (mail_enabled and not web_enabled and not has_web_tab):
+            return "mail_query"
+        if re.search(
+            r"\b(compare|comparison|versus|vs\.?|pros\s+and\s+cons|trade-?off|research|deep\s+dive|synthesize|difference\s+between|across\s+all|multi-?source)\b",
+            low,
+        ) or len(srcs) >= 4:
+            return "comparison_research"
+        if re.search(
+            r"\b(code|bug|debug|traceback|stack\s*trace|typescript|python|rust|sql|regex|function|compile|refactor|api|json|error|exception|syntax)\b",
+            low,
+        ):
+            return "coding_technical"
+        if web_enabled or re.search(
+            r"\b(today|latest|current|recent|news|price|cost|weather|stock|exchange\s+rate|score|schedule|release\s+date|202\d|online|web\s+search)\b",
+            low,
+        ):
+            return "factual_web"
+        if has_web_tab or re.search(r"\b(this\s+page|this\s+tab|this\s+article|this\s+site|summarize|summary|tldr)\b", low):
+            return "tab_qa"
+        return "general_chat"
+
+    def _resolve_ready_cloud_model(self) -> str:
+        """Returns the preferred configured cloud `provider:slug` without making blocking HTTP requests, or ''."""
+        with self.store_lock:
+            row = self.store.db.execute(
+                "SELECT value FROM satz_meta WHERE key = 'model_role_chat'"
+            ).fetchone()
+            role_chat = str(row["value"] or "").strip() if row else ""
+        if role_chat and self._parse_cloud_model_id(role_chat):
+            pid, _ = self._parse_cloud_model_id(role_chat)  # type: ignore[misc]
+            key, _ = self._resolve_provider_api_key(pid)
+            if key:
+                return role_chat
+
+        fallback_defaults = {
+            "gemini": "gemini:gemini-2.5-flash",
+            "anthropic": "anthropic:claude-3-5-sonnet-latest",
+            "openai": "openai:gpt-4o-mini",
+            "mistral": "mistral:mistral-large-latest",
+        }
+        for spec in self.CLOUD_PROVIDERS_SPEC:
+            pid = spec["id"]
+            key, _ = self._resolve_provider_api_key(pid)
+            if not key:
+                continue
+            with self.store_lock:
+                crow = self.store.db.execute(
+                    "SELECT value FROM satz_meta WHERE key = ?",
+                    (f"cloud_models_cache_{pid}",),
+                ).fetchone()
+            if crow and crow["value"]:
+                try:
+                    cached = json.loads(crow["value"])
+                    models = cached.get("models") if isinstance(cached, dict) else None
+                    if isinstance(models, list) and models:
+                        first_id = str((models[0] or {}).get("id") or "").strip()
+                        if first_id:
+                            return first_id if ":" in first_id else f"{pid}:{first_id}"
+                except Exception:
+                    pass
+            return fallback_defaults.get(pid, "")
+        return ""
+
+    def record_harness_signal(
+        self,
+        *,
+        query_type: str = "",
+        prompt: str = "",
+        model_id: str = "gemma-4-e4b",
+        source_count: int = 0,
+        chars_cut: int = 0,
+        outcome_signal: str = "success",
+        web_enabled: bool = False,
+        mail_enabled: bool = False,
+        target_model: str = "",
+    ) -> dict[str, Any]:
+        """Logs a local harness outcome/override signal to `satz_harness_signals`."""
+        sig = str(outcome_signal or "").strip().lower()
+        allowed = {
+            "retry",
+            "use_planck_instead",
+            "citations_flagged",
+            "citation_flagged_click",
+            "manual_model_override",
+            "manual_context_override",
+            "error",
+            "success",
+        }
+        if sig not in allowed:
+            return {"ok": False, "error": f"Unknown outcome_signal: {outcome_signal}"}
+        if self.pause_learning and sig not in ("manual_model_override", "manual_context_override"):
+            return {"ok": True, "paused": True, "recorded": False}
+
+        qtype = str(query_type or "").strip() or self.classify_query_type(
+            prompt, web_enabled=web_enabled, mail_enabled=mail_enabled
+        )
+        mod = str(model_id or "gemma-4-e4b").strip() or "gemma-4-e4b"
+        tgt = str(target_model or "").strip()
+        preview = re.sub(r"\s+", " ", str(prompt or "").strip())[:120]
+        now_ts = time.time()
+
+        with self.store_lock:
+            self.store.db.execute(
+                """
+                INSERT INTO satz_harness_signals
+                    (query_type, model_id, source_count, chars_cut, outcome_signal, web_enabled, mail_enabled, target_model, prompt_preview, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    qtype,
+                    mod,
+                    max(0, int(source_count or 0)),
+                    max(0, int(chars_cut or 0)),
+                    sig,
+                    1 if web_enabled else 0,
+                    1 if mail_enabled else 0,
+                    tgt,
+                    preview,
+                    now_ts,
+                ),
+            )
+            self.store.db.commit()
+
+        return {
+            "ok": True,
+            "recorded": True,
+            "query_type": qtype,
+            "model_id": mod,
+            "outcome_signal": sig,
+            "policy": self.get_routing_policy(),
+        }
+
+    def reset_routing_telemetry(self, query_type: str = "") -> dict[str, Any]:
+        """Clears learned harness failure signals (all or a specific `query_type`)."""
+        qtype = str(query_type or "").strip()
+        with self.store_lock:
+            if qtype:
+                cur = self.store.db.execute(
+                    "DELETE FROM satz_harness_signals WHERE query_type = ?",
+                    (qtype,),
+                )
+            else:
+                cur = self.store.db.execute("DELETE FROM satz_harness_signals")
+            self.store.db.commit()
+            deleted = int(cur.rowcount or 0)
+        return {"ok": True, "deleted": deleted, "policy": self.get_routing_policy()}
+
+    def get_routing_policy(self) -> dict[str, Any]:
+        """Aggregates `satz_harness_signals` into per-`query_type` auto-escalation & auto-context rules."""
+        cutoff = time.time() - (90 * 86400)
+        with self.store_lock:
+            rows = self.store.db.execute(
+                """
+                SELECT query_type, model_id, source_count, chars_cut, outcome_signal,
+                       web_enabled, mail_enabled, target_model, created_at
+                FROM satz_harness_signals
+                WHERE created_at >= ?
+                ORDER BY signal_id DESC
+                LIMIT 1000
+                """,
+                (cutoff,),
+            ).fetchall()
+
+        ready_cloud = self._resolve_ready_cloud_model()
+        local_models = {"gemma-4-e4b", "hertz (reader)", "hertz-1.2", "planck (reader)", "planck-r5"}
+
+        buckets: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            qt = str(r["query_type"] or "general_chat")
+            b = buckets.setdefault(
+                qt,
+                {
+                    "query_type": qt,
+                    "signal_count": 0,
+                    "retries": 0,
+                    "planck_switches": 0,
+                    "flagged_citations": 0,
+                    "errors": 0,
+                    "successes": 0,
+                    "local_fail_weight": 0.0,
+                    "no_web_failures": 0,
+                    "no_mail_failures": 0,
+                    "manual_web_enables": 0,
+                    "manual_mail_enables": 0,
+                    "target_votes": collections.Counter(),
+                    "last_seen": 0.0,
+                },
+            )
+            b["signal_count"] += 1
+            b["last_seen"] = max(b["last_seen"], float(r["created_at"] or 0.0))
+            sig = str(r["outcome_signal"] or "")
+            mod = str(r["model_id"] or "")
+            tgt = str(r["target_model"] or "").strip()
+            is_local = (mod in local_models) or not (mod == "planck3 (web)" or self._parse_cloud_model_id(mod) is not None)
+            w_on = bool(r["web_enabled"])
+            m_on = bool(r["mail_enabled"])
+
+            if sig == "retry":
+                b["retries"] += 1
+                if is_local:
+                    b["local_fail_weight"] += 2.0
+                if not w_on:
+                    b["no_web_failures"] += 1
+                if not m_on:
+                    b["no_mail_failures"] += 1
+            elif sig == "use_planck_instead":
+                b["planck_switches"] += 1
+                b["target_votes"]["planck3 (web)"] += 2
+                if is_local:
+                    b["local_fail_weight"] += 2.0
+                if not w_on:
+                    b["no_web_failures"] += 1
+            elif sig == "citation_flagged_click":
+                b["flagged_citations"] += 1
+                if is_local:
+                    b["local_fail_weight"] += 1.5
+                if not w_on:
+                    b["no_web_failures"] += 1
+            elif sig == "citations_flagged":
+                b["flagged_citations"] += 1
+                if is_local:
+                    b["local_fail_weight"] += 1.0
+                if not w_on:
+                    b["no_web_failures"] += 1
+            elif sig == "error":
+                b["errors"] += 1
+                if is_local:
+                    b["local_fail_weight"] += 2.0
+            elif sig == "manual_model_override":
+                if tgt and tgt != mod:
+                    b["target_votes"][tgt] += 2
+                if is_local and (self._parse_cloud_model_id(tgt) is not None or tgt == "planck3 (web)"):
+                    b["local_fail_weight"] += 2.0
+            elif sig == "manual_context_override":
+                if w_on:
+                    b["manual_web_enables"] += 1
+                if m_on:
+                    b["manual_mail_enables"] += 1
+            elif sig == "success":
+                b["successes"] += 1
+                if is_local:
+                    b["local_fail_weight"] = max(0.0, b["local_fail_weight"] - 0.35)
+
+        rules: list[dict[str, Any]] = []
+        by_query_type: dict[str, dict[str, Any]] = {}
+        for qt, b in buckets.items():
+            auto_mail = bool(
+                b["manual_mail_enables"] >= 2
+                or (qt == "mail_query" and b["no_mail_failures"] >= 2)
+                or (b["manual_mail_enables"] >= 1 and b["no_mail_failures"] >= 1)
+            )
+            auto_web = bool(
+                (b["manual_web_enables"] >= 2 or (qt != "mail_query" and b["no_web_failures"] >= 2 and not auto_mail))
+                and qt != "url_or_navigation"
+            )
+
+            recommended_model = ""
+            escalated = False
+            reason_parts: list[str] = []
+            if b["local_fail_weight"] >= 4.0:
+                # Pick best valid escalation target: explicit cloud/planck votes first, else ready cloud, else Planck
+                top_target = ""
+                for cand, _cnt in b["target_votes"].most_common():
+                    if cand == "planck3 (web)":
+                        top_target = cand
+                        break
+                    parsed = self._parse_cloud_model_id(cand)
+                    if parsed:
+                        k_chk, _ = self._resolve_provider_api_key(parsed[0])
+                        if k_chk:
+                            top_target = cand
+                            break
+                if not top_target:
+                    if b["planck_switches"] >= 2 and not ready_cloud:
+                        top_target = "planck3 (web)"
+                    elif ready_cloud:
+                        top_target = ready_cloud
+                    elif b["planck_switches"] >= 1 or qt in ("factual_web", "comparison_research"):
+                        top_target = "planck3 (web)"
+
+                if top_target:
+                    recommended_model = top_target
+                    escalated = True
+                    if b["retries"]:
+                        reason_parts.append(f"{b['retries']}x Retry")
+                    if b["planck_switches"]:
+                        reason_parts.append(f"{b['planck_switches']}x Use Planck")
+                    if b["flagged_citations"]:
+                        reason_parts.append(f"{b['flagged_citations']}x Flagged citations")
+
+            if auto_mail:
+                reason_parts.append("auto-enabled Mail context")
+            if auto_web:
+                reason_parts.append("auto-enabled Web context")
+
+            rule = {
+                "query_type": qt,
+                "signal_count": b["signal_count"],
+                "retries": b["retries"],
+                "planck_switches": b["planck_switches"],
+                "flagged_citations": b["flagged_citations"],
+                "errors": b["errors"],
+                "successes": b["successes"],
+                "recommended_model": recommended_model,
+                "escalated": escalated,
+                "auto_web": auto_web,
+                "auto_mail": auto_mail,
+                "reason": ", ".join(reason_parts),
+            }
+            by_query_type[qt] = rule
+            rules.append(rule)
+
+        rules.sort(key=lambda r: (r["escalated"] or r["auto_web"] or r["auto_mail"], r["signal_count"]), reverse=True)
+        return {
+            "ok": True,
+            "total_signals": sum(b["signal_count"] for b in buckets.values()),
+            "ready_cloud_model": ready_cloud,
+            "rules": rules,
+            "by_query_type": by_query_type,
+        }
+
+    def resolve_chat_route(
+        self,
+        *,
+        prompt: str,
+        selected_model: str = "gemma-4-e4b",
+        web_enabled: bool = False,
+        mail_enabled: bool = False,
+        sources: list[dict[str, Any]] | None = None,
+        user_overrode_model: bool = False,
+    ) -> dict[str, Any]:
+        """Resolves effective `(model, web_enabled, mail_enabled)` using learned `satz_harness_signals`."""
+        qtype = self.classify_query_type(prompt, sources=sources, web_enabled=web_enabled, mail_enabled=mail_enabled)
+        policy = self.get_routing_policy()
+        rule = (policy.get("by_query_type") or {}).get(qtype)
+
+        eff_model = selected_model or "gemma-4-e4b"
+        eff_web = bool(web_enabled)
+        eff_mail = bool(mail_enabled)
+        escalated = False
+        reason = ""
+
+        is_local = eff_model in ("gemma-4-e4b", "hertz (reader)", "hertz-1.2", "planck (reader)", "planck-r5")
+        if rule:
+            if not user_overrode_model and is_local and rule.get("escalated") and rule.get("recommended_model"):
+                cand = str(rule["recommended_model"])
+                parsed = self._parse_cloud_model_id(cand)
+                if cand == "planck3 (web)" or (parsed and self._resolve_provider_api_key(parsed[0])[0]):
+                    eff_model = cand
+                    escalated = True
+            if rule.get("auto_web") and not eff_web:
+                eff_web = True
+                escalated = True
+            if rule.get("auto_mail") and not eff_mail:
+                eff_mail = True
+                escalated = True
+            if escalated:
+                reason = str(rule.get("reason") or f"learned policy for {qtype}")
+
+        return {
+            "query_type": qtype,
+            "model": eff_model,
+            "web_enabled": eff_web,
+            "mail_enabled": eff_mail,
+            "escalated": escalated,
+            "reason": reason,
+        }
+
     def rank_command_bar_routes(
         self,
         raw: str,
@@ -4836,8 +7930,33 @@ class SatzSidecarRuntime:
         from src.planck3.web import domain_of
 
         trimmed = (raw or "").strip()
-        uses_web = bool(web_enabled or selected_model == "planck3 (web)")
-        model_privacy = "web search · duckduckgo" if uses_web else "local only"
+        learned_route = (
+            self.resolve_chat_route(
+                prompt=trimmed,
+                selected_model=selected_model,
+                web_enabled=web_enabled,
+                mail_enabled=False,
+            )
+            if trimmed
+            else {"model": selected_model, "web_enabled": bool(web_enabled), "mail_enabled": False, "escalated": False, "reason": ""}
+        )
+        eff_model = str(learned_route.get("model") or selected_model or "gemma-4-e4b")
+        eff_web = bool(learned_route.get("web_enabled", web_enabled))
+        eff_mail = bool(learned_route.get("mail_enabled", False))
+        eff_escalated = bool(learned_route.get("escalated", False))
+        eff_reason = str(learned_route.get("reason") or "")
+
+        cloud_parsed_route = self._parse_cloud_model_id(eff_model)
+        uses_web = bool(eff_web or eff_model == "planck3 (web)")
+        leaves_machine = bool(uses_web or cloud_parsed_route is not None)
+        if cloud_parsed_route is not None and uses_web:
+            model_privacy = f"cloud ({cloud_parsed_route[0]}) + web search"
+        elif cloud_parsed_route is not None:
+            model_privacy = f"cloud ({cloud_parsed_route[0]})"
+        elif uses_web:
+            model_privacy = "web search · duckduckgo"
+        else:
+            model_privacy = "local only"
 
         if not trimmed:
             return [
@@ -4867,7 +7986,7 @@ class SatzSidecarRuntime:
                 },
                 {
                     "kind": "search_news",
-                    "label": "open news · top stories, for you, perspectives & sources",
+                    "label": "open news · top stories, perspectives & news settings",
                     "destination": "satz news",
                     "privacy": "local only",
                     "leaves_machine": False,
@@ -4884,14 +8003,22 @@ class SatzSidecarRuntime:
             ]
 
         def make_ask_route(q: str) -> dict[str, Any]:
-            return {
+            esc_suffix = f" [auto: {eff_reason}]" if eff_escalated and eff_reason else ""
+            route: dict[str, Any] = {
                 "kind": "ask_model",
-                "label": f'ask {selected_model} · "{q}"',
-                "destination": f"chat ({selected_model})",
+                "label": f'ask {eff_model} · "{q}"{esc_suffix}',
+                "destination": f"chat ({eff_model})",
                 "privacy": model_privacy,
-                "leaves_machine": uses_web,
+                "leaves_machine": leaves_machine,
                 "question": q,
             }
+            if eff_escalated or eff_model != selected_model or eff_web != bool(web_enabled) or eff_mail:
+                route["model"] = eff_model
+                route["auto_web"] = eff_web
+                route["auto_mail"] = eff_mail
+                route["escalated"] = eff_escalated
+                route["escalation_reason"] = eff_reason
+            return route
 
         def make_brain_route(q: str) -> dict[str, Any]:
             return {
@@ -4914,12 +8041,23 @@ class SatzSidecarRuntime:
             }
 
         def make_news_route(q: str) -> dict[str, Any]:
-            label = f'ask news · "{q}"' if q else "open news · top stories, for you, perspectives & sources"
+            label = f'ask news · "{q}"' if q else "open news · top stories, perspectives & news settings"
             return {
                 "kind": "search_news",
                 "label": label,
                 "destination": "satz news",
                 "privacy": "local + RSS/registry",
+                "leaves_machine": False,
+                "query": q,
+            }
+
+        def make_drives_route(q: str) -> dict[str, Any]:
+            label = f'search drives · "{q}"' if q else "open drives · cloud files & chat"
+            return {
+                "kind": "search_drives",
+                "label": label,
+                "destination": "satz drives",
+                "privacy": "local only",
                 "leaves_machine": False,
                 "query": q,
             }
@@ -5043,6 +8181,18 @@ class SatzSidecarRuntime:
 
         if trimmed.lower() in ("news", "open news", "top stories", "satz news"):
             return [make_news_route(""), make_brain_route(trimmed), make_ask_route(trimmed)]
+
+        drives_prefix = re.match(
+            r"^(?:(?:drive|drives|files)\s*:\s*|search\s+(?:drives?|files)\s+(?:for\s+)?|in\s+(?:drives?|files)\s+)(.+)$",
+            trimmed,
+            flags=re.I,
+        )
+        if drives_prefix:
+            q_d = drives_prefix.group(1).strip()
+            return [make_drives_route(q_d), make_brain_route(q_d), make_ask_route(trimmed)]
+
+        if trimmed.lower() in ("drive", "drives", "open drives", "my files", "google drive", "onedrive"):
+            return [make_drives_route(""), make_brain_route(trimmed), make_ask_route(trimmed)]
 
         mail_prefix = re.match(
             r"^(?:(?:mail|inbox|from|to|subject)\s*:\s*|search\s+mail\s+(?:for\s+)?|in\s+mail\s+)(.+)$",
@@ -5295,6 +8445,8 @@ class SatzSidecarRuntime:
             }
             if s.get("action_summary"):
                 step_copy["action_summary"] = s["action_summary"]
+            if s.get("action_payload"):
+                step_copy["action_payload"] = s["action_payload"]
             if s.get("kind") == "send_gate" and not s.get("_consumed"):
                 step_copy["confirm_token"] = s.get("confirm_token", "")
             steps_out.append(step_copy)
@@ -5339,6 +8491,7 @@ class SatzSidecarRuntime:
         text: str,
         kind: str = "log",
         action_summary: str = "",
+        action_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self.tasks_lock:
             task = self.tasks.get(task_id)
@@ -5363,10 +8516,282 @@ class SatzSidecarRuntime:
                 "confirm_token": secrets.token_hex(16) if is_send_gate else "",
                 "_consumed": False,
             }
+            if isinstance(action_payload, dict) and action_payload:
+                step["action_payload"] = dict(action_payload)
             task["steps"].append(step)
             if is_send_gate:
                 task["status"] = "waiting_confirm"
             return self._public_task(task)
+
+    def prepare_mail_unsubscribe_task(
+        self,
+        conversation_id: str,
+        target_query: str = "",
+        message_id: str = "",
+        cite_idx: int | None = None,
+        sources: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Resolves the best matching email (or open tab) unsubscribe target and creates a gated
+        `actor` Task Card (`send_gate` + single-use `confirm_token`). Never commits on read.
+        """
+        if not self.passwords.unlocked:
+            return {"ok": False, "error": "Profile is locked."}
+
+        cid = str(conversation_id or "default")
+        src_list = list(sources or [])
+        resolved_mid = (message_id or "").strip()
+        q_clean = (target_query or "").strip()
+
+        if not resolved_mid and cite_idx and 1 <= int(cite_idx) <= len(src_list):
+            c_src = src_list[int(cite_idx) - 1]
+            c_id = str(c_src.get("id") or "")
+            c_url = str(c_src.get("url") or "")
+            if c_id.startswith("mail:"):
+                resolved_mid = c_id.split("mail:", 1)[1].strip()
+            elif c_url.startswith("satzmail://message/"):
+                resolved_mid = c_url.split("satzmail://message/", 1)[1].split("/")[0].strip()
+
+        if not resolved_mid:
+            # Check injected/open mail sources matching `target_query` first
+            mail_src_mids: list[str] = []
+            for cs in src_list:
+                cs_id = str(cs.get("id") or "")
+                cs_url = str(cs.get("url") or "")
+                m_cand = ""
+                if cs_id.startswith("mail:"):
+                    m_cand = cs_id.split("mail:", 1)[1].strip()
+                elif cs_url.startswith("satzmail://message/"):
+                    m_cand = cs_url.split("satzmail://message/", 1)[1].split("/")[0].strip()
+                if m_cand:
+                    mail_src_mids.append(m_cand)
+                    hay = f"{cs.get('title') or ''} {cs.get('text') or ''}".lower()
+                    if q_clean and q_clean.lower() in hay:
+                        resolved_mid = m_cand
+                        break
+            if not resolved_mid and not q_clean and mail_src_mids:
+                resolved_mid = mail_src_mids[0]
+
+        candidates = self.mail.find_unsubscribe_targets(query=q_clean, message_id=resolved_mid, limit=5)
+        if not candidates and not resolved_mid:
+            # Fallback to an open HTTP(S) web tab if user has an unsubscribe page open
+            for cs in src_list:
+                cu = str(cs.get("url") or "")
+                ct = str(cs.get("title") or "")
+                if cu.startswith(("http://", "https://")) and (
+                    (q_clean and q_clean.lower() in f"{cu} {ct}".lower())
+                    or any(k in f"{cu} {ct}".lower() for k in ("unsub", "abmeld", "abbestell", "optout", "preferences"))
+                ):
+                    with self.tasks_lock:
+                        for ex_t in self.tasks.values():
+                            if ex_t.get("conversation_id") == cid and ex_t.get("status") == "waiting_confirm":
+                                for st in ex_t.get("steps") or []:
+                                    if (st.get("action_payload") or {}).get("url") == cu:
+                                        return {"ok": True, "task": self._public_task(ex_t), "preferred_method": "https_link", "summary": st.get("action_summary") or ""}
+                    goal_lbl = f"Unsubscribe on {q_clean or ct or cu}"
+                    t_pub = self.create_task(cid, goal=goal_lbl, agent="actor")
+                    tid = t_pub["id"]
+                    self.append_task_step(tid, f"Found open webpage tab: {ct or cu}", kind="log")
+                    gate_sum = f"Confirm unsubscribe on open tab {cu}"
+                    t_pub = self.append_task_step(
+                        tid,
+                        "Confirm on-page unsubscribe",
+                        kind="send_gate",
+                        action_summary=gate_sum,
+                        action_payload={
+                            "action_type": "browser_unsubscribe",
+                            "url": cu,
+                            "sender_name": q_clean or ct,
+                            "preferred_method": "https_link",
+                        },
+                    )
+                    return {"ok": True, "task": t_pub, "preferred_method": "https_link", "summary": gate_sum}
+            return {"ok": False, "error": f"No matching email or unsubscribe page found for '{q_clean or 'request'}'."}
+
+        target = candidates[0] if candidates else None
+        if not target or not target.get("ok"):
+            return {"ok": False, "error": "Could not inspect matching email."}
+
+        mid = str(target.get("message_id") or "")
+        from_addr = str(target.get("from_addr") or "")
+        from_name = str(target.get("from_name") or from_addr)
+        subj = str(target.get("subject") or "(no subject)")
+        methods = list(target.get("methods") or [])
+        pref_m = methods[0] if methods else None
+
+        # Avoid duplicate pending Actor task cards for the same message
+        with self.tasks_lock:
+            for ex_t in self.tasks.values():
+                if ex_t.get("conversation_id") == cid and ex_t.get("status") == "waiting_confirm":
+                    for st in ex_t.get("steps") or []:
+                        if (st.get("action_payload") or {}).get("message_id") == mid:
+                            return {
+                                "ok": True,
+                                "task": self._public_task(ex_t),
+                                "preferred_method": str((st.get("action_payload") or {}).get("preferred_method") or "none"),
+                                "summary": st.get("action_summary") or "",
+                            }
+
+        sender_disp = f"{from_name} <{from_addr}>" if from_name and from_addr and from_name.lower() != from_addr.lower() else (from_name or from_addr)
+        goal_txt = f"Unsubscribe from {from_name or q_clean or from_addr}"
+        t_pub = self.create_task(cid, goal=goal_txt, agent="actor")
+        tid = t_pub["id"]
+        self.append_task_step(tid, f"Found email '{subj[:80]}' from {sender_disp}", kind="log")
+
+        if pref_m:
+            mtype = str(pref_m.get("type") or "")
+            mlabel = str(pref_m.get("label") or mtype)
+            target_uri = str(pref_m.get("url") or pref_m.get("mailto") or "")
+            if mtype == "one_click_post":
+                self.append_task_step(tid, f"Found RFC 8058 One-Click header ({target_uri[:80]})", kind="log")
+                gate_summary = f"Unsubscribe from {sender_disp} via One-Click POST ({target_uri[:110]})"
+            elif mtype == "mailto":
+                self.append_task_step(tid, f"Found List-Unsubscribe mailto ({pref_m.get('to') or target_uri})", kind="log")
+                gate_summary = f"Send unsubscribe email from {target.get('account_email') or 'account'} to {pref_m.get('to') or target_uri}"
+            else:
+                self.append_task_step(tid, f"Found unsubscribe link '{mlabel}' ({target_uri[:90]})", kind="log")
+                gate_summary = f"Open unsubscribe link in browser tab & confirm for {sender_disp}: {target_uri[:110]}"
+
+            payload_obj: dict[str, Any] = {
+                "action_type": "mail_unsubscribe",
+                "message_id": mid,
+                "sender": from_addr,
+                "sender_name": from_name,
+                "subject": subj,
+                "preferred_method": mtype,
+                "url": target_uri,
+                "label": mlabel,
+            }
+            fb_mailto = next((m for m in methods if m.get("type") == "mailto"), None)
+            if fb_mailto:
+                payload_obj["fallback_mailto"] = fb_mailto.get("mailto") or ""
+            t_pub = self.append_task_step(
+                tid,
+                f"Unsubscribe from {from_name or from_addr}",
+                kind="send_gate",
+                action_summary=gate_summary,
+                action_payload=payload_obj,
+            )
+            pref_type = mtype
+        else:
+            self.append_task_step(tid, "No List-Unsubscribe header or unsubscribe link found in message body", kind="log")
+            gate_summary = f"Archive existing emails from {sender_disp} locally (no unsubscribe link found)"
+            t_pub = self.append_task_step(
+                tid,
+                f"Archive emails from {from_name or from_addr}",
+                kind="send_gate",
+                action_summary=gate_summary,
+                action_payload={
+                    "action_type": "archive_sender_fallback",
+                    "message_id": mid,
+                    "sender": from_addr,
+                    "sender_name": from_name,
+                    "subject": subj,
+                },
+            )
+            pref_type = "archive_local"
+
+        src_text, _ = self.get_source_text(f"mail:{mid}", f"satzmail://message/{mid}")
+        method_note = f"Sender: {sender_disp}\nUnsubscribe method: {pref_type} — {gate_summary}"
+        full_src_text = f"{src_text}\n\n{method_note}".strip()
+        return {
+            "ok": True,
+            "task": t_pub,
+            "preferred_method": pref_type,
+            "summary": gate_summary,
+            "method_note": method_note,
+            "source": {
+                "id": f"mail:{mid}",
+                "url": f"satzmail://message/{mid}",
+                "title": f"{from_name or from_addr}: {subj}",
+                "domain": "mail",
+                "text": full_src_text,
+            },
+        }
+
+    def execute_mail_unsubscribe_task(
+        self,
+        *,
+        message_id: str,
+        url: str = "",
+        method_type: str = "",
+        task_id: str = "",
+        step_id: str = "",
+        archive_sender: bool = False,
+        confirm_explicit: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Executes an approved unsubscribe action after verifying either:
+        - `task_id` has a `send_gate` step in `confirmed` status (single-use token already consumed), OR
+        - `confirm_explicit=True` (from an explicit direct UI click).
+        """
+        if not self.passwords.unlocked:
+            return {"ok": False, "error": "Profile is locked."}
+
+        tid = (task_id or "").strip()
+        sid = (step_id or "").strip()
+        if tid:
+            confirmed_step, gate_err = self._verify_confirmed_send_gate(tid, sid, mark_executed=False)
+            if gate_err or not confirmed_step:
+                err_msg = gate_err or "Send-gate step must be confirmed before executing unsubscribe."
+                if err_msg == "Send-gate step must be confirmed before executing.":
+                    err_msg = "Send-gate step must be confirmed before executing unsubscribe."
+                elif err_msg == "Task action has already been executed.":
+                    err_msg = "Task unsubscribe action has already been executed."
+                return {"ok": False, "error": err_msg}
+            ap = confirmed_step.get("action_payload") or {}
+            if not message_id and ap.get("message_id"):
+                message_id = str(ap["message_id"])
+            if not url and ap.get("url"):
+                url = str(ap["url"])
+            if not method_type and ap.get("preferred_method"):
+                method_type = str(ap["preferred_method"])
+        elif not confirm_explicit:
+            return {"ok": False, "error": "Confirmation required to execute unsubscribe."}
+
+        res = self.mail.execute_unsubscribe_direct(
+            message_id=message_id,
+            url=url,
+            method_type=method_type,
+            archive_sender=archive_sender,
+        )
+        if tid and res.get("ok") and res.get("executed"):
+            with self.tasks_lock:
+                t_obj = self.tasks.get(tid)
+                if t_obj:
+                    for st in t_obj.get("steps") or []:
+                        if st.get("kind") == "send_gate" and (not sid or st.get("id") == sid):
+                            st["_executed"] = True
+                            break
+            done_method = str(res.get("method") or method_type)
+            done_msg = (
+                f"Unsubscribed from {res.get('from_addr') or 'sender'} via {done_method}"
+                + (f" (HTTP {res['http_status']})" if res.get("http_status") else "")
+                + (f" (sent to {res['sent_to']})" if res.get("sent_to") else "")
+                + "."
+            )
+            self.append_task_step(tid, done_msg, kind="log")
+            t_done = self.complete_task(tid, result_md=done_msg)
+            res["task"] = t_done
+        if res.get("ok") and res.get("executed") and hasattr(self, "behavior"):
+            try:
+                from src.planck3.web import domain_of
+
+                self.behavior.log_event(
+                    "mail_unsubscribe",
+                    domain=domain_of(url or "") if url else "",
+                    url=url or "",
+                    query=str(res.get("from_addr") or ""),
+                    metadata={"sender": str(res.get("from_addr") or ""), "method": str(res.get("method") or method_type)},
+                )
+            except Exception:
+                pass
+        elif tid and not res.get("ok"):
+            err_msg = str(res.get("error") or "Unsubscribe execution failed")
+            self.append_task_step(tid, f"Error: {err_msg}", kind="log")
+            t_upd = self.complete_task(tid, result_md=f"Failed: {err_msg}")
+            res["task"] = t_upd
+        return res
 
     def complete_task(self, task_id: str, result_md: str = "") -> dict[str, Any]:
         with self.tasks_lock:
@@ -5466,6 +8891,474 @@ class SatzSidecarRuntime:
             ]
             items.sort(key=lambda x: float(x.get("started_at") or 0.0))
             return items
+
+    def _verify_confirmed_send_gate(
+        self,
+        task_id: str,
+        step_id: str = "",
+        *,
+        mark_executed: bool = False,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Verifies a task's `send_gate` step is in `confirmed` status and not yet executed."""
+        tid = (task_id or "").strip()
+        sid = (step_id or "").strip()
+        with self.tasks_lock:
+            t_obj = self.tasks.get(tid)
+            if not t_obj:
+                return None, "Task not found."
+            confirmed_step = None
+            for st in t_obj.get("steps") or []:
+                if st.get("kind") == "send_gate" and (not sid or st.get("id") == sid):
+                    confirmed_step = st
+                    break
+            if not confirmed_step or confirmed_step.get("status") != "confirmed":
+                return None, "Send-gate step must be confirmed before executing."
+            if confirmed_step.get("_executed"):
+                return None, "Task action has already been executed."
+            if mark_executed:
+                confirmed_step["_executed"] = True
+            return dict(confirmed_step), None
+
+    def _create_gated_task_card(
+        self,
+        *,
+        conversation_id: str,
+        agent: str,
+        goal: str,
+        log_steps: list[str] | None = None,
+        gate_text: str,
+        action_summary: str,
+        action_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        cid = str(conversation_id or "default")
+        t_pub = self.create_task(cid, goal=goal, agent=agent)
+        tid = t_pub["id"]
+        for lstep in log_steps or []:
+            if str(lstep).strip():
+                self.append_task_step(tid, str(lstep), kind="log")
+        return self.append_task_step(
+            tid,
+            gate_text,
+            kind="send_gate",
+            action_summary=action_summary,
+            action_payload=action_payload,
+        )
+
+    def prepare_comparer_task(
+        self,
+        conversation_id: str,
+        *,
+        urls: list[str] | None = None,
+        goal: str = "compare these",
+        sources: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        from src.planck3.web import domain_of
+
+        cid = str(conversation_id or "default")
+        clean_urls = [
+            str(u).strip()
+            for u in (urls or [])
+            if str(u).strip().startswith(("http://", "https://"))
+        ]
+        src_list = list(sources or [])
+        chosen_sources: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        for u in clean_urls[:4]:
+            matched = next(
+                (s for s in src_list if str(s.get("url") or "").strip() == u),
+                None,
+            )
+            if matched:
+                sid = str(matched.get("id") or u)
+                if sid not in seen_ids:
+                    seen_ids.add(sid)
+                    chosen_sources.append(
+                        {
+                            "id": sid,
+                            "url": u,
+                            "title": str(matched.get("title") or domain_of(u) or u),
+                            "domain": str(matched.get("domain") or domain_of(u) or ""),
+                        }
+                    )
+            else:
+                if u not in seen_ids:
+                    seen_ids.add(u)
+                    chosen_sources.append(
+                        {
+                            "id": u,
+                            "url": u,
+                            "title": domain_of(u) or u,
+                            "domain": domain_of(u) or "",
+                        }
+                    )
+
+        if not chosen_sources:
+            for s in src_list:
+                if len(chosen_sources) >= 4:
+                    break
+                sid = str(s.get("id") or s.get("url") or "")
+                surl = str(s.get("url") or "")
+                if not sid or sid in seen_ids:
+                    continue
+                if surl.startswith(("http://", "https://", "satzmail://")):
+                    seen_ids.add(sid)
+                    chosen_sources.append(
+                        {
+                            "id": sid,
+                            "url": surl,
+                            "title": str(s.get("title") or surl),
+                            "domain": str(s.get("domain") or domain_of(surl) or ""),
+                        }
+                    )
+
+        if len(chosen_sources) < 2 and not clean_urls:
+            return {
+                "ok": False,
+                "error": "Need at least 2 URLs or open tab sources to compare.",
+            }
+
+        eff_goal = (goal or "compare these").strip()
+        target_labels = [c.get("domain") or c.get("url") for c in chosen_sources]
+        gate_summary = f"Run Comparer across {len(chosen_sources)} source(s): {', '.join(target_labels)}"
+        t_pub = self._create_gated_task_card(
+            conversation_id=cid,
+            agent="comparer",
+            goal=eff_goal,
+            log_steps=[f"Staged {len(chosen_sources)} source(s) for comparison"],
+            gate_text="Confirm comparison",
+            action_summary=gate_summary,
+            action_payload={
+                "action_type": "run_comparer",
+                "urls": [c["url"] for c in chosen_sources],
+                "sources": chosen_sources,
+                "goal": eff_goal,
+            },
+        )
+        return {"ok": True, "task": t_pub, "summary": gate_summary}
+
+    def prepare_watch_task(
+        self,
+        conversation_id: str,
+        *,
+        query_or_url: str,
+        condition: str = "any_change",
+        cadence_seconds: float = 1800.0,
+        title: str = "",
+    ) -> dict[str, Any]:
+        from src.planck3.web import domain_of
+
+        target = (query_or_url or "").strip()
+        if not target:
+            return {"ok": False, "error": "url or query is required."}
+        if "://" in target and not target.startswith(("http://", "https://")):
+            return {"ok": False, "error": "Watch URL must use http:// or https://."}
+
+        cid = str(conversation_id or "default")
+        cond = (condition or "any_change").strip()
+        cadence = max(60.0, float(cadence_seconds or 1800.0))
+        dom_lbl = domain_of(target) if target.startswith(("http://", "https://")) else target[:50]
+        eff_title = (title or dom_lbl or target[:50]).strip()
+        cad_min = max(1, int(round(cadence / 60.0)))
+        gate_summary = f"Watch {eff_title} ({cond}, check every {cad_min}m): {target[:110]}"
+        t_pub = self._create_gated_task_card(
+            conversation_id=cid,
+            agent="watcher",
+            goal=f"Watch {eff_title}",
+            log_steps=[f"Prepared monitor condition '{cond}' for {target[:120]}"],
+            gate_text="Confirm watch",
+            action_summary=gate_summary,
+            action_payload={
+                "action_type": "add_watch",
+                "query_or_url": target,
+                "condition": cond,
+                "cadence_seconds": cadence,
+                "title": eff_title,
+            },
+        )
+        return {"ok": True, "task": t_pub, "summary": gate_summary}
+
+    def prepare_set_default_provider_task(
+        self,
+        conversation_id: str,
+        *,
+        category_id: str,
+        domain_or_name: str,
+        url_template: str = "",
+        priority: int = 1,
+        constraints_note: str = "",
+    ) -> dict[str, Any]:
+        cid = str(conversation_id or "default")
+        raw_tgt = (domain_or_name or "").strip()
+        if not raw_tgt:
+            return {"ok": False, "error": "domain_or_name is required."}
+        inferred = self.providers.infer_provider_template(raw_tgt, category_id=category_id)
+        if not inferred.get("ok"):
+            return {"ok": False, "error": str(inferred.get("error") or "Invalid provider target.")}
+        eff_cat = str(category_id or inferred.get("suggested_category_id") or "search.general").strip().lower()
+        eff_tpl = (url_template or str(inferred.get("url_template") or "")).strip()
+        if eff_tpl:
+            from satz_providers import validate_url_template
+
+            try:
+                eff_tpl = validate_url_template(eff_tpl)
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+        eff_name = str(inferred.get("display_name") or raw_tgt)
+        eff_doms = list(inferred.get("domains") or [])
+        eff_prio = max(1, int(priority or 1))
+        gate_summary = f"Set #{eff_prio} default for {eff_cat}: {eff_name}" + (f" ({eff_doms[0]})" if eff_doms else "")
+        t_pub = self._create_gated_task_card(
+            conversation_id=cid,
+            agent="providers",
+            goal=gate_summary,
+            log_steps=[f"Prepared default provider preference update for {eff_cat}"],
+            gate_text="Confirm default provider",
+            action_summary=gate_summary,
+            action_payload={
+                "action_type": "set_default_provider",
+                "category_id": eff_cat,
+                "provider_slug": str(inferred.get("provider_slug") or ""),
+                "display_name": eff_name,
+                "mode": str(inferred.get("mode") or "web_account"),
+                "api_driver": str(inferred.get("api_driver") or ""),
+                "domains": eff_doms,
+                "url_template": eff_tpl,
+                "vault_service": str(inferred.get("vault_service") or ""),
+                "constraints_note": str(constraints_note or ""),
+                "priority": eff_prio,
+            },
+        )
+        return {"ok": True, "task": t_pub, "summary": gate_summary, "category_id": eff_cat, "display_name": eff_name}
+
+    def execute_set_default_provider_task(self, task_id: str, step_id: str = "") -> dict[str, Any]:
+        tid = (task_id or "").strip()
+        sid = (step_id or "").strip()
+        if not tid:
+            return {"ok": False, "error": "task_id is required."}
+        confirmed_step, gate_err = self._verify_confirmed_send_gate(tid, sid, mark_executed=True)
+        if gate_err or not confirmed_step:
+            return {"ok": False, "error": gate_err or "Task confirmation required."}
+        ap = confirmed_step.get("action_payload") or {}
+        res = self.providers.upsert_provider(
+            category_id=str(ap.get("category_id") or "search.general"),
+            display_name=str(ap.get("display_name") or ""),
+            provider_slug=str(ap.get("provider_slug") or ""),
+            mode=str(ap.get("mode") or "web_account"),
+            api_driver=str(ap.get("api_driver") or ""),
+            domains=list(ap.get("domains") or []),
+            url_template=str(ap.get("url_template") or ""),
+            vault_service=str(ap.get("vault_service") or ""),
+            constraints_note=str(ap.get("constraints_note") or ""),
+            priority=int(ap.get("priority") or 1),
+        )
+        done_msg = f"Saved {ap.get('display_name')} as #{ap.get('priority', 1)} for {ap.get('category_id')}."
+        self.append_task_step(tid, done_msg, kind="log")
+        task_done = self.complete_task(tid, result_md=done_msg)
+        return {**res, "task": task_done, "message": done_msg}
+
+    def prepare_mail_draft_task(
+        self,
+        conversation_id: str,
+        *,
+        to: str = "",
+        subject: str = "",
+        instructions: str = "",
+        reply_to_message_id: str = "",
+        cc: str = "",
+        body: str = "",
+    ) -> dict[str, Any]:
+        if not self.passwords.unlocked or getattr(self, "mail", None) is None:
+            return {"ok": False, "error": "Profile is locked; unlock profile to draft emails."}
+
+        cid = str(conversation_id or "default")
+        to_val = (to or "").strip()
+        cc_val = (cc or "").strip()
+        subj_val = (subject or "").strip()
+        instr_val = (instructions or "").strip()
+        mid_val = (reply_to_message_id or "").strip()
+        body_val = (body or "").strip()
+
+        if mid_val:
+            det = self.mail.get_message_detail(mid_val)
+            if det.get("ok") and det.get("message"):
+                m = det["message"]
+                if not to_val:
+                    to_val = str(m.get("from_addr") or "").strip()
+                if not subj_val:
+                    raw_s = str(m.get("subject") or "").strip()
+                    subj_val = raw_s if raw_s.lower().startswith("re:") else f"Re: {raw_s}"
+
+        if not to_val and not instr_val and not mid_val:
+            return {"ok": False, "error": "Specify recipient `to`, `reply_to_message_id`, or `instructions`."}
+
+        if not body_val and instr_val:
+            body_val = instr_val
+
+        recip_lbl = to_val or "(select recipient)"
+        subj_lbl = subj_val or "(draft subject)"
+        gate_summary = f"Open email draft to {recip_lbl} · Subject: {subj_lbl[:70]}"
+        t_pub = self._create_gated_task_card(
+            conversation_id=cid,
+            agent="mail",
+            goal=f"Draft email to {recip_lbl}",
+            log_steps=[
+                f"Prepared draft for {recip_lbl}" + (f" (reply to {mid_val})" if mid_val else "")
+            ],
+            gate_text="Confirm open draft",
+            action_summary=gate_summary,
+            action_payload={
+                "action_type": "mail_draft",
+                "to": to_val,
+                "cc": cc_val,
+                "subject": subj_val,
+                "instructions": instr_val,
+                "reply_to_message_id": mid_val,
+                "body": body_val,
+            },
+        )
+        return {"ok": True, "task": t_pub, "summary": gate_summary}
+
+    def prepare_tab_action_task(
+        self,
+        conversation_id: str,
+        *,
+        tab_id: str = "",
+        intent: str = "",
+        eid: str = "",
+        action_kind: str = "",
+        value: str = "",
+        open_tabs: list[dict[str, Any]] | None = None,
+        elements: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        cid = str(conversation_id or "default")
+        tabs = list(open_tabs or [])
+        site_tabs = [
+            t
+            for t in tabs
+            if str(t.get("url") or "").startswith(("http://", "https://"))
+        ]
+        chosen_tab: dict[str, Any] | None = None
+        if tab_id:
+            chosen_tab = next(
+                (
+                    t
+                    for t in site_tabs
+                    if str(t.get("tab_id") or "") == tab_id or str(t.get("source_id") or "") == tab_id
+                ),
+                None,
+            )
+        if chosen_tab is None and site_tabs:
+            chosen_tab = next((t for t in site_tabs if t.get("is_active")), site_tabs[0])
+
+        eff_tid = str((chosen_tab or {}).get("tab_id") or tab_id or "").strip()
+        eff_url = str((chosen_tab or {}).get("url") or "").strip()
+        eff_src_id = str((chosen_tab or {}).get("source_id") or eff_tid).strip()
+
+        if not eff_tid:
+            return {"ok": False, "error": "No open http(s) browser tab found for tab action."}
+        if eff_url and not eff_url.startswith(("http://", "https://")):
+            return {"ok": False, "error": "Tab actions are only allowed on http(s) web pages."}
+
+        parsed_u = urllib.parse.urlsplit(eff_url) if eff_url else None
+        expected_origin = (
+            f"{parsed_u.scheme}://{parsed_u.netloc}"
+            if parsed_u and parsed_u.scheme and parsed_u.netloc
+            else ""
+        )
+
+        elem_list = list(elements or [])
+        if not elem_list:
+            elem_list = self.get_source_affordances(eff_src_id, eff_url)
+
+        req_eid = (eid or "").strip().lower()
+        intent_low = (intent or "").strip().lower()
+        matched_el: dict[str, Any] | None = None
+        if req_eid:
+            matched_el = next(
+                (el for el in elem_list if str(el.get("eid") or "").lower() == req_eid),
+                None,
+            )
+        if matched_el is None and intent_low and elem_list:
+            i_tokens = [t for t in re.findall(r"[a-z0-9äöüß]{2,}", intent_low) if t not in {"the", "and", "for", "with", "click", "select", "fill", "type", "set", "on", "to"}]
+            best_sc = 0
+            for el in elem_list:
+                el_hay = f"{el.get('label') or ''} {el.get('role') or ''} {el.get('type') or ''} {' '.join(el.get('options') or [])}".lower()
+                sc = sum(2 for tok in i_tokens if tok in el_hay)
+                if str(el.get("label") or "").lower() in intent_low and el.get("label"):
+                    sc += 4
+                if sc > best_sc:
+                    best_sc = sc
+                    matched_el = el
+
+        if matched_el:
+            m_type = str(matched_el.get("type") or "").lower()
+            m_label = str(matched_el.get("label") or "").lower()
+            if m_type == "password" or any(p in m_label for p in ("password", "passwort", "cvv", "cvc")):
+                return {
+                    "ok": False,
+                    "error": "Password and sensitive credential fields cannot be targeted by tab actions; use Fill Login instead.",
+                }
+        elif any(p in intent_low for p in ("password", "passwort", "cvv", "cvc", "credit card")):
+            return {
+                "ok": False,
+                "error": "Password and payment credential fields cannot be targeted by tab actions.",
+            }
+
+        eff_eid = str((matched_el or {}).get("eid") or req_eid or "")
+        eff_label = str((matched_el or {}).get("label") or intent or eff_eid or "element")
+        eff_role = str((matched_el or {}).get("role") or "")
+        sel_hint = (matched_el or {}).get("selector_hint")
+        if not sel_hint and hasattr(self, "recipes") and eff_url:
+            rec = self.recipes.get_best_recipe(eff_url)
+            if rec and rec.get("selector"):
+                sel_hint = {"selector": rec["selector"], "label": rec.get("label") or ""}
+        eff_kind = (action_kind or "").strip().lower()
+        if not eff_kind:
+            if eff_role == "select":
+                eff_kind = "select"
+            elif eff_role in ("checkbox", "radio", "switch"):
+                eff_kind = "uncheck" if "uncheck" in intent_low else "check"
+            elif eff_role in ("input", "searchbox", "textarea") or value:
+                eff_kind = "fill"
+            elif "scroll" in intent_low:
+                eff_kind = "scroll"
+            else:
+                eff_kind = "click"
+
+        eid_tag = f"[{eff_eid}] " if eff_eid else ""
+        val_note = f" = '{value}'" if value else ""
+        dom_disp = parsed_u.netloc if parsed_u and parsed_u.netloc else eff_tid
+        gate_summary = f"{eff_kind.capitalize()} {eid_tag}'{eff_label[:48]}'{val_note} on {dom_disp}"
+
+        t_pub = self._create_gated_task_card(
+            conversation_id=cid,
+            agent="actor",
+            goal=intent or gate_summary,
+            log_steps=[f"Identified target {eid_tag}'{eff_label[:60]}' ({eff_role or eff_kind}) on {dom_disp}"],
+            gate_text="Confirm tab action",
+            action_summary=gate_summary,
+            action_payload={
+                "action_type": "tab_action",
+                "tab_id": eff_tid,
+                "url": eff_url,
+                "expected_origin": expected_origin,
+                "eid": eff_eid,
+                "action_kind": eff_kind,
+                "value": str(value or ""),
+                "element_label": eff_label,
+                "selector_hint": sel_hint,
+                "intent": intent or gate_summary,
+            },
+        )
+        return {
+            "ok": True,
+            "task": t_pub,
+            "summary": gate_summary,
+            "tab_id": eff_tid,
+            "eid": eff_eid,
+            "action_kind": eff_kind,
+        }
 
     # ── Section 8.2 (M22): Comparer Agent ────────────────────────────────
     _PRICE_EXTRACT_RE = re.compile(
@@ -5599,14 +9492,37 @@ class SatzSidecarRuntime:
         conversation_id: str,
         sources: list[dict[str, Any]] | None = None,
         goal: str = "compare these",
+        task_id: str = "",
+        step_id: str = "",
     ) -> dict[str, Any]:
-        from src.planck3.web import domain_of
+        from src.planck3.web import domain_of, extract_main_text
 
         cid = str(conversation_id or "default")
-        task = self.create_task(cid, goal=goal or "compare these", agent="comparer")
-        task_id = task["id"]
-
+        tid = (task_id or "").strip()
+        sid = (step_id or "").strip()
         raw_sources = list(sources or [])
+
+        if tid:
+            confirmed_step, gate_err = self._verify_confirmed_send_gate(tid, sid, mark_executed=True)
+            if gate_err or not confirmed_step:
+                return {"ok": False, "error": gate_err or "Task confirmation required."}
+            ap = confirmed_step.get("action_payload") or {}
+            if not raw_sources:
+                if isinstance(ap.get("sources"), list) and ap["sources"]:
+                    raw_sources = list(ap["sources"])
+                elif isinstance(ap.get("urls"), list) and ap["urls"]:
+                    raw_sources = [
+                        {"id": str(u), "url": str(u), "title": str(u), "domain": domain_of(str(u)) or ""}
+                        for u in ap["urls"]
+                        if str(u).strip()
+                    ]
+            if (not goal or goal == "compare these") and ap.get("goal"):
+                goal = str(ap["goal"])
+            task_id = tid
+        else:
+            task = self.create_task(cid, goal=goal or "compare these", agent="comparer")
+            task_id = task["id"]
+
         if not raw_sources:
             with self.store_lock:
                 rows = self.store.db.execute(
@@ -5631,6 +9547,13 @@ class SatzSidecarRuntime:
                     )
 
         selected_sources = raw_sources[:4]
+        if hasattr(self, "behavior") and self.behavior is not None:
+            self.behavior.log_event(
+                "compare_run",
+                domain=str((selected_sources[0] or {}).get("domain") or "") if selected_sources else "",
+                query=goal or "compare these",
+                metadata={"urls": [str(s.get("url") or "") for s in selected_sources]},
+            )
         self.append_task_step(
             task_id,
             f"reading {len(selected_sources)} source(s) for comparison...",
@@ -5641,14 +9564,37 @@ class SatzSidecarRuntime:
         cited_sources: list[dict[str, str]] = []
 
         for idx, src in enumerate(selected_sources, 1):
-            sid = str(src.get("id") or src.get("source_id") or f"src-{idx}")
+            src_id = str(src.get("id") or src.get("source_id") or f"src-{idx}")
             url = str(src.get("url") or f"local://source-{idx}")
             dom = str(src.get("domain") or domain_of(url) or f"source-{idx}").removeprefix("www.")
             title = str(src.get("title") or dom or url).strip()
-            text, extra_lines = self.get_source_text(sid, url, title)
+            text, extra_lines = self.get_source_text(src_id, url, title)
             if not text and src.get("text"):
                 text = str(src["text"])
-            findings = self.get_source_findings(sid, url)
+            if not text and url.startswith(("http://", "https://")):
+                try:
+                    fr = self.web.fetch(url)
+                    html = str((fr or {}).get("html") or "")
+                    if html:
+                        eff_u = str(fr.get("final_url") or url)
+                        ext = extract_main_text(html, eff_u) or ""
+                        fetched_text = str(ext).strip()
+                        if fetched_text:
+                            self.ingest_page(
+                                conversation_id=cid,
+                                source_id=src_id,
+                                url=eff_u,
+                                title=title,
+                                html=html,
+                                visible_text=fetched_text,
+                                capture_mode="fetched",
+                            )
+                            text, extra_lines = self.get_source_text(src_id, eff_u, title)
+                            if not text:
+                                text = fetched_text
+                except Exception as exc:
+                    self.record_error("comparer_fetch", f"{url}: {exc}")
+            findings = self.get_source_findings(src_id, url)
             if not findings and isinstance(src.get("findings"), list):
                 findings = src["findings"]
 
@@ -5668,7 +9614,7 @@ class SatzSidecarRuntime:
             columns.append(
                 {
                     "index": idx,
-                    "source_id": sid,
+                    "source_id": src_id,
                     "url": url,
                     "domain": dom,
                     "title": title,
@@ -5676,8 +9622,24 @@ class SatzSidecarRuntime:
                     "attributes": attrs,
                 }
             )
-            used_source_ids.append(sid)
-            cited_sources.append({"url": url, "title": title, "domain": dom})
+            used_source_ids.append(src_id)
+            comp_img = next(
+                (
+                    str(fd.get("image_url") or "").strip()
+                    for fd in (findings or [])
+                    if isinstance(fd, dict) and self._is_valid_preview_img_url(str(fd.get("image_url") or ""))
+                ),
+                "",
+            )
+            cited_sources.append(
+                {
+                    "url": url,
+                    "title": title,
+                    "domain": dom,
+                    "snippet": self._clean_digest_snippet(text, 240),
+                    "image_url": comp_img,
+                }
+            )
 
         attr_names = ["Price", "Key specs", "Availability", "Source"]
         rows: list[dict[str, Any]] = []
@@ -5798,8 +9760,29 @@ class SatzSidecarRuntime:
         condition: str = "any_change",
         title: str = "",
         initial_value: str | None = None,
+        task_id: str = "",
+        step_id: str = "",
     ) -> dict[str, Any]:
         from src.planck3.web import domain_of
+
+        tid = (task_id or "").strip()
+        sid = (step_id or "").strip()
+        if tid:
+            confirmed_step, gate_err = self._verify_confirmed_send_gate(tid, sid, mark_executed=True)
+            if gate_err or not confirmed_step:
+                return {"ok": False, "error": gate_err or "Task confirmation required."}
+            ap = confirmed_step.get("action_payload") or {}
+            if not (query_or_url or "").strip():
+                query_or_url = str(ap.get("url") or ap.get("query_or_url") or "")
+            if (not condition or condition == "any_change") and ap.get("condition"):
+                condition = str(ap["condition"])
+            if (not title or not title.strip()) and ap.get("title"):
+                title = str(ap["title"])
+            if ap.get("cadence_seconds"):
+                try:
+                    cadence_seconds = float(ap["cadence_seconds"])
+                except Exception:
+                    pass
 
         target = (query_or_url or "").strip()
         if not target:
@@ -5875,7 +9858,13 @@ class SatzSidecarRuntime:
             )
             self.store.db.commit()
 
-        return {
+        task_done = None
+        if tid:
+            done_msg = f"Watch active for {snap_title} ({cond}) every {int(cadence)}s."
+            self.append_task_step(tid, done_msg, kind="log")
+            task_done = self.complete_task(tid, result_md=done_msg)
+
+        res: dict[str, Any] = {
             "ok": True,
             "watch": {
                 "watch_id": watch_id,
@@ -5892,6 +9881,9 @@ class SatzSidecarRuntime:
                 "badge_unread": False,
             },
         }
+        if task_done is not None:
+            res["task"] = task_done
+        return res
 
     def list_watches(self, conversation_id: str | None = None) -> list[dict[str, Any]]:
         cid = (conversation_id or "").strip()
@@ -6158,6 +10150,19 @@ def make_sidecar_server(
                 return self._json(runtime.get_doctor())
             if route_path == "/models/config":
                 return self._json(runtime.get_model_management_config())
+            if route_path == "/providers":
+                return self._json(runtime.providers.list_registry())
+            if route_path == "/translation/config":
+                return self._json(runtime.translator.get_preferences())
+            if route_path == "/i18n/status":
+                lang = query_params.get("lang")
+                return self._json(runtime.i18n.get_status(lang=lang))
+            if route_path == "/i18n/bundle":
+                lang = query_params.get("lang", "en")
+                return self._json(runtime.i18n.get_bundle(lang))
+            if route_path == "/i18n/export":
+                lang = query_params.get("lang", "en")
+                return self._json(runtime.i18n.export_pack(lang))
             if route_path == "/digest":
                 return self._json(runtime.get_digest())
             if route_path == "/news/status":
@@ -6184,6 +10189,16 @@ def make_sidecar_server(
                 return self._json(runtime.news.list_sources(q, cat, band_f, conf_only, rss_only))
             if route_path == "/news/topics":
                 return self._json(runtime.news.list_topics())
+            if route_path == "/news/settings/onboard":
+                from satz_tools.news_settings import build_news_settings_onboarding_payload
+
+                return self._json(build_news_settings_onboarding_payload(runtime))
+            if route_path == "/drives/status":
+                g_sid = query_params.get("google_session_id", "")
+                od_sid = query_params.get("onedrive_session_id", "")
+                return self._json(runtime.drives.get_status(google_session_id=g_sid, onedrive_session_id=od_sid))
+            if route_path == "/drives/create_targets":
+                return self._json(runtime.drives.get_create_targets())
             if route_path == "/sources/previews":
                 cid = query_params.get("conversation_id", "")
                 return self._json(runtime.get_conversation_source_previews(cid))
@@ -6215,9 +10230,14 @@ def make_sidecar_server(
                 return self._json(runtime.passwords.list_profiles())
             if route_path == "/passwords":
                 return self._json(runtime.passwords.get_active_vault_summary())
+            if route_path == "/oauth/google/status":
+                sid = query_params.get("session_id", "")
+                return self._json(runtime.google_auth.get_status(session_id=sid))
             if route_path == "/mail/accounts":
+                runtime.passwords.touch_activity()
                 return self._json(runtime.mail.list_accounts())
             if route_path == "/mail/lane":
+                runtime.passwords.touch_activity()
                 lane_name = query_params.get("name", "inbox")
                 cursor_val = int(query_params.get("cursor", "0") or 0)
                 acct_id = query_params.get("account_id") or None
@@ -6239,12 +10259,55 @@ def make_sidecar_server(
                 q = query_params.get("q", "")
                 acct_id = query_params.get("account_id") or None
                 return self._json(runtime.mail.search_messages(q, account_id=acct_id))
+            if route_path == "/mail/style":
+                return self._json(runtime.mail.get_writing_style_status())
+            if route_path == "/routing/policy":
+                return self._json(runtime.get_routing_policy())
+            if route_path == "/skills":
+                from satz_skills import VERIFIED_SKILL_PRIMITIVES
+
+                skill_entities = [
+                    ent
+                    for ent in runtime.brain.list_entities()
+                    if str(ent.get("type") or "").lower() == "skill"
+                ]
+                return self._json(
+                    {
+                        "ok": True,
+                        "skills": skill_entities,
+                        "proposals": runtime.behavior.list_proposals(),
+                        "recipes": runtime.recipes.list_recipes(limit=50),
+                        "primitives": sorted(VERIFIED_SKILL_PRIMITIVES),
+                    }
+                )
+            if route_path == "/recipes":
+                dom = query_params.get("domain", "")
+                ck = query_params.get("control_key", "")
+                lim = int(query_params.get("limit", "50") or 50)
+                return self._json(
+                    {
+                        "ok": True,
+                        "recipes": runtime.recipes.list_recipes(domain=dom, control_key=ck, limit=lim),
+                    }
+                )
+            if route_path == "/evals":
+                eval_list = runtime.evals.list_evals()
+                return self._json(
+                    {
+                        "ok": True,
+                        "evals": eval_list,
+                        "count": len(eval_list),
+                        "evals_dir": str(runtime.evals.evals_dir),
+                    }
+                )
             if route_path.startswith("/mail/message/"):
                 parts = [p for p in route_path.split("/") if p]
                 if len(parts) == 3 and parts[0] == "mail" and parts[1] == "message":
                     return self._json(runtime.mail.get_message_detail(parts[2]))
                 if len(parts) == 4 and parts[0] == "mail" and parts[1] == "message" and parts[3] == "html":
                     return self._json(runtime.mail.get_sanitized_message_html(parts[2]))
+                if len(parts) == 4 and parts[0] == "mail" and parts[1] == "message" and parts[3] == "unsubscribe":
+                    return self._json(runtime.mail.extract_unsubscribe_info(parts[2]))
                 if len(parts) == 4 and parts[0] == "mail" and parts[1] == "message" and parts[3] == "attachment":
                     part_id = query_params.get("part_id", "")
                     return self._json(runtime.mail.get_attachment_data(parts[2], part_id))
@@ -6274,6 +10337,7 @@ def make_sidecar_server(
                     visible_text=data.get("visible_text"),
                     findings=data.get("findings") if isinstance(data.get("findings"), list) else None,
                     capture_mode=str(data.get("capture_mode") or "") or None,
+                    elements=data.get("elements") if isinstance(data.get("elements"), list) else None,
                 )
                 return self._json(res)
 
@@ -6380,6 +10444,21 @@ def make_sidecar_server(
                         text=str(data.get("text") or ""),
                         kind=str(data.get("kind") or "log"),
                         action_summary=str(data.get("action_summary") or ""),
+                        action_payload=data.get("action_payload") if isinstance(data.get("action_payload"), dict) else None,
+                    )
+                    return self._json({"ok": True, "task": t})
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/task/complete":
+                try:
+                    tid = str(data.get("task_id") or "")
+                    step_txt = str(data.get("step_text") or "").strip()
+                    if step_txt:
+                        runtime.append_task_step(task_id=tid, text=step_txt, kind="log")
+                    t = runtime.complete_task(
+                        task_id=tid,
+                        result_md=str(data.get("result_md") or ""),
                     )
                     return self._json({"ok": True, "task": t})
                 except Exception as e:
@@ -6411,7 +10490,24 @@ def make_sidecar_server(
                 cid = str(data.get("conversation_id") or "default")
                 sources = data.get("sources") if isinstance(data.get("sources"), list) else None
                 goal = str(data.get("goal") or "compare these")
-                return self._json(runtime.run_comparer(cid, sources=sources, goal=goal))
+                res = runtime.run_comparer(
+                    cid,
+                    sources=sources,
+                    goal=goal,
+                    task_id=str(data.get("task_id") or ""),
+                    step_id=str(data.get("step_id") or ""),
+                )
+                return self._json(res, 200 if res.get("ok") else 400)
+
+            if self.path == "/actor/unsubscribe/prepare":
+                cid = str(data.get("conversation_id") or "default")
+                res = runtime.prepare_mail_unsubscribe_task(
+                    conversation_id=cid,
+                    target_query=str(data.get("query") or data.get("sender") or ""),
+                    message_id=str(data.get("message_id") or ""),
+                    sources=data.get("sources") if isinstance(data.get("sources"), list) else None,
+                )
+                return self._json(res, 200 if res.get("ok") else 400)
 
             if self.path == "/watch/add":
                 try:
@@ -6422,8 +10518,10 @@ def make_sidecar_server(
                         condition=str(data.get("condition") or "any_change"),
                         title=str(data.get("title") or ""),
                         initial_value=data.get("initial_value"),
+                        task_id=str(data.get("task_id") or ""),
+                        step_id=str(data.get("step_id") or ""),
                     )
-                    return self._json(res)
+                    return self._json(res, 200 if res.get("ok") else 400)
                 except Exception as e:
                     return self._json({"ok": False, "error": str(e)}, 400)
 
@@ -6443,51 +10541,85 @@ def make_sidecar_server(
                 bookmarks = data.get("bookmarks") or []
                 return self._json(runtime.sync_bookmarks(bookmarks))
 
+            if self.path == "/favicons/resolve":
+                req_items: list[dict[str, Any]] = []
+                if isinstance(data.get("items"), list):
+                    for it in data["items"]:
+                        if isinstance(it, dict):
+                            req_items.append(it)
+                        elif isinstance(it, str):
+                            req_items.append({"url": it})
+                elif isinstance(data.get("urls"), list):
+                    for u in data["urls"]:
+                        req_items.append({"url": str(u)})
+                elif data.get("url"):
+                    req_items.append(
+                        {
+                            "url": str(data.get("url")),
+                            "icon_url": data.get("icon_url"),
+                        }
+                    )
+                force = bool(data.get("force", False))
+                return self._json(runtime.resolve_favicons_batch(req_items, force=force))
+
+            if self.path == "/sources/enrich_previews":
+                req_items = [it for it in (data.get("items") or []) if isinstance(it, dict)]
+                if not req_items and isinstance(data.get("urls"), list):
+                    req_items = [{"url": str(u)} for u in data["urls"] if u]
+                fetch_missing = bool(data.get("fetch_missing", True))
+                try:
+                    previews = runtime.enrich_url_previews(req_items, fetch_missing=fetch_missing, max_items=12)
+                    return self._json({"ok": True, "previews": previews})
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e), "previews": {}}, 500)
+
             if self.path == "/profile/create":
                 try:
-                    res = runtime.passwords.create_profile(
-                        name=str(data.get("name") or ""),
-                        pin=str(data.get("pin") or ""),
-                    )
-                    runtime._refresh_active_profile_brain()
-                    if getattr(runtime, "mail", None) is not None:
-                        runtime.mail.rebind_profile()
-                        runtime.mail.start_sync_threads_for_unlocked_profile()
-                    runtime.bookmark_wake_event.set()
+                    with runtime._fast_http_unlock_context():
+                        res = runtime.passwords.create_profile(
+                            name=str(data.get("name") or ""),
+                            pin=str(data.get("pin") or ""),
+                        )
+                        if getattr(runtime.passwords, "on_profile_change", None) is None:
+                            runtime._refresh_active_profile_brain(defer_heavy=True)
                     return self._json({"ok": True, **res})
                 except Exception as e:
                     return self._json({"ok": False, "error": str(e)}, 400)
 
             if self.path == "/profile/unlock":
                 try:
-                    res = runtime.passwords.unlock_profile(
-                        profile_id=str(data.get("profile_id") or ""),
-                        pin=str(data.get("pin") or ""),
-                    )
-                    runtime._refresh_active_profile_brain()
-                    if getattr(runtime, "mail", None) is not None:
-                        runtime.mail.rebind_profile()
-                        runtime.mail.start_sync_threads_for_unlocked_profile()
-                    runtime.bookmark_wake_event.set()
+                    with runtime._fast_http_unlock_context():
+                        res = runtime.passwords.unlock_profile(
+                            profile_id=str(data.get("profile_id") or ""),
+                            pin=str(data.get("pin") or ""),
+                        )
+                        if getattr(runtime.passwords, "on_profile_change", None) is None:
+                            runtime._refresh_active_profile_brain(defer_heavy=True)
                     return self._json({"ok": True, **res})
                 except Exception as e:
                     return self._json({"ok": False, "error": str(e)}, 400)
 
             if self.path == "/profile/unlock_keychain":
                 try:
-                    res = runtime.passwords.unlock_with_keychain(
-                        profile_id=str(data.get("profile_id") or ""),
-                    )
-                    runtime._refresh_active_profile_brain()
-                    if getattr(runtime, "mail", None) is not None:
-                        runtime.mail.rebind_profile()
-                        runtime.mail.start_sync_threads_for_unlocked_profile()
-                    runtime.bookmark_wake_event.set()
+                    with runtime._fast_http_unlock_context():
+                        res = runtime.passwords.unlock_with_keychain(
+                            profile_id=str(data.get("profile_id") or ""),
+                        )
+                        if getattr(runtime.passwords, "on_profile_change", None) is None:
+                            runtime._refresh_active_profile_brain(defer_heavy=True)
                     return self._json({"ok": True, **res})
                 except Exception as e:
                     return self._json({"ok": False, "error": str(e)}, 400)
 
             if self.path == "/profile/lock":
+                if getattr(runtime, "google_auth", None) is not None:
+                    runtime.google_auth.stop_pending_servers()
+                try:
+                    from satz_tools.settings_staging import clear_ephemeral_settings_state
+
+                    clear_ephemeral_settings_state(runtime)
+                except Exception:
+                    pass
                 res = runtime.passwords.lock_profile()
                 return self._json({"ok": True, **res})
 
@@ -6547,6 +10679,158 @@ def make_sidecar_server(
                 try:
                     vault = runtime.passwords.delete_service_credential(str(data.get("service") or ""))
                     return self._json({"ok": True, "vault": vault})
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/oauth/google/config":
+                try:
+                    res = runtime.google_auth.save_client_config(
+                        client_id=str(data.get("client_id") or ""),
+                        client_secret=str(data.get("client_secret") or ""),
+                        client_secret_json=str(data.get("client_secret_json") or ""),
+                        scopes=data.get("scopes"),
+                        redirect_port=int(data["redirect_port"]) if data.get("redirect_port") else None,
+                    )
+                    return self._json(res)
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/oauth/google/start":
+                try:
+                    res = runtime.google_auth.start_login(
+                        client_id=str(data.get("client_id") or ""),
+                        client_secret=str(data.get("client_secret") or ""),
+                        client_secret_json=str(data.get("client_secret_json") or ""),
+                        scopes=data.get("scopes"),
+                        connect_gmail=bool(data.get("connect_gmail", True)),
+                        connect_drive=bool(data.get("connect_drive", False)),
+                        login_hint=str(data.get("login_hint") or ""),
+                        hd=str(data.get("hd") or ""),
+                        redirect_port=int(data["redirect_port"]) if data.get("redirect_port") else None,
+                        redirect_host=str(data.get("redirect_host") or "127.0.0.1"),
+                    )
+                    return self._json(res)
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/drives/list":
+                runtime.passwords.touch_activity()
+                return self._json(
+                    runtime.drives.list_items(
+                        folder_key=str(data.get("folder_key") or ""),
+                        provider=str(data.get("provider") or "all"),
+                        file_type=str(data.get("file_type") or "all"),
+                        owner=str(data.get("owner") or "all"),
+                        query=str(data.get("query") or ""),
+                        limit=int(data.get("limit") or 300),
+                    )
+                )
+
+            if self.path == "/drives/sync":
+                try:
+                    provs = data.get("providers") if isinstance(data.get("providers"), list) else None
+                    full_resync = bool(data.get("full_resync", False))
+                    if data.get("blocking"):
+                        res = runtime.drives.sync_now(providers=provs, full_resync=full_resync)
+                    else:
+                        res = runtime.drives.trigger_background_sync(providers=provs, full_resync=full_resync)
+                    return self._json(res, 200 if res.get("ok") else 400)
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/drives/google/connect":
+                try:
+                    res = runtime.drives.start_google_drive_connect(
+                        client_id=str(data.get("client_id") or ""),
+                        client_secret=str(data.get("client_secret") or ""),
+                        client_secret_json=str(data.get("client_secret_json") or ""),
+                        login_hint=str(data.get("login_hint") or ""),
+                        hd=str(data.get("hd") if data.get("hd") is not None else "hellofresh.com"),
+                        redirect_port=int(data["redirect_port"]) if data.get("redirect_port") else None,
+                    )
+                    return self._json(res)
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/drives/onedrive/config":
+                try:
+                    res = runtime.drives.onedrive_auth.save_client_config(
+                        client_id=str(data.get("client_id") or ""),
+                        tenant_id=str(data.get("tenant_id") or ""),
+                        client_secret=str(data.get("client_secret") or ""),
+                        redirect_port=int(data["redirect_port"]) if data.get("redirect_port") else None,
+                    )
+                    return self._json(res)
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/drives/onedrive/start":
+                try:
+                    res = runtime.drives.onedrive_auth.start_login(
+                        client_id=str(data.get("client_id") or ""),
+                        tenant_id=str(data.get("tenant_id") or ""),
+                        client_secret=str(data.get("client_secret") or ""),
+                        login_hint=str(data.get("login_hint") or ""),
+                        redirect_port=int(data["redirect_port"]) if data.get("redirect_port") else None,
+                    )
+                    return self._json(res)
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/drives/disconnect":
+                try:
+                    res = runtime.drives.disconnect_provider(
+                        str(data.get("provider") or ""),
+                        purge_index=bool(data.get("purge_index", True)),
+                        clear_client_config=bool(data.get("clear_client_config", False)),
+                    )
+                    return self._json(res)
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/oauth/google/refresh":
+                try:
+                    runtime.google_auth.get_valid_access_token(force_refresh=True)
+                    return self._json(runtime.google_auth.get_status())
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/oauth/google/disconnect":
+                try:
+                    clear_cfg = bool(data.get("clear_client_config", False))
+                    return self._json(runtime.google_auth.disconnect(clear_client_config=clear_cfg))
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/oauth/google/connect_gmail":
+                try:
+                    res = runtime.mail.connect_google_oauth_account(
+                        email=str(data.get("email") or ""),
+                        label=str(data.get("label") or ""),
+                        sync_days=int(data.get("sync_days") or 30),
+                        start_sync=bool(data.get("start_sync", True)),
+                    )
+                    return self._json(res)
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
                 except Exception as e:
                     return self._json({"ok": False, "error": str(e)}, 400)
 
@@ -6624,17 +10908,82 @@ def make_sidecar_server(
                 res = runtime.mail.undo_send(outbox_id)
                 return self._json(res, 200 if res.get("ok") else 400)
 
+            if self.path == "/mail/unsubscribe/execute":
+                res = runtime.execute_mail_unsubscribe_task(
+                    message_id=str(data.get("message_id") or ""),
+                    url=str(data.get("url") or ""),
+                    method_type=str(data.get("method_type") or ""),
+                    task_id=str(data.get("task_id") or ""),
+                    step_id=str(data.get("step_id") or ""),
+                    archive_sender=bool(data.get("archive_sender", False)),
+                    confirm_explicit=bool(data.get("confirm_explicit", False)),
+                )
+                return self._json(res, 200 if res.get("ok") else 400)
+
+            if self.path == "/mail/sender/hide":
+                sender = str(data.get("sender") or "")
+                tid = str(data.get("task_id") or "").strip()
+                res = runtime.mail.hide_sender_messages(sender)
+                if res.get("ok") and hasattr(runtime, "behavior"):
+                    runtime.behavior.log_event(
+                        "mail_hide_sender",
+                        query=sender,
+                        metadata={"sender": sender, "hidden_count": int(res.get("hidden_count") or 0)},
+                    )
+                if tid and res.get("ok"):
+                    done_txt = f"Archived {res.get('hidden_count', 0)} email(s) from {res.get('sender')} locally."
+                    runtime.append_task_step(tid, done_txt, kind="log")
+                    res["task"] = runtime.complete_task(tid, result_md=done_txt)
+                return self._json(res, 200 if res.get("ok") else 400)
+
             if self.path == "/mail/eval/label":
                 mid = str(data.get("message_id") or "")
                 lbl = str(data.get("label") or "")
                 ext_ok = data.get("extract_ok")
                 return self._json(runtime.mail.record_eval_label(mid, lbl, extract_ok=ext_ok))
 
+            if self.path == "/mail/style/distill":
+                force = bool(data.get("force", True))
+                return self._json(runtime.mail.distill_writing_style(force=force))
+
+            if self.path == "/telemetry/signal":
+                res = runtime.record_harness_signal(
+                    query_type=str(data.get("query_type") or ""),
+                    prompt=str(data.get("prompt") or ""),
+                    model_id=str(data.get("model_id") or data.get("model") or "gemma-4-e4b"),
+                    source_count=int(data.get("source_count") or 0),
+                    chars_cut=int(data.get("chars_cut") or 0),
+                    outcome_signal=str(data.get("outcome_signal") or "success"),
+                    web_enabled=bool(data.get("web_enabled", False)),
+                    mail_enabled=bool(data.get("mail_enabled", False)),
+                    target_model=str(data.get("target_model") or ""),
+                )
+                return self._json(res, 200 if res.get("ok") else 400)
+
+            if self.path == "/telemetry/reset":
+                qtype = str(data.get("query_type") or "")
+                return self._json(runtime.reset_routing_telemetry(query_type=qtype))
+
             if self.path == "/news/refresh":
                 try:
                     force = bool(data.get("force", True))
                     include_search = bool(data.get("include_search", False))
-                    return self._json(runtime.news.refresh_news_feeds(force=force, include_topic_search=include_search))
+                    process_brain = bool(data.get("process_brain", True))
+                    return self._json(
+                        runtime.run_news_sync_pass(
+                            force=force,
+                            include_topic_search=include_search,
+                            process_brain=process_brain,
+                        )
+                    )
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 500)
+
+            if self.path == "/news/sync_brain":
+                try:
+                    lim = int(data.get("limit") or 12)
+                    force = bool(data.get("force", False))
+                    return self._json(runtime.news.process_top_stories_to_brain(limit=lim, force=force))
                 except Exception as e:
                     return self._json({"ok": False, "error": str(e)}, 500)
 
@@ -6642,12 +10991,333 @@ def make_sidecar_server(
                 q = str(data.get("question") or "").strip()
                 if not q:
                     return self._json({"ok": False, "error": "question required"}, 400)
+                if hasattr(runtime, "behavior") and runtime.behavior is not None:
+                    runtime.behavior.log_event("news_briefing", query=q)
                 try:
                     open_srcs = data.get("sources") if isinstance(data.get("sources"), list) else None
                     roles_ovr = data.get("roles") if isinstance(data.get("roles"), dict) else None
                     return self._json(runtime.news.answer_news_question(q, open_sources=open_srcs, roles_override=roles_ovr))
                 except Exception as e:
                     return self._json({"ok": False, "error": str(e)}, 500)
+
+            if self.path == "/news/chat_answer_stream":
+                q = str(data.get("question") or "").strip()
+                if not q:
+                    return self._json({"ok": False, "error": "question required"}, 400)
+                if hasattr(runtime, "behavior") and runtime.behavior is not None:
+                    runtime.behavior.log_event("news_briefing", query=q)
+                open_srcs = data.get("sources") if isinstance(data.get("sources"), list) else None
+                roles_ovr = data.get("roles") if isinstance(data.get("roles"), dict) else None
+
+                self.send_response(200)
+                self._send_cors_headers()
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                try:
+                    for event in runtime.news.stream_news_question(
+                        q,
+                        open_sources=open_srcs,
+                        roles_override=roles_ovr,
+                    ):
+                        line = f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                        self.wfile.write(line.encode("utf-8"))
+                        self.wfile.flush()
+                except Exception as e:
+                    runtime.record_error("news_chat_stream", e)
+                    err_payload = {"ok": False, "error": str(e), "done": True}
+                    err_line = f"data: {json.dumps(err_payload, ensure_ascii=False)}\n\n"
+                    self.wfile.write(err_line.encode("utf-8"))
+                    self.wfile.flush()
+                return
+
+            if self.path == "/news/perspectives_stream":
+                topic = str(data.get("topic") or data.get("question") or "").strip()
+                cid = str(data.get("cluster_id") or "").strip()
+                if not topic and not cid:
+                    return self._json({"ok": False, "error": "topic or cluster_id required"}, 400)
+                if hasattr(runtime, "behavior") and runtime.behavior is not None:
+                    runtime.behavior.log_event("news_perspectives", query=topic or cid)
+                roles_ovr = data.get("roles") if isinstance(data.get("roles"), dict) else None
+                prior_msgs = data.get("messages") if isinstance(data.get("messages"), list) else None
+
+                self.send_response(200)
+                self._send_cors_headers()
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                try:
+                    for event in runtime.news.stream_topic_perspectives(
+                        topic=topic,
+                        cluster_id=cid,
+                        roles_override=roles_ovr,
+                        prior_messages=prior_msgs,
+                    ):
+                        line = f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                        self.wfile.write(line.encode("utf-8"))
+                        self.wfile.flush()
+                except Exception as e:
+                    runtime.record_error("news_perspectives_stream", e)
+                    err_payload = {"ok": False, "error": str(e), "done": True}
+                    err_line = f"data: {json.dumps(err_payload, ensure_ascii=False)}\n\n"
+                    self.wfile.write(err_line.encode("utf-8"))
+                    self.wfile.flush()
+                return
+
+            if self.path == "/skills/mine":
+                try:
+                    newly = runtime.behavior.mine_proposals(min_interval_secs=0.0)
+                    return self._json(
+                        {
+                            "ok": True,
+                            "newly_mined": newly,
+                            "proposals": runtime.behavior.list_proposals(),
+                        }
+                    )
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/skills/create":
+                from satz_skills import save_skill_to_brain
+
+                try:
+                    ent = save_skill_to_brain(runtime, data, actor="user/skill_create")
+                    return self._json({"ok": True, "skill": ent})
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/skills/proposals/accept":
+                pid = str(data.get("proposal_id") or "").strip()
+                try:
+                    return self._json(runtime.behavior.accept_proposal(pid))
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except KeyError as ke:
+                    return self._json({"ok": False, "error": str(ke)}, 404)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/skills/proposals/reject":
+                pid = str(data.get("proposal_id") or "").strip()
+                try:
+                    return self._json(runtime.behavior.reject_proposal(pid))
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path in ("/skills/save_from_turn", "/actor/save_as_skill"):
+                from satz_skills import build_skill_from_task_or_turn
+
+                try:
+                    ent = build_skill_from_task_or_turn(
+                        runtime,
+                        conversation_id=str(data.get("conversation_id") or "default"),
+                        task_id=str(data.get("task_id") or ""),
+                        name=str(data.get("name") or ""),
+                        user_prompt=str(data.get("user_prompt") or ""),
+                        assistant_text=str(data.get("assistant_text") or ""),
+                        sources=data.get("sources") if isinstance(data.get("sources"), list) else None,
+                    )
+                    return self._json({"ok": True, "skill": ent})
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/skills/run":
+                slug = str(data.get("slug") or data.get("name") or "").strip()
+                cid = str(data.get("conversation_id") or "default")
+                try:
+                    res = runtime.skills.start_skill(slug, conversation_id=cid)
+                    return self._json(res, 200 if res.get("ok") else 400)
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except KeyError as ke:
+                    return self._json({"ok": False, "error": str(ke)}, 404)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/skills/continue":
+                tid = str(data.get("task_id") or "").strip()
+                sid = str(data.get("step_id") or "").strip()
+                tok = str(data.get("confirm_token") or "").strip()
+                try:
+                    res = runtime.skills.continue_after_confirm(tid, sid, tok)
+                    return self._json(res, 200 if res.get("ok") else 400)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/recipes/record":
+                try:
+                    res = runtime.recipes.record_success(
+                        domain=str(data.get("domain") or ""),
+                        control_key=str(data.get("control_key") or "control"),
+                        selector=str(data.get("selector") or ""),
+                        label=str(data.get("label") or ""),
+                        action_kind=str(data.get("action_kind") or "click"),
+                        sample_url=str(data.get("sample_url") or ""),
+                    )
+                    return self._json(res, 200 if res.get("ok") else 400)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/behavior/log":
+                try:
+                    runtime.behavior.log_event(
+                        str(data.get("event_type") or ""),
+                        domain=str(data.get("domain") or ""),
+                        url=str(data.get("url") or ""),
+                        query=str(data.get("query") or ""),
+                        metadata=data.get("metadata") if isinstance(data.get("metadata"), dict) else None,
+                    )
+                    return self._json({"ok": True})
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/skills/redteam":
+                from satz_evals import run_skill_redteam_gate, validate_actor_rule_redteam
+
+                try:
+                    if isinstance(data.get("recipe"), dict):
+                        r_obj = data["recipe"]
+                        report = validate_actor_rule_redteam(
+                            domain=str(r_obj.get("domain") or ""),
+                            control_key=str(r_obj.get("control_key") or "control"),
+                            selector=str(r_obj.get("selector") or ""),
+                            label=str(r_obj.get("label") or ""),
+                            action_kind=str(r_obj.get("action_kind") or "click"),
+                        )
+                        return self._json(report, 200 if report.get("passed") else 400)
+                    if isinstance(data.get("skill"), dict):
+                        report = run_skill_redteam_gate(data["skill"], runtime=runtime)
+                        return self._json(report, 200 if report.get("passed") else 400)
+                    if data.get("proposal_id"):
+                        pid = str(data.get("proposal_id") or "")
+                        prop = next((p for p in runtime.behavior.list_proposals(include_resolved=True) if p.get("proposal_id") == pid), None)
+                        if not prop:
+                            return self._json({"ok": False, "error": f"Proposal '{pid}' not found"}, 404)
+                        report = run_skill_redteam_gate(prop["skill"], runtime=runtime)
+                        return self._json({"proposal_id": pid, **report}, 200 if report.get("passed") else 400)
+                    if data.get("slug"):
+                        slug = str(data.get("slug") or "")
+                        ent = runtime.skills._load_skill_by_slug(slug)
+                        attrs = ent.get("attributes") or {}
+                        report = run_skill_redteam_gate(
+                            {
+                                "name": ent.get("name") or slug,
+                                "summary": ent.get("summary") or "",
+                                "trigger_examples": attrs.get("trigger_examples") or [],
+                                "step_graph": attrs.get("step_graph") or [],
+                                "send_gate_steps": attrs.get("send_gate_steps") or [],
+                                "domain_recipes": attrs.get("domain_recipes") or [],
+                            },
+                            runtime=runtime,
+                        )
+                        return self._json({"slug": slug, **report}, 200 if report.get("passed") else 400)
+
+                    # Full audit across all saved skills, pending proposals, and domain recipes
+                    audited: list[dict[str, Any]] = []
+                    if not runtime.brain.locked:
+                        for ent in runtime.brain.list_entities():
+                            if str(ent.get("type") or "").lower() != "skill":
+                                continue
+                            attrs = ent.get("attributes") or {}
+                            rep = run_skill_redteam_gate(
+                                {
+                                    "name": ent.get("name") or "",
+                                    "summary": ent.get("summary") or "",
+                                    "trigger_examples": attrs.get("trigger_examples") or [],
+                                    "step_graph": attrs.get("step_graph") or [],
+                                    "send_gate_steps": attrs.get("send_gate_steps") or [],
+                                    "domain_recipes": attrs.get("domain_recipes") or [],
+                                },
+                                runtime=runtime,
+                            )
+                            audited.append({"kind": "skill", "id": ent.get("slug"), "name": ent.get("name"), **rep})
+                    for prop in runtime.behavior.list_proposals():
+                        rep = run_skill_redteam_gate(prop["skill"], runtime=runtime)
+                        audited.append({"kind": "proposal", "id": prop.get("proposal_id"), "name": prop["skill"].get("name"), **rep})
+                    for rec in runtime.recipes.list_recipes(limit=50):
+                        rep = validate_actor_rule_redteam(
+                            domain=str(rec.get("domain") or ""),
+                            control_key=str(rec.get("control_key") or "control"),
+                            selector=str(rec.get("selector") or ""),
+                            label=str(rec.get("label") or ""),
+                            action_kind=str(rec.get("action_kind") or "click"),
+                        )
+                        audited.append({"kind": "recipe", "id": f"{rec.get('domain')}:{rec.get('control_key')}", "name": rec.get("domain"), **rep})
+                    all_ok = all(a.get("passed", False) for a in audited)
+                    return self._json(
+                        {
+                            "ok": all_ok,
+                            "passed": all_ok,
+                            "audited_count": len(audited),
+                            "passed_count": sum(1 for a in audited if a.get("passed")),
+                            "failed_count": sum(1 for a in audited if not a.get("passed")),
+                            "items": audited,
+                        }
+                    )
+                except KeyError as ke:
+                    return self._json({"ok": False, "error": str(ke)}, 404)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/evals/capture":
+                try:
+                    ev_case = runtime.evals.capture_failure(
+                        user_msg=str(data.get("user_msg") or ""),
+                        bad_assistant_answer=str(data.get("bad_assistant_answer") or ""),
+                        sources=data.get("sources") if isinstance(data.get("sources"), list) else None,
+                        prior_messages=data.get("prior_messages") if isinstance(data.get("prior_messages"), list) else None,
+                        model_id=str(data.get("model_id") or ""),
+                        web_enabled=bool(data.get("web_enabled", False)),
+                        mail_enabled=bool(data.get("mail_enabled", True)),
+                        tools_used=data.get("tools_used") if isinstance(data.get("tools_used"), list) else None,
+                        citation_check=data.get("citation_check") if isinstance(data.get("citation_check"), list) else None,
+                        prepared_tasks=data.get("tasks") if isinstance(data.get("tasks"), list) else None,
+                        expected=data.get("expected") if isinstance(data.get("expected"), dict) else None,
+                        title=str(data.get("title") or ""),
+                        notes=str(data.get("notes") or ""),
+                    )
+                    return self._json({"ok": True, "eval_case": ev_case})
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/evals/run":
+                try:
+                    targets = data.get("targets") if isinstance(data.get("targets"), list) and data.get("targets") else ("local_gemma", "cloud")
+                    mode = str(data.get("mode") or "deterministic")
+                    eval_id = str(data.get("eval_id") or "").strip()
+                    if eval_id:
+                        res = runtime.evals.run_eval_case(eval_id, targets=targets, mode=mode)
+                        return self._json({"ok": res.get("passed", False), "results": [res], **res})
+                    res = runtime.evals.run_all(targets=targets, mode=mode)
+                    return self._json(res)
+                except KeyError as ke:
+                    return self._json({"ok": False, "error": str(ke)}, 404)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/evals/update":
+                try:
+                    eid = str(data.get("eval_id") or "").strip()
+                    updated = runtime.evals.update_eval(eid, data)
+                    return self._json({"ok": True, "eval_case": updated})
+                except KeyError as ke:
+                    return self._json({"ok": False, "error": str(ke)}, 404)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/evals/delete":
+                try:
+                    eid = str(data.get("eval_id") or "").strip()
+                    deleted = runtime.evals.delete_eval(eid)
+                    return self._json({"ok": deleted, "eval_id": eid}, 200 if deleted else 404)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
 
             if self.path == "/news/reweigh":
                 meta = data.get("answer_meta")
@@ -6657,7 +11327,7 @@ def make_sidecar_server(
 
             if self.path == "/news/translate":
                 aid = str(data.get("article_id") or "")
-                tlang = str(data.get("target_lang") or "en")
+                tlang = str(data.get("target_lang") or "")
                 try:
                     return self._json(runtime.news.translate_article(aid, target_lang=tlang))
                 except Exception as e:
@@ -6691,19 +11361,406 @@ def make_sidecar_server(
                     runtime.store.db.commit()
                 return self._json({"ok": True, "cluster_id": cid})
 
+            if self.path == "/providers/infer":
+                raw_in = str(data.get("input") or data.get("query") or data.get("url") or "")
+                cat_id = str(data.get("category_id") or "")
+                return self._json(runtime.providers.infer_provider_template(raw_in, category_id=cat_id))
+
+            if self.path == "/providers/category/upsert":
+                try:
+                    return self._json(
+                        runtime.providers.upsert_category(
+                            category_id=str(data.get("category_id") or ""),
+                            label=str(data.get("label") or ""),
+                            parent_group=str(data.get("parent_group") or "custom"),
+                            description=str(data.get("description") or ""),
+                            sort_order=data.get("sort_order"),
+                        )
+                    )
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/providers/category/delete":
+                try:
+                    res = runtime.providers.delete_category(str(data.get("category_id") or ""))
+                    return self._json(res, 200 if res.get("ok") else 400)
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/providers/upsert":
+                try:
+                    creds = data.get("credentials") if isinstance(data.get("credentials"), dict) else None
+                    doms = data.get("domains") if isinstance(data.get("domains"), list) else None
+                    res = runtime.providers.upsert_provider(
+                        category_id=str(data.get("category_id") or ""),
+                        display_name=str(data.get("display_name") or ""),
+                        provider_id=str(data.get("provider_id") or data.get("id") or ""),
+                        provider_slug=str(data.get("provider_slug") or ""),
+                        mode=str(data.get("mode") or "web_account"),
+                        api_driver=str(data.get("api_driver") or ""),
+                        domains=doms,
+                        url_template=str(data.get("url_template") or ""),
+                        vault_service=str(data.get("vault_service") or ""),
+                        constraints_note=str(data.get("constraints_note") or ""),
+                        priority=data.get("priority"),
+                        enabled=bool(data.get("enabled", True)),
+                        credentials=creds,
+                    )
+                    return self._json(res)
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/providers/reorder":
+                try:
+                    return self._json(
+                        runtime.providers.reorder_providers(
+                            category_id=str(data.get("category_id") or ""),
+                            ordered_ids=data.get("ordered_ids") if isinstance(data.get("ordered_ids"), list) else [],
+                        )
+                    )
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/providers/delete":
+                try:
+                    res = runtime.providers.delete_provider(
+                        str(data.get("provider_id") or data.get("id") or ""),
+                        delete_credentials=bool(data.get("delete_credentials", False)),
+                    )
+                    return self._json(res, 200 if res.get("ok") else 400)
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/providers/test":
+                try:
+                    res = runtime.providers.test_provider(
+                        str(data.get("provider_id") or data.get("id") or ""),
+                        sample_query=str(data.get("sample_query") or "winter jacket"),
+                    )
+                    return self._json(res, 200 if res.get("ok") else 400)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/providers/suggestion/resolve":
+                try:
+                    res = runtime.providers.resolve_suggestion(
+                        str(data.get("suggestion_id") or ""),
+                        action=str(data.get("action") or "accept"),
+                    )
+                    return self._json(res, 200 if res.get("ok") else 400)
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/providers/set_default":
+                res = runtime.execute_set_default_provider_task(
+                    task_id=str(data.get("task_id") or ""),
+                    step_id=str(data.get("step_id") or ""),
+                )
+                return self._json(res, 200 if res.get("ok") else 400)
+
+            if self.path == "/translation/config/update":
+                try:
+                    res = runtime.translator.update_preferences(data)
+                    queued_mail = 0
+                    if data.get("backfill_recent"):
+                        queued_mail = runtime.mail.pipeline.enqueue_untranslated_recent()
+                    return self._json({**res, "queued_mail": queued_mail})
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/translation/detect":
+                from satz_translate import detect_language, get_language_info
+
+                txt = str(data.get("text") or "")
+                hint = str(data.get("hint_lang") or "")
+                code = detect_language(txt, hint_lang=hint)
+                return self._json({"ok": True, "language": code, "info": get_language_info(code)})
+
+            if self.path == "/translation/mail":
+                mid = str(data.get("message_id") or "")
+                tlang = str(data.get("target_lang") or "")
+                force = bool(data.get("force", False))
+                try:
+                    res = runtime.mail.translate_message(mid, target_lang=tlang, force=force)
+                    return self._json(res, 200 if res.get("ok") else 400)
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/translation/mail/backfill":
+                try:
+                    queued_mail = runtime.mail.pipeline.enqueue_untranslated_recent()
+                    news_tr = runtime.news.translate_recent_untranslated()
+                    return self._json({"ok": True, "queued_mail": queued_mail, **news_tr})
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/translation/news/sync_translate":
+                try:
+                    lim = int(data.get("limit") or 30)
+                    res = runtime.news.translate_recent_untranslated(limit=lim, recluster=True)
+                    return self._json({"ok": True, **res})
+                except PermissionError as pe:
+                    return self._json({"ok": False, "error": str(pe)}, 403)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/translation/page":
+                page_url = str(data.get("url") or "")
+                page_title = str(data.get("title") or "")
+                html_lang = str(data.get("html_lang") or "")
+                raw_blocks = data.get("blocks") if isinstance(data.get("blocks"), list) else []
+                force = bool(data.get("force", False))
+                want_stream = bool(data.get("stream", False))
+
+                if not want_stream:
+                    try:
+                        res = runtime.translator.translate_page_payload(
+                            url=page_url,
+                            title=page_title,
+                            blocks=raw_blocks,
+                            html_lang=html_lang,
+                            force=force,
+                        )
+                        return self._json(res, 200 if res.get("ok") else 400)
+                    except Exception as e:
+                        return self._json({"ok": False, "error": str(e)}, 400)
+
+                self.send_response(200)
+                self._send_cors_headers()
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                self.end_headers()
+
+                def _emit_sse(ev: dict[str, Any]) -> None:
+                    line = f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                    self.wfile.write(line.encode("utf-8"))
+                    self.wfile.flush()
+
+                try:
+                    def _on_batch(delta: dict[str, str], batch_idx: int, total_b: int) -> None:
+                        _emit_sse({
+                            "phase": "batch",
+                            "batch": batch_idx,
+                            "total_batches": total_b,
+                            "translations": delta,
+                        })
+
+                    res = runtime.translator.translate_page_payload(
+                        url=page_url,
+                        title=page_title,
+                        blocks=raw_blocks,
+                        html_lang=html_lang,
+                        force=force,
+                        on_batch_done=_on_batch,
+                    )
+                    _emit_sse({"phase": "done", **res})
+                except Exception as e:
+                    runtime.record_error("page_translate_sse", e)
+                    try:
+                        _emit_sse({"phase": "error", "ok": False, "error": str(e)})
+                    except Exception:
+                        pass
+                return
+
+            if self.path == "/i18n/translate":
+                lang = str(data.get("lang") or "en")
+                catalog = data.get("catalog") if isinstance(data.get("catalog"), dict) else None
+                model_override = str(data.get("model") or "").strip() or None
+                only_missing = bool(data.get("only_missing", True))
+                force = bool(data.get("force", False))
+                activate = bool(data.get("activate", True))
+                background = bool(data.get("background", False))
+                switch_only = bool(data.get("switch_only", False))
+                want_stream = bool(data.get("stream", False))
+
+                if switch_only:
+                    cfg = runtime.i18n.set_active_locale(lang)
+                    status = runtime.i18n.get_status(lang=lang, catalog=catalog)
+                    target = status.get("target") or {}
+                    if (
+                        cfg.get("active_locale") != "en"
+                        and bool(data.get("sync_missing", True))
+                        and (int(target.get("missing") or 0) > 0 or int(target.get("stale") or 0) > 0)
+                    ):
+                        job_res = runtime.i18n.start_background_translation(
+                            lang,
+                            catalog=catalog,
+                            model=model_override,
+                            only_missing=True,
+                            force=False,
+                            activate=activate,
+                        )
+                        status["background_job"] = job_res
+                    return self._json(status)
+
+                if background:
+                    res = runtime.i18n.start_background_translation(
+                        lang,
+                        catalog=catalog,
+                        model=model_override,
+                        only_missing=only_missing,
+                        force=force,
+                        activate=activate,
+                    )
+                    return self._json(res, 200 if res.get("ok") else 400)
+
+                if not want_stream:
+                    res = runtime.i18n.translate_sync(
+                        lang,
+                        catalog=catalog,
+                        model=model_override,
+                        only_missing=only_missing,
+                        force=force,
+                        activate=activate,
+                    )
+                    return self._json(res, 200 if res.get("ok") else 400)
+
+                self.send_response(200)
+                self._send_cors_headers()
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                self.end_headers()
+
+                def _emit_i18n_sse(ev: dict[str, Any]) -> None:
+                    line = f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                    self.wfile.write(line.encode("utf-8"))
+                    self.wfile.flush()
+
+                try:
+                    pre = runtime.i18n.get_status(lang=lang, catalog=catalog)
+                    _emit_i18n_sse({
+                        "phase": "start",
+                        "lang": (pre.get("target") or {}).get("lang", lang),
+                        "label": (pre.get("target") or {}).get("label", lang),
+                        "dir": (pre.get("target") or {}).get("dir", "ltr"),
+                        "model": model_override or pre.get("default_model", "gemma-4-e4b"),
+                        "missing": (pre.get("target") or {}).get("missing", 0),
+                        "stale": (pre.get("target") or {}).get("stale", 0),
+                    })
+
+                    def _on_i18n_batch(
+                        delta: dict[str, Any],
+                        batch_idx: int,
+                        total_batches: int,
+                        completed: int,
+                        total_keys: int,
+                    ) -> None:
+                        _emit_i18n_sse({
+                            "phase": "batch",
+                            "batch": batch_idx,
+                            "total_batches": total_batches,
+                            "completed": completed,
+                            "total": total_keys,
+                            "entries": delta,
+                        })
+
+                    res = runtime.i18n.translate_sync(
+                        lang,
+                        catalog=catalog,
+                        model=model_override,
+                        only_missing=only_missing,
+                        force=force,
+                        activate=activate,
+                        on_batch_done=_on_i18n_batch,
+                    )
+                    _emit_i18n_sse({"phase": "done", **res})
+                except Exception as e:
+                    runtime.record_error("i18n_translate_sse", e)
+                    try:
+                        _emit_i18n_sse({"phase": "error", "ok": False, "error": str(e)})
+                    except Exception:
+                        pass
+                return
+
+            if self.path == "/i18n/cancel":
+                lang = str(data.get("lang") or "").strip() or None
+                return self._json(runtime.i18n.cancel_translation(lang=lang))
+
+            if self.path == "/i18n/override":
+                lang = str(data.get("lang") or "")
+                key = str(data.get("key") or "")
+                text = data.get("text")
+                one = data.get("one")
+                reset = bool(data.get("reset", False))
+                catalog = data.get("catalog") if isinstance(data.get("catalog"), dict) else None
+                res = runtime.i18n.override_entry(
+                    lang,
+                    key,
+                    str(text) if text is not None else None,
+                    str(one) if one is not None else None,
+                    reset=reset,
+                    catalog=catalog,
+                )
+                return self._json(res, 200 if res.get("ok") else 400)
+
+            if self.path == "/i18n/import":
+                pack = data.get("pack") if isinstance(data.get("pack"), dict) else data
+                activate = bool(data.get("activate", True))
+                res = runtime.i18n.import_pack(pack, activate=activate)
+                return self._json(res, 200 if res.get("ok") else 400)
+
             if self.path == "/chat/summarize":
                 messages = data.get("messages") or []
                 prev_summary = str(data.get("summary") or "")
                 summary = runtime.summarize_conversation(messages, prev_summary=prev_summary)
                 return self._json({"ok": True, "summary": summary})
 
+            if self.path == "/settings/stage_file":
+                from satz_tools.settings_staging import stage_settings_file
+
+                res = stage_settings_file(
+                    runtime,
+                    filename=str(data.get("filename") or ""),
+                    mime=str(data.get("mime") or "text/plain"),
+                    content_text=str(data.get("content_text") or ""),
+                )
+                return self._json(res, 200 if res.get("ok") else 400)
+
+            if self.path == "/settings/confirm_gate":
+                from satz_tools.settings_staging import execute_confirm_gate
+
+                res = execute_confirm_gate(
+                    runtime,
+                    confirm_token=str(data.get("confirm_token") or ""),
+                    action_payload=data.get("action_payload") if isinstance(data.get("action_payload"), dict) else None,
+                )
+                return self._json(res, 200 if res.get("ok") else 400)
+
             if self.path == "/chat":
+                runtime.passwords.touch_activity()
                 messages = data.get("messages") or []
                 sources = data.get("sources") or []
                 web_enabled = bool(data.get("web", False))
                 mail_enabled = bool(data.get("mail", False))
+                drives_enabled = bool(data.get("drives", False))
                 conversation_summary = str(data.get("summary") or "")
                 model_id = str(data.get("model") or "gemma-4-e4b")
+                conversation_id = str(data.get("conversation_id") or "")
+                top_images = data.get("images") or None
+                open_tabs = data.get("open_tabs") if isinstance(data.get("open_tabs"), list) else None
+                user_overrode_model = bool(data.get("user_overrode_model", False))
+                origin = str(data.get("origin") or "chat")
+                staged_files = data.get("staged_files") if isinstance(data.get("staged_files"), list) else None
 
                 self.send_response(200)
                 self._send_cors_headers()
@@ -6720,12 +11777,34 @@ def make_sidecar_server(
                         conversation_summary=conversation_summary,
                         mail_enabled=mail_enabled,
                         model_id=model_id,
+                        conversation_id=conversation_id,
+                        images=top_images,
+                        open_tabs=open_tabs,
+                        user_overrode_model=user_overrode_model,
+                        origin=origin,
+                        staged_files=staged_files,
+                        drives_enabled=drives_enabled,
                     ):
                         line = f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                         self.wfile.write(line.encode("utf-8"))
                         self.wfile.flush()
                 except Exception as e:
                     runtime.record_error("chat_stream", e)
+                    try:
+                        last_q = next(
+                            (str(m.get("content") or "") for m in reversed(messages) if isinstance(m, dict) and m.get("role") == "user"),
+                            "",
+                        )
+                        runtime.record_harness_signal(
+                            prompt=last_q,
+                            model_id=model_id,
+                            source_count=len(sources),
+                            outcome_signal="error",
+                            web_enabled=web_enabled,
+                            mail_enabled=mail_enabled,
+                        )
+                    except Exception:
+                        pass
                     err_payload = {
                         "error": str(e),
                         "delta": f"[error: {e}]",
@@ -6798,6 +11877,7 @@ def main():
     parser.add_argument("--preload-gemma", action="store_true", default=True)
     parser.add_argument("--no-preload-gemma", action="store_false", dest="preload_gemma")
     parser.add_argument("--bookmark-interval-minutes", type=float, default=30.0)
+    parser.add_argument("--news-interval-minutes", type=float, default=60.0)
     args = parser.parse_args()
 
     runtime = SatzSidecarRuntime(
@@ -6805,6 +11885,7 @@ def main():
         store_path=Path(args.store),
         gemma_rel_path=args.gemma_path,
         bookmark_interval_minutes=args.bookmark_interval_minutes,
+        news_interval_minutes=args.news_interval_minutes,
     )
     server = make_sidecar_server(runtime, host=args.host, port=args.port)
     srv_thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -6813,10 +11894,11 @@ def main():
         f"[satz-sidecar] listening on http://{args.host}:{args.port} (sgs={runtime.sgs_root}, store={runtime.store_path}, parent_pid={args.parent_pid})",
         flush=True,
     )
-    # Give the initial /knowledge + /health UI poll a clean ~0.6 s head start before torch/Gemma preload hits disk/GIL.
+    # Give the initial /knowledge + /health UI poll a clean ~0.6 s head start and yield to any active unlock.
     time.sleep(0.6)
     if args.preload_gemma:
         try:
+            runtime.wait_for_unlock_quiet(max_wait=4.0)
             runtime.ensure_gemma()
             print("[satz-sidecar] gemma [warm] - preload complete", flush=True)
         except Exception as e:

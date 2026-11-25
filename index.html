@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>satz</title>
+    <link rel="icon" type="image/png" href="/favicon.png" />
     <script>
       try {
         var t = localStorage.getItem("satz.ui.theme");
@@ -17,6 +18,10 @@
           "data-layout",
           l === "flush" ? "flush" : "floating"
         );
+        var loc = localStorage.getItem("satz.ui.locale") || "en";
+        var dir = localStorage.getItem("satz.ui.dir");
+        document.documentElement.setAttribute("lang", loc);
+        document.documentElement.setAttribute("dir", dir === "rtl" ? "rtl" : "ltr");
       } catch (_) {
         document.documentElement.setAttribute("data-layout", "floating");
       }

@@ -1428,6 +1428,18 @@ class TestSatzSidecar(unittest.TestCase):
         )
         self.assertTrue(draft_res["ok"])
         self.assertEqual(draft_res["status"], "draft")
+        self.assertIn("model", draft_res)
+        structured_res = self.runtime.mail.draft_reply(
+            {
+                "instructions": "Write an email to alice@example.com about Q4 launch timeline",
+                "model": "gemini:gemini-2.5-flash",
+                "structured": True,
+            }
+        )
+        self.assertTrue(structured_res["ok"])
+        self.assertEqual(structured_res["to"], "alice@example.com")
+        self.assertIn("Q4 launch timeline", structured_res["subject"])
+        self.assertEqual(structured_res["model"], "gemini:gemini-2.5-flash")
         self.assertEqual(len(smtp_sent_messages), 0)
         with self.runtime.mail.db_lock:
             queued_cnt = self.runtime.mail._ensure_connection().execute(

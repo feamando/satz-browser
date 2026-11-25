@@ -1,7 +1,22 @@
-export type ConversationOrigin = "chat" | "direct" | "mail" | "news";
+export type ConversationOrigin =
+  | "chat"
+  | "direct"
+  | "mail"
+  | "news"
+  | "drives"
+  | "settings"
+  | "news_settings"
+  | "news_perspectives";
 export type ConversationStatus = "active" | "archived";
 export type TabKind = "site" | "mail" | "compose";
-export type NewsLane = "stories" | "foryou" | "perspectives" | "topics" | "sources";
+export type NewsLane = "stories" | "perspectives";
+export type SettingsLane =
+  | "profiles"
+  | "models"
+  | "google_mail"
+  | "providers"
+  | "translation"
+  | "sources";
 
 export interface Conversation {
   id: string;
@@ -25,6 +40,7 @@ export interface BrowserTab {
   suspended?: boolean;
   created_at: string;
   kind?: TabKind;
+  last_summary?: string;
 }
 
 export interface SourceItem {
@@ -55,7 +71,10 @@ export interface BrainCitationItem {
   slug: string;
   name: string;
   type: string;
+  entity_type?: string;
   summary: string;
+  attributes?: Record<string, unknown>;
+  aliases?: string[];
   path?: string;
   source_url?: string;
 }
@@ -66,6 +85,7 @@ export interface SourceStatEntry {
   chars_sent: number;
   was_cut: boolean;
   capture_mode?: "dom" | "fetch" | "timeout";
+  context_tier?: "full" | "excerpt" | "manifest" | "expanded";
 }
 
 export interface FindingItem {
@@ -89,6 +109,29 @@ export interface EmailAttachmentItem {
   saved_path?: string;
 }
 
+export interface MailComposeDraft {
+  account_id: string;
+  to: string;
+  cc: string;
+  bcc: string;
+  subject: string;
+  body: string;
+  in_reply_to: string;
+  references: string;
+  reply_to_message_id: string;
+  ai_prompt?: string;
+  ai_model?: LocalModelId;
+  ai_loading?: boolean;
+  ai_draft_id?: string;
+  confirm_outbox_id?: string;
+  confirm_token?: string;
+  confirm_line?: string;
+  new_recipients?: string[];
+  queued_outbox_id?: string;
+  undo_until?: number;
+  status_msg?: string;
+}
+
 export interface ChatEmailCard {
   message_id: string;
   source_id: string;
@@ -101,6 +144,67 @@ export interface ChatEmailCard {
   body_text: string;
   quoted_text?: string;
   attachments: EmailAttachmentItem[];
+  can_unsubscribe?: boolean;
+  unsubscribe_method?: string;
+}
+
+export interface ChatImageAttachment {
+  id: string;
+  name: string;
+  mime: string;
+  data_url: string;
+  width?: number;
+  height?: number;
+  size?: number;
+}
+
+export interface StagedSettingsFile {
+  staging_id: string;
+  filename: string;
+  detected_kind: "google_client_secret" | "env_secrets" | "unknown_text";
+  summary: string;
+  safe_fields: Record<string, unknown>;
+}
+
+export interface SettingsUiCard {
+  id: string;
+  kind:
+    | "profile_create_card"
+    | "profile_unlock_card"
+    | "google_oauth_connect_card"
+    | "vault_secret_input_card"
+    | "mail_account_card"
+    | "provider_preview_card"
+    | "confirm_gate_card"
+    | "locale_translate_card"
+    | "settings_status_card"
+    | "news_settings_status_card"
+    | "news_topic_suggestions_card"
+    | "news_source_suggestions_card"
+    | "news_source_trust_card"
+    | "news_add_feed_card";
+  title: string;
+  title_key?: string;
+  title_vars?: Record<string, string | number>;
+  subtitle?: string;
+  subtitle_key?: string;
+  subtitle_vars?: Record<string, string | number>;
+  data: Record<string, unknown>;
+  confirm_token?: string;
+  resolved?: boolean;
+  resolution_note?: string;
+  resolution_note_key?: string;
+  resolution_note_vars?: Record<string, string | number>;
+}
+
+export interface CitedSourcePreview {
+  url: string;
+  title: string;
+  domain?: string;
+  snippet?: string;
+  image_url?: string;
+  favicon_url?: string;
+  trust?: number | null;
 }
 
 export interface ChatMessage {
@@ -116,12 +220,17 @@ export interface ChatMessage {
   citation_check_json?: string | null;
   extras_json?: string | null;
   citation_check?: CitationCheckEntry[];
-  cited_sources?: Array<{ url: string; title: string; domain?: string }>;
+  cited_sources?: CitedSourcePreview[];
   brain_sources?: BrainCitationItem[];
   proposals?: BrainProposalItem[];
   findings?: FindingItem[];
   email_cards?: ChatEmailCard[];
+  email_draft?: MailComposeDraft;
   answer_meta?: AnswerMeta;
+  tools_used?: string[];
+  images?: ChatImageAttachment[];
+  staged_files?: StagedSettingsFile[];
+  ui_cards?: SettingsUiCard[];
 }
 
 export interface AnswerMetaSourceTrust {
@@ -174,10 +283,14 @@ export interface NewsArticleItem {
   domain: string;
   family: string;
   title: string;
+  title_tr?: string;
   snippet: string;
+  snippet_tr?: string;
   body_text: string;
   translated_text?: string | null;
   language: string;
+  translation_source_lang?: string;
+  translation_target_lang?: string;
   image_url: string;
   author: string;
   published_at: number;
@@ -202,7 +315,12 @@ export interface NewsFamilyBadge {
 export interface NewsStoryCluster {
   cluster_id: string;
   headline: string;
+  language?: string;
+  translated_headline?: string;
   summary_md: string;
+  translated_summary_md?: string;
+  translation_source_lang?: string;
+  translation_target_lang?: string;
   confidence10: number;
   band: string;
   band_label: string;
@@ -259,6 +377,9 @@ export interface NewsSourceFeedItem {
   language: string;
   enabled: boolean;
   last_fetched_at: number;
+  last_synced_at?: number;
+  sync_status?: string;
+  synced?: boolean;
   error_count: number;
 }
 
@@ -315,6 +436,7 @@ export interface BookmarkItem {
   url: string;
   position: number;
   created_at: string;
+  favicon_url?: string | null;
 }
 
 export interface HistoryItem {
@@ -351,6 +473,13 @@ export interface TabPageEvent {
   url: string | null;
   title: string | null;
   has_password_field?: boolean | null;
+  favicon_url?: string | null;
+}
+
+export interface TabNewWindowEvent {
+  source_tab_id: string;
+  url: string;
+  background?: boolean;
 }
 
 export type LocalModelId =
@@ -420,7 +549,24 @@ export interface SidecarHealth {
   pause_learning: boolean;
   errors?: SidecarErrorEntry[];
   mail?: MailStatusSummary | null;
-  news?: { articles: number; clusters: number; feeds_enabled: number; topics: number } | null;
+  news?: {
+    articles: number;
+    clusters: number;
+    feeds_enabled: number;
+    topics: number;
+    brain_stories?: number;
+    sync_interval_seconds?: number;
+    last_sync_at?: number;
+    next_sync_at?: number;
+    last_brain_sync_at?: number;
+    syncing?: boolean;
+  } | null;
+  drives?: DrivesStatusResponse | null;
+  profile?: {
+    unlocked?: boolean;
+    active_profile_id?: string | null;
+    unlocking?: boolean;
+  } | null;
   watch_badges?: string[];
   model_config?: ModelManagementConfig;
   digest_revision?: string;
@@ -450,6 +596,7 @@ export interface MailAccountItem {
   smtp_port: number;
   smtp_security: string;
   vault_prefix: string;
+  auth_type?: "password" | "oauth2";
   sync_days: number;
   last_sync_at: number;
   last_error: string;
@@ -611,6 +758,111 @@ export interface ProfileVaultSummary {
   raw_env: string;
 }
 
+export interface RedTeamReport {
+  ok: boolean;
+  passed: boolean;
+  cases_run: number;
+  cases_passed: number;
+  failures?: Array<{ case_id: string; reason: string }>;
+  checked_at?: string;
+  summary: string;
+}
+
+export interface EvalCaseExpected {
+  expected_tools?: string[];
+  expected_task_agent?: string;
+  require_send_gate?: boolean;
+  min_citations?: number;
+  max_flagged_citations?: number;
+  must_contain?: string[];
+  forbidden_substrings?: string[];
+  min_answer_chars?: number;
+}
+
+export interface EvalTargetResult {
+  target?: string;
+  passed: boolean;
+  summary: string;
+  failures?: string[];
+  tools_used?: string[];
+  citations_ok?: number;
+  citations_flagged?: number;
+  tasks_count?: number;
+}
+
+export interface EvalCaseItem {
+  eval_id: string;
+  created_at: string;
+  title: string;
+  notes?: string;
+  model_id: string;
+  mode: { web_enabled: boolean; mail_enabled: boolean };
+  user_msg: string;
+  bad_assistant_answer?: string;
+  sources?: Array<Record<string, unknown>>;
+  expected?: EvalCaseExpected;
+  _filename?: string;
+  last_run?: {
+    ran_at?: string;
+    passed?: boolean;
+    local_gemma?: EvalTargetResult;
+    cloud?: EvalTargetResult;
+  };
+}
+
+export interface EvalSuiteRunSummary {
+  ok: boolean;
+  total: number;
+  passed: number;
+  failed: number;
+  ran_at?: string;
+  results: Array<{
+    eval_id: string;
+    title: string;
+    passed: boolean;
+    ran_at: string;
+    targets: {
+      local_gemma?: EvalTargetResult;
+      cloud?: EvalTargetResult;
+    };
+  }>;
+}
+
+export interface SkillProposalItem {
+  proposal_id: string;
+  pattern_key: string;
+  status: string;
+  reason: string;
+  confidence: number;
+  skill: {
+    name: string;
+    summary?: string;
+    trigger_examples?: string[];
+    required_context?: string[];
+    step_graph?: Array<{
+      id: string;
+      primitive: string;
+      summary?: string;
+      send_gate?: boolean;
+      mutating?: boolean;
+      args?: Record<string, unknown>;
+    }>;
+    send_gate_steps?: string[];
+    redteam?: RedTeamReport;
+  };
+}
+
+export interface DomainRecipeItem {
+  domain: string;
+  control_key: string;
+  selector: string;
+  label: string;
+  action_kind: string;
+  sample_url: string;
+  success_count: number;
+  last_success_at: number;
+}
+
 export interface KnowledgeSummary {
   pause_learning: boolean;
   queue_len: number;
@@ -629,6 +881,7 @@ export interface KnowledgeSummary {
     };
   };
   bookmarks_indexed?: BookmarkIndexStatus[];
+  drives?: DrivesStatusResponse | null;
   profile?: ProfileStatusSummary;
   vault?: ProfileVaultSummary;
   top_domains: Array<{
@@ -670,6 +923,11 @@ export interface KnowledgeSummary {
     label?: string;
     message_id?: string;
   }>;
+  skill_proposals?: SkillProposalItem[];
+  domain_recipes_count?: number;
+  recipes?: DomainRecipeItem[];
+  evals?: EvalCaseItem[];
+  evals_count?: number;
 }
 
 export type CommandRouteKind =
@@ -677,6 +935,7 @@ export type CommandRouteKind =
   | "url_and_question"
   | "ask_model"
   | "search_mail"
+  | "search_drives"
   | "search_news"
   | "search_brain"
   | "run_command";
@@ -700,6 +959,63 @@ export interface CommandBarRoute {
   question?: string;
   query?: string;
   command_id?: CommandBarActionId;
+  model?: LocalModelId;
+  auto_web?: boolean;
+  auto_mail?: boolean;
+  escalated?: boolean;
+  escalation_reason?: string;
+}
+
+export interface RoutingDecisionInfo {
+  query_type: string;
+  model: LocalModelId;
+  web_enabled: boolean;
+  mail_enabled: boolean;
+  escalated: boolean;
+  reason?: string;
+}
+
+export interface RoutingPolicyRule {
+  query_type: string;
+  signal_count: number;
+  retries: number;
+  planck_switches: number;
+  flagged_citations: number;
+  errors: number;
+  successes: number;
+  recommended_model: string;
+  escalated: boolean;
+  auto_web: boolean;
+  auto_mail: boolean;
+  reason: string;
+}
+
+export interface RoutingPolicySummary {
+  ok: boolean;
+  total_signals: number;
+  ready_cloud_model: string;
+  rules: RoutingPolicyRule[];
+  by_query_type: Record<string, RoutingPolicyRule>;
+}
+
+export interface HarnessSignalPayload {
+  query_type?: string;
+  prompt?: string;
+  model_id: string;
+  source_count?: number;
+  chars_cut?: number;
+  outcome_signal:
+    | "retry"
+    | "use_planck_instead"
+    | "citations_flagged"
+    | "citation_flagged_click"
+    | "manual_model_override"
+    | "manual_context_override"
+    | "error"
+    | "success";
+  web_enabled?: boolean;
+  mail_enabled?: boolean;
+  target_model?: string;
 }
 
 export interface TaskStep {
@@ -709,6 +1025,7 @@ export interface TaskStep {
   status: "running" | "done" | "waiting_confirm" | "confirmed" | "cancelled" | "stopped";
   ts: number;
   action_summary?: string;
+  action_payload?: Record<string, unknown>;
   confirm_token?: string;
 }
 
@@ -748,4 +1065,331 @@ export interface ConvStreamState {
   startedAt: number;
   steps: string[];
   lastUserPrompt: string;
+}
+
+export interface GoogleOAuthStatus {
+  ok: boolean;
+  unlocked: boolean;
+  configured: boolean;
+  signed_in: boolean;
+  has_client_id: boolean;
+  has_client_secret: boolean;
+  has_refresh_token: boolean;
+  masked_client_id: string;
+  email: string;
+  name: string;
+  scopes: string[];
+  expires_at: number;
+  token_valid?: boolean;
+  redirect_port: number;
+  session?: {
+    session_id: string;
+    status: "pending" | "authorized" | "error" | "expired";
+    email: string;
+    error: string;
+    gmail_connected: boolean;
+    redirect_uri: string;
+  } | null;
+  error?: string;
+}
+
+export interface ActionProviderCategory {
+  category_id: string;
+  parent_group: string;
+  label: string;
+  description: string;
+  is_builtin: boolean;
+  sort_order: number;
+}
+
+export interface ActionProviderPreset {
+  provider_slug: string;
+  display_name: string;
+  mode: "search_api" | "web_account";
+  api_driver: string;
+  domains: string[];
+  url_template: string;
+  vault_service: string;
+  requires_key?: boolean;
+}
+
+export interface ActionProviderEntry {
+  id: string;
+  category_id: string;
+  provider_slug: string;
+  display_name: string;
+  mode: "search_api" | "web_account";
+  api_driver: string;
+  domains: string[];
+  url_template: string;
+  vault_service: string;
+  constraints_note: string;
+  priority: number;
+  enabled: boolean;
+  auto_learned: boolean;
+  requires_key: boolean;
+  auth_status: "api_key" | "login" | "token_or_cookie" | "none" | "locked";
+  auth_service: string;
+  masked_auth_label: string;
+  auth_fields: string[];
+  auth_ready: boolean;
+}
+
+export interface ActionProviderSuggestion {
+  suggestion_id: string;
+  category_id: string;
+  provider_slug: string;
+  display_name: string;
+  domain: string;
+  url_template: string;
+  reason: string;
+  evidence_count: number;
+  status: string;
+  updated_at: number;
+}
+
+export interface ProviderRegistryState {
+  ok: boolean;
+  unlocked: boolean;
+  profile_id: string | null;
+  categories: ActionProviderCategory[];
+  providers_by_category: Record<string, ActionProviderEntry[]>;
+  presets: Record<string, ActionProviderPreset[]>;
+  suggestions: ActionProviderSuggestion[];
+  error?: string;
+}
+
+export interface I18nBundleEntry {
+  text: string;
+  one?: string;
+  source_hash?: string;
+  model?: string;
+  updated_at?: number;
+  custom?: boolean;
+}
+
+export interface I18nLocaleSummary {
+  lang: string;
+  label: string;
+  dir: "ltr" | "rtl";
+  model: string;
+  total: number;
+  translated: number;
+  missing: number;
+  stale: number;
+  custom_count: number;
+  updated_at: number;
+}
+
+export interface I18nStatusResponse {
+  ok: boolean;
+  active_locale: string;
+  active_label: string;
+  active_dir: "ltr" | "rtl";
+  default_model: string;
+  model_info: {
+    model_id: string;
+    local_only: boolean;
+    provider_id: string;
+    host: string;
+    disclosure: string;
+  };
+  target: I18nLocaleSummary;
+  locales: I18nLocaleSummary[];
+  job: {
+    running: boolean;
+    lang: string;
+    label: string;
+    model: string;
+    completed: number;
+    total: number;
+    current_batch: number;
+    total_batches: number;
+    error: string;
+    updated_at: number;
+  };
+  suggested_languages?: Array<{
+    code: string;
+    name: string;
+    native: string;
+    rtl: boolean;
+  }>;
+  background_job?: {
+    ok: boolean;
+    started: boolean;
+    already_running?: boolean;
+    lang: string;
+    model?: string;
+  };
+  error?: string;
+}
+
+export interface ContentLanguageInfo {
+  code: string;
+  name: string;
+  native: string;
+  rtl: boolean;
+}
+
+export interface ContentTranslationModelInfo {
+  model_id: string;
+  provider: string;
+  is_cloud: boolean;
+  tier_label: string;
+  cost_hint: string;
+  rank: number;
+  mode: string;
+  alternates?: string[];
+}
+
+export interface ContentTranslationConfig {
+  ok: boolean;
+  unlocked: boolean;
+  profile_id: string | null;
+  known_languages: string[];
+  known_language_details: ContentLanguageInfo[];
+  primary_language: string;
+  primary_language_info: ContentLanguageInfo;
+  model_preference: string;
+  resolved_model: ContentTranslationModelInfo;
+  auto_translate_mail: boolean;
+  auto_translate_news: boolean;
+  mail_include_promos_pings: boolean;
+  mail_max_age_days: number;
+  mail_max_recent: number;
+  catalog: ContentLanguageInfo[];
+  error?: string;
+}
+
+export interface PageTranslationBlock {
+  id: string;
+  text: string;
+  viewport: boolean;
+}
+
+export interface TabTranslationState {
+  status: "idle" | "translating" | "translated" | "allowed_notice" | "error";
+  url?: string;
+  sourceLang?: string;
+  targetLang?: string;
+  showingTranslated?: boolean;
+  model?: string;
+  blocksDone?: number;
+  blocksTotal?: number;
+  errorMsg?: string;
+}
+
+export type DriveProviderFilter = "all" | "gdrive" | "onedrive";
+export type DriveFileTypeFilter =
+  | "all"
+  | "folder"
+  | "doc"
+  | "sheet"
+  | "slide"
+  | "pdf"
+  | "image"
+  | "other";
+
+export interface DriveBreadcrumb {
+  key: string;
+  name: string;
+  provider?: string;
+}
+
+export interface DriveItem {
+  item_key: string;
+  navigate_key: string;
+  provider: "gdrive" | "onedrive" | "shared";
+  remote_id?: string;
+  name: string;
+  is_folder: boolean;
+  is_shortcut: boolean;
+  mime_type: string;
+  file_category: string;
+  resolved_path: string;
+  path_crumbs: DriveBreadcrumb[];
+  owner_name: string;
+  owner_email: string;
+  is_me: boolean;
+  modified_at: number;
+  size_bytes: number;
+  web_url: string;
+  core_summary: string;
+  brain_slug: string;
+  indexed: boolean;
+}
+
+export interface DriveOwnerFacet {
+  value: string;
+  label: string;
+  email: string;
+  name: string;
+  is_me: boolean;
+  count: number;
+}
+
+export interface DriveListResponse {
+  ok: boolean;
+  unlocked: boolean;
+  folder_key: string;
+  parent_key: string | null;
+  breadcrumbs: DriveBreadcrumb[];
+  items: DriveItem[];
+  facets: {
+    providers: Array<{ id: string; count: number }>;
+    file_types: Record<string, number>;
+    owners: DriveOwnerFacet[];
+  };
+  scope: "folder" | "search" | "filtered" | "locked";
+}
+
+export interface DriveProviderStatus {
+  provider: "gdrive" | "onedrive";
+  connected: boolean;
+  configured: boolean;
+  signed_in_gmail_only?: boolean;
+  masked_client_id?: string;
+  tenant_id?: string;
+  email: string;
+  name: string;
+  total_files: number;
+  indexed_docs: number;
+  last_synced_at: number;
+  status: string;
+  last_error: string;
+  session?: {
+    session_id: string;
+    status: string;
+    email: string;
+    error: string;
+    redirect_uri: string;
+  } | null;
+}
+
+export interface DrivesStatusResponse {
+  ok: boolean;
+  unlocked: boolean;
+  syncing: boolean;
+  indexing: boolean;
+  total_files: number;
+  indexed_docs: number;
+  last_synced_at: number;
+  google: DriveProviderStatus;
+  onedrive: DriveProviderStatus;
+}
+
+export interface DriveCreateTarget {
+  id: string;
+  provider: "gdrive" | "onedrive";
+  provider_label: string;
+  label: string;
+  url: string;
+}
+
+export interface DriveNavSnapshot {
+  folderKey: string;
+  provider: DriveProviderFilter;
+  fileType: DriveFileTypeFilter;
+  owner: string;
+  query: string;
 }

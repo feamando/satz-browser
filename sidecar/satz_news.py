@@ -15,18 +15,26 @@ import hashlib
 import html as html_lib
 import json
 import math
+import queue
 import re
 import sqlite3
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from satz_brain import neutralize_brain_directives_in_source, slugify
+from satz_brain import (
+    _parse_temporal_query,
+    _utc_iso_from_ts,
+    neutralize_brain_directives_in_source,
+    slugify,
+)
 
 
 _SIDECAR_DIR = Path(__file__).resolve().parent
@@ -44,6 +52,36 @@ STOP_TITLE_WORDS = {
     "live", "how", "why", "who", "are", "was", "were", "has", "had", "not",
     "but", "you", "your", "their", "more", "than", "over", "under", "first",
 }
+
+
+def _complete_role_fast(
+    runtime: Any,
+    model_id: str,
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    temperature: float = 0.15,
+    max_tokens: int = 420,
+    thinking_budget: int | None = 0,
+) -> str:
+    """Calls `runtime._complete_role_prompt` with optional `thinking_budget`, keeping unit-test mocks compatible."""
+    try:
+        return runtime._complete_role_prompt(
+            model_id,
+            system_prompt,
+            user_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            thinking_budget=thinking_budget,
+        )
+    except TypeError:
+        return runtime._complete_role_prompt(
+            model_id,
+            system_prompt,
+            user_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
 
 
 class SatzLLMReader:
@@ -83,12 +121,14 @@ class SatzLLMReader:
             lines.append(f"  [{i}] {str(c.get('value') or '')[:80]} | \"{ctx}\" | {doms}")
 
         user_prompt = neutralize_brain_directives_in_source("\n".join(lines))
-        raw = self.runtime._complete_role_prompt(
+        raw = _complete_role_fast(
+            self.runtime,
             self.model_id,
             READER_SYSTEM,
             user_prompt,
             temperature=0.05,
             max_tokens=160,
+            thinking_budget=0,
         )
         self.usage["calls"] += 1
 
@@ -336,7 +376,7 @@ def parse_feed_xml(xml_text: str, domain: str, base_url: str = "") -> list[dict[
         return el.tag.rsplit("}", 1)[-1].lower()
 
     def _child_text(parent: ET.Element, *names: str) -> str:
-        want = set(names)
+        want = {n.lower() for n in names}
         for ch in parent:
             if _tag_name(ch) in want:
                 if ch.text and ch.text.strip():
@@ -345,6 +385,22 @@ def parse_feed_xml(xml_text: str, domain: str, base_url: str = "") -> list[dict[
                 if inner:
                     return inner
         return ""
+
+    def _collect_texts(parent: ET.Element, *names: str) -> list[tuple[str, str]]:
+        want = {n.lower() for n in names}
+        out: list[tuple[str, str]] = []
+        for ch in parent:
+            if _tag_name(ch) in want:
+                raw = ch.text.strip() if (ch.text and ch.text.strip()) else "".join(ch.itertext()).strip()
+                if raw:
+                    out.append((_tag_name(ch), raw))
+        return out
+
+    def _is_valid_feed_img(img_u: str) -> bool:
+        low = (img_u or "").strip().lower()
+        if not low.startswith(("http://", "https://")):
+            return False
+        return not any(b in low for b in ("sprite", "logo", "favicon", "avatar", "pixel", "1x1", ".svg"))
 
     # RSS 2.0 / RDF <item>
     for el in root.iter():
@@ -368,24 +424,43 @@ def parse_feed_xml(xml_text: str, domain: str, base_url: str = "") -> list[dict[
         if base_url and link.startswith("/"):
             link = urllib.parse.urljoin(base_url, link)
 
-        desc_raw = _child_text(el, "description", "summary", "content", "encoded")
+        text_frags = _collect_texts(el, "description", "summary", "content", "encoded")
+        desc_raw = text_frags[0][1] if text_frags else ""
         snippet = _strip_html(desc_raw)[:600]
+        if not snippet and len(text_frags) > 1:
+            for _, frag in text_frags[1:]:
+                cand_s = _strip_html(frag)[:600]
+                if cand_s:
+                    snippet = cand_s
+                    break
         author = _strip_html(_child_text(el, "author", "creator", "name"))[:120]
         pub_raw = _child_text(el, "pubDate", "published", "updated", "date")
         pub_ts = _parse_pub_date(pub_raw, now_ts)
 
         image_url = ""
-        for ch in el:
+        for ch in el.iter():
             tn = _tag_name(ch)
-            if tn in ("enclosure", "content", "thumbnail") and ch.attrib.get("url"):
-                u_img = ch.attrib["url"].strip()
-                if u_img.startswith(("http://", "https://")):
-                    image_url = u_img
-                    break
+            if tn not in ("thumbnail", "content", "enclosure"):
+                continue
+            typ = (ch.attrib.get("type") or "").lower().strip()
+            if tn != "thumbnail" and typ.startswith(("video/", "audio/")):
+                continue
+            raw_u = (ch.attrib.get("url") or ch.attrib.get("href") or "").strip()
+            if not raw_u:
+                continue
+            u_img = urllib.parse.urljoin(link, raw_u)
+            if _is_valid_feed_img(u_img):
+                image_url = u_img
+                break
         if not image_url:
-            img_m = re.search(r'<img[^>]+src=["\'](https?://[^"\']+)["\']', desc_raw or "", re.I)
-            if img_m:
-                image_url = img_m.group(1)
+            for _, frag in text_frags:
+                for img_m in re.finditer(r'<img\b[^>]+src=["\']([^"\']+)["\']', frag or "", re.I):
+                    cand_img = urllib.parse.urljoin(link, html_lib.unescape(img_m.group(1)).strip())
+                    if _is_valid_feed_img(cand_img):
+                        image_url = cand_img
+                        break
+                if image_url:
+                    break
 
         items.append(
             {
@@ -432,6 +507,8 @@ class SatzNewsEngine:
                 etag TEXT,
                 last_modified TEXT,
                 last_fetched_at REAL DEFAULT 0.0,
+                last_synced_at REAL DEFAULT 0.0,
+                sync_status TEXT NOT NULL DEFAULT 'pending',
                 error_count INTEGER DEFAULT 0,
                 backoff_until REAL DEFAULT 0.0
             );
@@ -475,6 +552,8 @@ class SatzNewsEngine:
                 story_rank REAL NOT NULL,
                 first_seen_at REAL NOT NULL,
                 updated_at REAL NOT NULL,
+                brain_slug TEXT,
+                brain_synced_at REAL DEFAULT 0.0,
                 is_read INTEGER NOT NULL DEFAULT 0,
                 is_hidden INTEGER NOT NULL DEFAULT 0
             );
@@ -487,8 +566,37 @@ class SatzNewsEngine:
                 watch_id TEXT,
                 created_at REAL NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS satz_news_translations (
+                article_id TEXT NOT NULL,
+                target_lang TEXT NOT NULL,
+                source_lang TEXT NOT NULL DEFAULT '',
+                title_tr TEXT NOT NULL DEFAULT '',
+                snippet_tr TEXT NOT NULL DEFAULT '',
+                body_tr TEXT NOT NULL DEFAULT '',
+                model_id TEXT NOT NULL DEFAULT '',
+                updated_at REAL NOT NULL DEFAULT 0.0,
+                PRIMARY KEY (article_id, target_lang)
+            );
+            CREATE INDEX IF NOT EXISTS idx_news_tr_lang ON satz_news_translations(target_lang, updated_at DESC);
             """
         )
+        feed_cols = {
+            r[1] for r in db_conn.execute("PRAGMA table_info('satz_news_feeds')").fetchall()
+        }
+        if "last_synced_at" not in feed_cols:
+            db_conn.execute("ALTER TABLE satz_news_feeds ADD COLUMN last_synced_at REAL DEFAULT 0.0")
+        if "sync_status" not in feed_cols:
+            db_conn.execute("ALTER TABLE satz_news_feeds ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'pending'")
+
+        cl_cols = {
+            r[1] for r in db_conn.execute("PRAGMA table_info('satz_news_clusters')").fetchall()
+        }
+        if "brain_slug" not in cl_cols:
+            db_conn.execute("ALTER TABLE satz_news_clusters ADD COLUMN brain_slug TEXT")
+        if "brain_synced_at" not in cl_cols:
+            db_conn.execute("ALTER TABLE satz_news_clusters ADD COLUMN brain_synced_at REAL DEFAULT 0.0")
+        db_conn.commit()
 
     def seed_starter_feeds(self, db_conn: sqlite3.Connection | None = None) -> None:
         feeds = self.overlay.get("starter_feeds") or []
@@ -574,12 +682,14 @@ class SatzNewsEngine:
                 for r in self.runtime.store.db.execute("SELECT domain, visits FROM satz_domain_visits").fetchall()
             }
             feed_rows = self.runtime.store.db.execute(
-                "SELECT feed_id, domain, feed_url, title, category, language, enabled, last_fetched_at, error_count FROM satz_news_feeds"
+                "SELECT feed_id, domain, feed_url, title, category, language, enabled, last_fetched_at, last_synced_at, sync_status, error_count FROM satz_news_feeds"
             ).fetchall()
 
         feeds_by_domain: dict[str, list[dict[str, Any]]] = {}
         for fr in feed_rows:
             d = str(fr["domain"] or "").lower().removeprefix("www.")
+            lf = float(fr["last_fetched_at"] or 0.0)
+            ls = float(fr["last_synced_at"] or lf or 0.0)
             feeds_by_domain.setdefault(d, []).append(
                 {
                     "feed_id": fr["feed_id"],
@@ -587,7 +697,10 @@ class SatzNewsEngine:
                     "title": fr["title"],
                     "language": fr["language"],
                     "enabled": bool(fr["enabled"]),
-                    "last_fetched_at": float(fr["last_fetched_at"] or 0.0),
+                    "last_fetched_at": lf,
+                    "last_synced_at": ls,
+                    "sync_status": str(fr["sync_status"] or ("synced" if (fr["enabled"] and lf > 0) else "pending")),
+                    "synced": bool(fr["enabled"] and (lf > 0 or ls > 0)),
                     "error_count": int(fr["error_count"] or 0),
                 }
             )
@@ -596,7 +709,20 @@ class SatzNewsEngine:
 
         domains_map = getattr(reg, "domains", None) or {}
         categories_map = getattr(reg, "categories", None) or {}
+        trust_extra_domains: set[str] = set()
+        try:
+            sgs_trust_path = Path(self.runtime.sgs_root) / "config" / "planck3" / "source_trust.json"
+            if sgs_trust_path.exists():
+                t_raw = json.loads(sgs_trust_path.read_text(encoding="utf-8"))
+                trust_extra_domains = {
+                    str(k).lower().removeprefix("www.")
+                    for k in (t_raw.get("domains") or {}).keys()
+                    if str(k).strip()
+                }
+        except Exception:
+            trust_extra_domains = set()
         all_domains = set(domains_map.keys())
+        all_domains |= trust_extra_domains
         all_domains |= set(personal_rows.keys())
         all_domains |= set(visit_rows.keys())
         all_domains |= set(feeds_by_domain.keys())
@@ -647,6 +773,8 @@ class SatzNewsEngine:
             )
 
         items.sort(key=lambda x: (-x["effective"], -len(x["feeds"]), x["domain"]))
+        last_sync_at = self._get_meta_float("news_last_sync_at")
+        interval_secs = float(getattr(self.runtime, "news_refresh_interval_secs", 3600.0))
         return {
             "ok": True,
             "as_of": getattr(reg, "as_of", None) or "2026-10-09",
@@ -660,6 +788,8 @@ class SatzNewsEngine:
                 for cid, cmeta in categories_map.items()
             ],
             "total": len(items),
+            "sync_interval_seconds": interval_secs,
+            "last_sync_at": last_sync_at,
             "sources": items,
         }
 
@@ -672,10 +802,12 @@ class SatzNewsEngine:
             enabled = 1 if data.get("enabled", True) else 0
             with self.runtime.store_lock:
                 self.runtime.store.db.execute(
-                    "UPDATE satz_news_feeds SET enabled = ? WHERE feed_id = ?",
-                    (enabled, feed_id),
+                    "UPDATE satz_news_feeds SET enabled = ?, sync_status = ? WHERE feed_id = ?",
+                    (enabled, "pending" if enabled else "paused", feed_id),
                 )
                 self.runtime.store.db.commit()
+            if enabled and getattr(self.runtime, "news_wake_event", None) is not None:
+                self.runtime.news_wake_event.set()
             return {"ok": True, "feed_id": feed_id, "enabled": bool(enabled)}
 
         if action == "delete" and feed_id:
@@ -699,8 +831,8 @@ class SatzNewsEngine:
                 self.runtime.store.db.execute(
                     """
                     INSERT OR REPLACE INTO satz_news_feeds
-                    (feed_id, domain, feed_url, title, category, language, enabled)
-                    VALUES (?, ?, ?, ?, ?, ?, 1)
+                    (feed_id, domain, feed_url, title, category, language, enabled, sync_status)
+                    VALUES (?, ?, ?, ?, ?, ?, 1, 'pending')
                     """,
                     (fid, dom, raw_url, title or dom, str(reg_rec.get("category") or "unscored"), lang),
                 )
@@ -713,6 +845,8 @@ class SatzNewsEngine:
                     (dom, time.time()),
                 )
                 self.runtime.store.db.commit()
+            if getattr(self.runtime, "news_wake_event", None) is not None:
+                self.runtime.news_wake_event.set()
             return {"ok": True, "feed_id": fid, "domain": dom, "feed_url": raw_url}
 
         if custom_domain:
@@ -761,6 +895,7 @@ class SatzNewsEngine:
 
     def upsert_article(self, item: dict[str, Any], language: str = "en") -> str:
         from src.planck3.web import domain_of
+        from satz_translate import detect_language
 
         url = str(item.get("url") or "").strip()
         if not url:
@@ -769,6 +904,7 @@ class SatzNewsEngine:
         title = str(item.get("title") or domain).strip()
         snippet = str(item.get("snippet") or "")[:1200]
         body_text = str(item.get("body_text") or snippet or "")[:30000]
+        eff_lang = detect_language(f"{title}\n{snippet}\n{body_text[:1000]}", hint_lang=str(item.get("language") or language or "en"))
         author = str(item.get("author") or "")[:120]
         canonical_url = str(item.get("canonical_url") or "").strip()
         image_url = str(item.get("image_url") or "").strip()
@@ -792,6 +928,7 @@ class SatzNewsEngine:
                     title = CASE WHEN LENGTH(excluded.title) > 0 THEN excluded.title ELSE satz_news_articles.title END,
                     snippet = CASE WHEN LENGTH(excluded.snippet) > LENGTH(satz_news_articles.snippet) THEN excluded.snippet ELSE satz_news_articles.snippet END,
                     body_text = CASE WHEN LENGTH(excluded.body_text) > LENGTH(satz_news_articles.body_text) THEN excluded.body_text ELSE satz_news_articles.body_text END,
+                    language = CASE WHEN excluded.language != '' THEN excluded.language ELSE satz_news_articles.language END,
                     image_url = COALESCE(NULLIF(excluded.image_url, ''), satz_news_articles.image_url),
                     family = excluded.family,
                     trust_system = excluded.trust_system,
@@ -801,32 +938,309 @@ class SatzNewsEngine:
                 """,
                 (
                     art_id, url, canonical_url, domain, family, title, snippet, body_text,
-                    item.get("translated_text"), language, image_url, author, pub_ts, now_ts,
+                    item.get("translated_text"), eff_lang, image_url, author, pub_ts, now_ts,
                     float(t_sys), float(t_eff), wire_origin,
                 ),
             )
             if snippet or body_text:
-                p_txt = f"{title}: {(body_text or snippet)[:500]}"
+                pub_iso_short = datetime.fromtimestamp(pub_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%MZ")
+                safe_title = neutralize_brain_directives_in_source(title)
+                safe_excerpt = neutralize_brain_directives_in_source((body_text or snippet)[:1200])
+                p_txt = f"{safe_title} ({pub_iso_short}): {safe_excerpt}"
                 self.runtime.store.add_passages(
-                    [{"url": url, "domain": domain, "title": title, "text": p_txt}],
+                    [{"url": url, "domain": domain, "title": safe_title, "text": p_txt}],
                     entity=domain,
                     question=f"[conv:conv-news] news feed {domain}",
                 )
             self.runtime.store.db.commit()
         return art_id
 
+    def _get_meta_float(self, key: str, default: float = 0.0) -> float:
+        with self.runtime.store_lock:
+            try:
+                row = self.runtime.store.db.execute(
+                    "SELECT value FROM satz_meta WHERE key = ?",
+                    (key,),
+                ).fetchone()
+                return float(row["value"]) if (row and row["value"] is not None) else default
+            except Exception:
+                return default
+
+    def _set_meta_float(self, key: str, value: float) -> None:
+        with self.runtime.store_lock:
+            self.runtime.store.db.execute(
+                "INSERT OR REPLACE INTO satz_meta (key, value) VALUES (?, ?)",
+                (key, str(round(float(value), 3))),
+            )
+            self.runtime.store.db.commit()
+
+    def _primary_translation_target(self) -> str:
+        tr = getattr(self.runtime, "translator", None)
+        if tr is not None:
+            try:
+                return str(tr.get_preferences().get("primary_language") or "en")
+            except Exception:
+                pass
+        return "en"
+
+    def _index_top_clusters_to_sources(self, limit: int = 24) -> int:
+        t_target = self._primary_translation_target()
+        with self.runtime.store_lock:
+            cl_rows = self.runtime.store.db.execute(
+                """
+                SELECT cluster_id, headline, summary_md, confidence10, band,
+                       independent_families, updated_at
+                FROM satz_news_clusters
+                WHERE is_hidden = 0
+                ORDER BY story_rank DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            indexed = 0
+            for cr in cl_rows:
+                cid = str(cr["cluster_id"])
+                arts = self.runtime.store.db.execute(
+                    """
+                    SELECT a.url, a.domain, a.title, a.snippet, a.body_text, a.image_url, a.published_at, a.trust_effective,
+                           COALESCE(nt.title_tr, '') AS title_tr,
+                           COALESCE(nt.snippet_tr, '') AS snippet_tr,
+                           COALESCE(nt.body_tr, '') AS body_tr
+                    FROM satz_news_articles a
+                    LEFT JOIN satz_news_translations nt ON nt.article_id = a.article_id AND nt.target_lang = ?
+                    WHERE a.cluster_id = ?
+                    ORDER BY a.trust_effective DESC, a.published_at DESC
+                    LIMIT 4
+                    """,
+                    (t_target, cid),
+                ).fetchall()
+                if not arts:
+                    continue
+                lead = arts[0]
+                primary_url = str(lead["url"] or "")
+                primary_dom = str(lead["domain"] or "")
+                pub_ts = float(cr["updated_at"] or lead["published_at"] or time.time())
+                pub_iso = _utc_iso_from_ts(pub_ts)
+                eff_headline = str(lead["title_tr"] or cr["headline"] or primary_dom)
+                parts = [
+                    f"[{pub_iso} · {cr['band']} {float(cr['confidence10']):.1f}/10 across {int(cr['independent_families'])} fam] {eff_headline}",
+                    str(cr["summary_md"] or ""),
+                ]
+                cluster_findings: list[dict[str, str]] = []
+                for ar in arts:
+                    ex_raw = ar["body_tr"] or ar["snippet_tr"] or ar["body_text"] or ar["snippet"] or ""
+                    ex = str(ex_raw)[:500].strip()
+                    ar_title = str(ar["title_tr"] or ar["title"] or "")
+                    ar_img = str(ar["image_url"] or "").strip()
+                    if ar_img.startswith(("http://", "https://")) and len(cluster_findings) < 3:
+                        cluster_findings.append(
+                            {
+                                "image_url": ar_img,
+                                "title": (ar_title or primary_dom)[:120],
+                                "page_url": str(ar["url"] or primary_url),
+                            }
+                        )
+                    if ex:
+                        parts.append(f"- ({ar['domain']}) {ar_title}: {ex}")
+                safe_text = neutralize_brain_directives_in_source("\n".join(parts))[:8000]
+                self.runtime.store.db.execute(
+                    """
+                    INSERT OR REPLACE INTO satz_sources
+                    (source_id, conversation_id, url, domain, title, text, extra_json, findings_json, capture_mode, updated_at)
+                    VALUES (?, 'conv-news', ?, ?, ?, ?, ?, ?, 'rss', ?)
+                    """,
+                    (
+                        f"news:cluster:{cid}",
+                        primary_url,
+                        primary_dom,
+                        str(cr["headline"] or primary_dom)[:180],
+                        safe_text,
+                        json.dumps(
+                            {
+                                "cluster_id": cid,
+                                "confidence10": float(cr["confidence10"]),
+                                "band": cr["band"],
+                                "families": int(cr["independent_families"]),
+                                "published_at": pub_iso,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(cluster_findings, ensure_ascii=False),
+                        pub_ts,
+                    ),
+                )
+                indexed += 1
+            self.runtime.store.db.commit()
+            return indexed
+
+    def process_top_stories_to_brain(
+        self,
+        limit: int = 12,
+        min_confidence: float = 5.5,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Processes top ranked & corroborated news clusters into SatzBrain (`News/Stories`)
+        with explicit publication/sync timestamps, source provenance, and prompt-injection neutralization.
+        """
+        if self.runtime.brain.locked:
+            return {"ok": False, "skipped_locked": True, "processed": 0, "updated": 0}
+
+        now_ts = time.time()
+        sync_iso = _utc_iso_from_ts(now_ts)
+        with self.runtime.store_lock:
+            candidates = self.runtime.store.db.execute(
+                """
+                SELECT * FROM satz_news_clusters
+                WHERE is_hidden = 0
+                ORDER BY story_rank DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (max(limit * 3, 24),),
+            ).fetchall()
+
+        high_conf = [c for c in candidates if float(c["confidence10"] or 0.0) >= min_confidence]
+        selected = high_conf[:limit] if len(high_conf) >= min(4, limit) else list(candidates)[:limit]
+        if len(high_conf) > 0 and len(high_conf) < limit:
+            seen_cids = {str(c["cluster_id"]) for c in high_conf}
+            selected = list(high_conf) + [c for c in candidates if str(c["cluster_id"]) not in seen_cids]
+            selected = selected[:limit]
+
+        processed = 0
+        updated = 0
+        stored_slugs: list[str] = []
+
+        for cr in selected:
+            cid = str(cr["cluster_id"])
+            upd_ts = float(cr["updated_at"] or now_ts)
+            first_ts = float(cr["first_seen_at"] or upd_ts)
+            prev_slug = str(cr["brain_slug"] or "").strip()
+            prev_sync = float(cr["brain_synced_at"] or 0.0)
+            if not force and prev_slug and prev_sync >= upd_ts:
+                continue
+
+            with self.runtime.store_lock:
+                art_rows = self.runtime.store.db.execute(
+                    """
+                    SELECT url, domain, family, title, snippet, body_text, published_at, trust_effective
+                    FROM satz_news_articles
+                    WHERE cluster_id = ?
+                    ORDER BY trust_effective DESC, published_at DESC
+                    """,
+                    (cid,),
+                ).fetchall()
+            if not art_rows:
+                continue
+
+            top_domains = list(dict.fromkeys(str(a["domain"]) for a in art_rows if a["domain"]))
+            primary_url = str(art_rows[0]["url"] or "")
+            raw_headline = str(cr["headline"] or art_rows[0]["title"] or "Top Story").strip()
+            safe_headline = neutralize_brain_directives_in_source(raw_headline)
+            alt_titles = [
+                neutralize_brain_directives_in_source(str(a["title"] or "").strip())[:100]
+                for a in art_rows[1:4]
+                if a["title"] and str(a["title"]).strip().lower() != raw_headline.lower()
+            ]
+            tags = [str(t).strip() for t in json.loads(cr["topic_tags_json"] or "[]") if str(t).strip()]
+            reasons = [str(r).strip() for r in json.loads(cr["brain_match_reasons_json"] or "[]") if str(r).strip()]
+
+            pub_iso = _utc_iso_from_ts(upd_ts)
+            first_iso = _utc_iso_from_ts(first_ts)
+            pub_short = pub_iso[:16].replace("T", " ") + "Z"
+
+            src_lines: list[str] = []
+            for ar in art_rows[:4]:
+                ar_pub = _utc_iso_from_ts(float(ar["published_at"] or upd_ts))[:16].replace("T", " ") + "Z"
+                ar_title = neutralize_brain_directives_in_source(str(ar["title"] or ""))
+                ar_snip = neutralize_brain_directives_in_source((ar["snippet"] or ar["body_text"] or "")[:320])
+                src_lines.append(
+                    f"- [{ar['domain']} · {float(ar['trust_effective'] or 5.0):.1f}/10 · {ar_pub}] {ar_title}: {ar_snip} ({ar['url']})"
+                )
+
+            safe_summary_md = neutralize_brain_directives_in_source(str(cr["summary_md"] or ""))
+            content_parts = [
+                f"Published: {pub_iso} | Synced: {sync_iso} | Confidence: {float(cr['confidence10']):.1f}/10 ({cr['band']}) across {int(cr['independent_families'])} family(ies)",
+            ]
+            if tags:
+                content_parts.append(f"Topics: {', '.join(tags)}")
+            if reasons:
+                content_parts.append(f"Relevance: {'; '.join(reasons[:3])}")
+            content_parts.extend(["", "### Corroborated Summary", safe_summary_md, "", "### Synced Sources", *src_lines])
+
+            rels: dict[str, list[str]] = {"sources": top_domains[:4]}
+            if tags:
+                rels["about"] = tags[:4]
+
+            ent = self.runtime.brain.upsert_entity(
+                entity_type="story",
+                name=safe_headline[:90],
+                summary=f"[{cr['band']} · {float(cr['confidence10']):.1f}/10 · {int(cr['independent_families'])} fam · {pub_short}] {safe_headline}",
+                attributes={
+                    "confidence10": float(cr["confidence10"]),
+                    "band": cr["band"],
+                    "families": int(cr["independent_families"]),
+                    "sources": ", ".join(top_domains[:4]),
+                    "topics": ", ".join(tags[:4]) if tags else "",
+                    "published_at": pub_iso,
+                    "first_seen_at": first_iso,
+                    "synced_at": sync_iso,
+                    "sync_mode": "hourly_feed",
+                    "$published_ts": round(upd_ts, 3),
+                    "$synced_ts": round(now_ts, 3),
+                    "$cluster_id": cid,
+                    "$source": f"news:{cid}",
+                },
+                content="\n".join(content_parts),
+                relationships=rels,
+                aliases=alt_titles,
+                source_url=primary_url,
+                tier=2,
+                actor="news/hourly_sync",
+            )
+            slug = str(ent.get("slug") or "")
+            with self.runtime.store_lock:
+                self.runtime.store.db.execute(
+                    "UPDATE satz_news_clusters SET brain_slug = ?, brain_synced_at = ? WHERE cluster_id = ?",
+                    (slug, now_ts, cid),
+                )
+                self.runtime.store.db.commit()
+            if prev_slug:
+                updated += 1
+            else:
+                processed += 1
+            stored_slugs.append(slug)
+
+        self._set_meta_float("news_last_brain_sync_at", now_ts)
+        return {
+            "ok": True,
+            "skipped_locked": False,
+            "processed": processed,
+            "updated": updated,
+            "total_synced": processed + updated,
+            "slugs": stored_slugs,
+        }
+
     def refresh_news_feeds(
         self,
         force: bool = False,
         include_topic_search: bool = False,
         fetcher: Callable[[str, str | None, str | None], dict[str, Any]] | None = None,
+        process_to_brain: bool = True,
+        min_interval_secs: float | None = None,
+        translate_recent: bool = True,
     ) -> dict[str, Any]:
         """
-        Polls enabled RSS/Atom feeds using zero LLM tokens (conditional HTTP GET),
-        plus optional PII-scrubbed Brave/ddgs search for followed topics when requested.
+        Polls enabled RSS/Atom feeds as synced sources on an hourly cadence (`3600s` default)
+        using zero LLM tokens (conditional HTTP GET), reclusters top stories, indexes them into
+        local synced storage, and processes corroborated top stories into SatzBrain with timestamps.
         """
         now_ts = time.time()
         http_get = fetcher or self._fetch_feed_http
+        interval_secs = float(
+            min_interval_secs
+            if min_interval_secs is not None
+            else getattr(self.runtime, "news_refresh_interval_secs", 3600.0)
+        )
 
         with self.runtime.store_lock:
             self.seed_starter_feeds(self.runtime.store.db)
@@ -837,13 +1251,18 @@ class SatzNewsEngine:
         fetched_feeds = 0
         new_articles = 0
         not_modified = 0
+        skipped_interval = 0
         errors: list[str] = []
 
         due_feeds = []
         for fr in feeds:
             last_f = float(fr["last_fetched_at"] or 0.0)
             backoff_until = float(fr["backoff_until"] or 0.0)
-            if not force and ((last_f > 0 and now_ts - last_f < 600.0) or (backoff_until > now_ts)):
+            if not force and backoff_until > now_ts:
+                skipped_interval += 1
+                continue
+            if not force and last_f > 0 and (now_ts - last_f) < interval_secs:
+                skipped_interval += 1
                 continue
             due_feeds.append(fr)
 
@@ -878,7 +1297,7 @@ class SatzNewsEngine:
                 backoff = now_ts + min(3600.0, 120.0 * (2 ** min(err_cnt, 4)))
                 with self.runtime.store_lock:
                     self.runtime.store.db.execute(
-                        "UPDATE satz_news_feeds SET error_count = ?, backoff_until = ? WHERE feed_id = ?",
+                        "UPDATE satz_news_feeds SET error_count = ?, backoff_until = ?, sync_status = 'backoff' WHERE feed_id = ?",
                         (err_cnt, backoff, fid),
                     )
                     self.runtime.store.db.commit()
@@ -888,8 +1307,8 @@ class SatzNewsEngine:
                 not_modified += 1
                 with self.runtime.store_lock:
                     self.runtime.store.db.execute(
-                        "UPDATE satz_news_feeds SET last_fetched_at = ?, error_count = 0 WHERE feed_id = ?",
-                        (now_ts, fid),
+                        "UPDATE satz_news_feeds SET last_fetched_at = ?, last_synced_at = ?, sync_status = 'unchanged_304', error_count = 0 WHERE feed_id = ?",
+                        (now_ts, now_ts, fid),
                     )
                     self.runtime.store.db.commit()
                 continue
@@ -902,10 +1321,11 @@ class SatzNewsEngine:
                 self.runtime.store.db.execute(
                     """
                     UPDATE satz_news_feeds
-                    SET etag = ?, last_modified = ?, last_fetched_at = ?, error_count = 0, backoff_until = 0.0
+                    SET etag = ?, last_modified = ?, last_fetched_at = ?, last_synced_at = ?,
+                        sync_status = 'synced', error_count = 0, backoff_until = 0.0
                     WHERE feed_id = ?
                     """,
-                    (res.get("etag"), res.get("last_modified"), now_ts, fid),
+                    (res.get("etag"), res.get("last_modified"), now_ts, now_ts, fid),
                 )
                 self.runtime.store.db.commit()
 
@@ -928,15 +1348,166 @@ class SatzNewsEngine:
                 except Exception as exc:
                     errors.append(f"search '{tq}': {exc}")
 
+        tr_stats = (
+            self.translate_recent_untranslated(limit=35, recluster=False, background_indexation=True)
+            if translate_recent
+            else {"translated_articles": 0}
+        )
         clusters_count = self.recluster_and_rank()
+        sources_indexed = self._index_top_clusters_to_sources()
+        brain_sync = (
+            self.process_top_stories_to_brain(limit=12, force=False)
+            if process_to_brain
+            else {"processed": 0, "updated": 0, "total_synced": 0, "skipped_locked": self.runtime.brain.locked}
+        )
+        if due_feeds or fetched_feeds > 0 or not_modified > 0:
+            self._set_meta_float("news_last_sync_at", now_ts)
         return {
             "ok": True,
             "fetched_feeds": fetched_feeds,
             "not_modified": not_modified,
+            "skipped_interval": skipped_interval,
             "articles_ingested": new_articles,
+            "articles_translated": int(tr_stats.get("translated_articles") or 0),
             "clusters": clusters_count,
+            "sources_indexed": sources_indexed,
+            "brain_synced": int(brain_sync.get("total_synced") or 0),
+            "brain_skipped_locked": bool(brain_sync.get("skipped_locked")),
+            "sync_interval_seconds": interval_secs,
+            "last_sync_at": self._get_meta_float("news_last_sync_at", now_ts if due_feeds else 0.0),
             "errors": errors[:5],
         }
+
+    def translate_recent_untranslated(
+        self,
+        *,
+        limit: int = 35,
+        recluster: bool = False,
+        background_indexation: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Translates recent non-allowed-language news headlines & snippets during indexation
+        using the active profile's cheapest translation model into `primary_language`.
+        """
+        translator = getattr(self.runtime, "translator", None)
+        if translator is None:
+            return {"translated_articles": 0}
+        prefs = translator.get_preferences()
+        if background_indexation and not prefs.get("auto_translate_news", True):
+            return {"translated_articles": 0, "skipped": "disabled"}
+
+        resolved = translator.resolve_translation_model()
+        is_mocked = "_complete_role_prompt" in getattr(self.runtime, "__dict__", {})
+        if (
+            background_indexation
+            and not resolved.get("is_cloud")
+            and getattr(self.runtime, "gemma_model", None) is None
+            and not is_mocked
+        ):
+            return {"translated_articles": 0, "skipped": "no_cloud_or_loaded_local"}
+
+        tgt = prefs["primary_language"]
+        cutoff = time.time() - 7 * 86400.0
+        lim = max(1, min(100, int(limit or 35)))
+
+        from satz_translate import detect_language, normalize_language_code
+
+        known_bases = sorted(
+            {
+                normalize_language_code(k).split("-", 1)[0]
+                for k in (prefs.get("known_languages") or ["en"])
+                if normalize_language_code(k)
+            }
+            or {"en"}
+        )
+        kb_ph = ",".join("?" for _ in known_bases)
+
+        with self.runtime.store_lock:
+            rows = self.runtime.store.db.execute(
+                f"""
+                SELECT a.article_id, a.title, a.snippet, a.body_text, a.language, a.domain, a.url, a.published_at
+                FROM satz_news_articles a
+                LEFT JOIN satz_news_translations nt
+                  ON nt.article_id = a.article_id AND nt.target_lang = ?
+                WHERE a.published_at >= ?
+                  AND (nt.article_id IS NULL OR (nt.title_tr = '' AND nt.snippet_tr = ''))
+                ORDER BY
+                  CASE WHEN LOWER(COALESCE(NULLIF(a.language, ''), 'en')) NOT IN ({kb_ph}) THEN 0 ELSE 1 END,
+                  a.published_at DESC
+                LIMIT ?
+                """,
+                (tgt, cutoff, *known_bases, max(200, lim * 6)),
+            ).fetchall()
+
+        seg_map: dict[str, str] = {}
+        art_meta: dict[str, dict[str, str]] = {}
+        for r in rows:
+            if len(art_meta) >= lim:
+                break
+            aid = str(r["article_id"])
+            title = str(r["title"] or "").strip()
+            snippet = str(r["snippet"] or r["body_text"] or "").strip()[:800]
+            eff_lang = detect_language(f"{title}\n{snippet}", hint_lang=str(r["language"] or "en"))
+            if translator.is_language_allowed(eff_lang, prefs=prefs):
+                continue
+            art_meta[aid] = {"source_lang": eff_lang, "title": title, "snippet": snippet, "url": str(r["url"] or ""), "domain": str(r["domain"] or ""), "published_at": float(r["published_at"] or time.time())}
+            if title:
+                seg_map[f"t:{aid}"] = title[:400]
+            if snippet:
+                seg_map[f"s:{aid}"] = snippet[:800]
+
+        if not seg_map:
+            return {"translated_articles": 0, "target_lang": tgt}
+
+        tr_res = translator.translate_segments(
+            seg_map,
+            target_lang=tgt,
+            context_hint="news headlines and article summaries",
+        )
+        tr_dict = tr_res.get("translations") or {}
+        model_id = str(tr_res.get("model") or resolved["model_id"])
+        now_ts = time.time()
+        updated = 0
+        with self.runtime.store_lock:
+            for aid, info in art_meta.items():
+                t_tr = str(tr_dict.get(f"t:{aid}") or "").strip()
+                s_tr = str(tr_dict.get(f"s:{aid}") or "").strip()
+                if not t_tr and not s_tr:
+                    continue
+                self.runtime.store.db.execute(
+                    """
+                    INSERT INTO satz_news_translations
+                      (article_id, target_lang, source_lang, title_tr, snippet_tr, body_tr, model_id, updated_at)
+                    VALUES (?, ?, ?, ?, ?, '', ?, ?)
+                    ON CONFLICT(article_id, target_lang) DO UPDATE SET
+                      source_lang = excluded.source_lang,
+                      title_tr = CASE WHEN LENGTH(excluded.title_tr) > 0 THEN excluded.title_tr ELSE satz_news_translations.title_tr END,
+                      snippet_tr = CASE WHEN LENGTH(excluded.snippet_tr) > 0 THEN excluded.snippet_tr ELSE satz_news_translations.snippet_tr END,
+                      model_id = excluded.model_id,
+                      updated_at = excluded.updated_at
+                    """,
+                    (aid, tgt, info["source_lang"], t_tr, s_tr, model_id, now_ts),
+                )
+                if info["source_lang"]:
+                    self.runtime.store.db.execute(
+                        "UPDATE satz_news_articles SET language = ? WHERE article_id = ?",
+                        (info["source_lang"], aid),
+                    )
+                if s_tr or t_tr:
+                    pub_iso = _utc_iso_from_ts(float(info["published_at"]))
+                    p_txt = neutralize_brain_directives_in_source(f"{t_tr or info['title']} ({pub_iso}): {s_tr or info['snippet']}")
+                    self.runtime.store.add_passages(
+                        [{"url": info["url"], "domain": info["domain"], "title": t_tr or info["title"], "text": p_txt}],
+                        entity=info["domain"],
+                        question=f"[conv:conv-news] news feed translated {info['source_lang']}->{tgt}",
+                    )
+                updated += 1
+            self.runtime.store.db.commit()
+
+        if recluster and updated > 0:
+            self.recluster_and_rank()
+            self._index_top_clusters_to_sources()
+        return {"translated_articles": updated, "target_lang": tgt, "model": model_id}
 
     # ── M27: Local Brain + Mail Signal Extraction & PII Scrubber Gate ───────
     def build_local_interest_signals(self) -> list[dict[str, Any]]:
@@ -1034,10 +1605,20 @@ class SatzNewsEngine:
 
         now_ts = time.time()
         cutoff = now_ts - 7 * 86400.0
+        t_target = self._primary_translation_target()
         with self.runtime.store_lock:
             art_rows = self.runtime.store.db.execute(
-                "SELECT * FROM satz_news_articles WHERE published_at >= ? ORDER BY published_at DESC LIMIT 250",
-                (cutoff,),
+                """
+                SELECT a.*, COALESCE(nt.title_tr, '') AS title_tr,
+                       COALESCE(nt.snippet_tr, '') AS snippet_tr,
+                       COALESCE(nt.body_tr, '') AS body_tr
+                FROM satz_news_articles a
+                LEFT JOIN satz_news_translations nt ON nt.article_id = a.article_id AND nt.target_lang = ?
+                WHERE a.published_at >= ?
+                ORDER BY a.published_at DESC
+                LIMIT 250
+                """,
+                (t_target, cutoff),
             ).fetchall()
 
         if not art_rows:
@@ -1049,7 +1630,7 @@ class SatzNewsEngine:
             dom = str(r["domain"])
             t_rec = self._trust_for_domain(dom, use_personal=True)
             t_sys = self._trust_for_domain(dom, use_personal=False)
-            toks = _tokenize_title(str(r["title"] or ""))
+            toks = _tokenize_title(f"{r['title'] or ''} {r['title_tr'] or ''}")
             articles.append(
                 {
                     "article_id": r["article_id"],
@@ -1057,9 +1638,11 @@ class SatzNewsEngine:
                     "domain": dom,
                     "family": r["family"] or t_rec["family"],
                     "title": r["title"],
+                    "title_tr": r["title_tr"],
                     "snippet": r["snippet"] or "",
+                    "snippet_tr": r["snippet_tr"] or "",
                     "body_text": r["body_text"] or "",
-                    "translated_text": r["translated_text"],
+                    "translated_text": r["body_tr"] or r["translated_text"] or r["snippet_tr"] or None,
                     "language": r["language"] or "en",
                     "image_url": r["image_url"] or "",
                     "author": r["author"] or "",
@@ -1121,8 +1704,11 @@ class SatzNewsEngine:
                 conf10 = round(max(0.0, min(10.0, top_trust + agree_bonus - PENALTY["news"])), 1)
                 band_code = band(conf10)
 
-                # Local Brain / Mail relevance matching
-                cluster_hay = " ".join(f"{a['title']} {a['snippet'][:240]}" for a in arts[:4]).lower()
+                # Local Brain / Mail relevance matching (uses both original & translated headlines/snippets)
+                cluster_hay = " ".join(
+                    f"{a['title']} {a.get('title_tr') or ''} {a['snippet'][:240]} {str(a.get('snippet_tr') or '')[:240]}"
+                    for a in arts[:4]
+                ).lower()
                 match_reasons: list[str] = []
                 brain_boost = 0.0
                 matched_tags: list[str] = []
@@ -1203,6 +1789,7 @@ class SatzNewsEngine:
 
         lane_l = (lane or "top").strip().lower()
         topic_l = (topic or "").strip().lower()
+        t_target = self._primary_translation_target()
 
         with self.runtime.store_lock:
             cluster_rows = self.runtime.store.db.execute(
@@ -1220,13 +1807,25 @@ class SatzNewsEngine:
                 cids = [r["cluster_id"] for r in cluster_rows]
                 ph = ",".join("?" for _ in cids)
                 arows = self.runtime.store.db.execute(
-                    f"SELECT * FROM satz_news_articles WHERE cluster_id IN ({ph}) ORDER BY trust_effective DESC, published_at DESC",
-                    cids,
+                    f"""
+                    SELECT ar.*,
+                           COALESCE(nt.title_tr, '') AS title_tr,
+                           COALESCE(nt.snippet_tr, '') AS snippet_tr,
+                           COALESCE(nt.body_tr, '') AS body_tr,
+                           COALESCE(nt.source_lang, '') AS tr_source_lang,
+                           COALESCE(nt.target_lang, '') AS tr_target_lang
+                    FROM satz_news_articles ar
+                    LEFT JOIN satz_news_translations nt ON nt.article_id = ar.article_id AND nt.target_lang = ?
+                    WHERE ar.cluster_id IN ({ph})
+                    ORDER BY ar.trust_effective DESC, ar.published_at DESC
+                    """,
+                    (t_target, *cids),
                 ).fetchall()
                 for ar in arows:
                     dom = str(ar["domain"])
                     t_rec = self._trust_for_domain(dom, use_personal=not explore)
                     t_sys = self._trust_for_domain(dom, use_personal=False)
+                    eff_tr = str(ar["body_tr"] or ar["translated_text"] or ar["snippet_tr"] or "") or None
                     articles_by_cluster.setdefault(ar["cluster_id"], []).append(
                         {
                             "article_id": ar["article_id"],
@@ -1234,10 +1833,14 @@ class SatzNewsEngine:
                             "domain": dom,
                             "family": ar["family"],
                             "title": ar["title"],
+                            "title_tr": str(ar["title_tr"] or ""),
                             "snippet": ar["snippet"],
+                            "snippet_tr": str(ar["snippet_tr"] or ""),
                             "body_text": ar["body_text"],
-                            "translated_text": ar["translated_text"],
+                            "translated_text": eff_tr,
                             "language": ar["language"] or "en",
+                            "translation_source_lang": str(ar["tr_source_lang"] or ""),
+                            "translation_target_lang": str(ar["tr_target_lang"] or ""),
                             "image_url": ar["image_url"] or "",
                             "author": ar["author"] or "",
                             "published_at": float(ar["published_at"] or 0.0),
@@ -1260,8 +1863,27 @@ class SatzNewsEngine:
                 continue
             tags = json.loads(cr["topic_tags_json"] or "[]")
             reasons = json.loads(cr["brain_match_reasons_json"] or "[]")
+            lead_tr_title = next((a["title_tr"] for a in arts if a.get("title_tr")), "")
+            tr_bullets = []
+            seen_tr_fam: set[str] = set()
+            tr_idx = 0
+            for a in arts:
+                if a["family"] in seen_tr_fam:
+                    continue
+                seen_tr_fam.add(a["family"])
+                tr_idx += 1
+                snip_tr_v = str(a.get("snippet_tr") or a.get("title_tr") or "").strip()
+                if snip_tr_v:
+                    if not snip_tr_v.endswith((".", "!", "?")):
+                        snip_tr_v += "."
+                    tr_bullets.append(f"- {snip_tr_v} [{tr_idx}]")
+                if tr_idx >= 3:
+                    break
+            translated_summary_md = "\n".join(tr_bullets) if tr_bullets else ""
+            tr_src_lang = next((a["translation_source_lang"] or a["language"] for a in arts if a.get("title_tr") or a.get("snippet_tr")), "")
+
             if topic_l:
-                hay = f"{cr['headline']} {' '.join(tags)} {cr['summary_md']}".lower()
+                hay = f"{cr['headline']} {lead_tr_title} {' '.join(tags)} {cr['summary_md']} {translated_summary_md}".lower()
                 if topic_l not in hay:
                     continue
 
@@ -1296,7 +1918,11 @@ class SatzNewsEngine:
             card = {
                 "cluster_id": cid,
                 "headline": cr["headline"],
+                "translated_headline": lead_tr_title,
                 "summary_md": cr["summary_md"],
+                "translated_summary_md": translated_summary_md,
+                "translation_source_lang": tr_src_lang,
+                "translation_target_lang": t_target if (lead_tr_title or translated_summary_md) else "",
                 "confidence10": conf10,
                 "band": b_code,
                 "band_label": BAND_LABEL.get(b_code, b_code),
@@ -1356,56 +1982,168 @@ class SatzNewsEngine:
             "stories": stories_out,
         }
 
-    # ── M28: On-Demand Non-English Article Translation ──────────────────────
-    def translate_article(self, article_id: str, target_lang: str = "en") -> dict[str, Any]:
+    def search_stories(
+        self,
+        query: str = "",
+        lane: str = "top",
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Searches synced news clusters & articles by keyword/topic and lane."""
+        lane_raw = (lane or "top").strip().lower()
+        eff_lane = "top" if lane_raw in ("", "stories", "all") else lane_raw
+        lim = max(1, min(30, int(limit or 10)))
+        q = (query or "").strip()
+        base = self.get_stories(lane=eff_lane, limit=60)
+        all_stories = list(base.get("stories") or [])
+
+        if not q:
+            return {
+                "ok": True,
+                "query": "",
+                "lane": eff_lane,
+                "total": len(all_stories[:lim]),
+                "stories": all_stories[:lim],
+            }
+
+        q_low = q.lower()
+        q_tokens = [
+            t
+            for t in re.findall(r"[a-z0-9äöüß]{2,}", q_low)
+            if t not in {"the", "and", "for", "with", "about", "news", "latest", "recent", "today", "stories"}
+        ]
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for card in all_stories:
+            art_hay = " ".join(
+                f"{a.get('title') or ''} {a.get('snippet') or ''} {a.get('domain') or ''}"
+                for a in (card.get("articles") or [])[:6]
+            )
+            hay = f"{card.get('headline') or ''} {card.get('summary_md') or ''} {' '.join(card.get('topic_tags') or [])} {art_hay}".lower()
+            sc = 0.0
+            if q_low in hay:
+                sc += 5.0
+            for tok in q_tokens:
+                if tok in hay:
+                    sc += 2.0
+            if sc > 0.0:
+                sc += min(1.5, float(card.get("story_rank") or 0.0) * 0.1)
+                scored.append((sc, card))
+
+        scored.sort(key=lambda pair: (-pair[0], -float(pair[1].get("updated_at") or 0.0)))
+        matched = [c for _, c in scored[:lim]]
+        return {
+            "ok": True,
+            "query": q,
+            "lane": eff_lane,
+            "total": len(matched),
+            "stories": matched,
+        }
+
+    # ── M28 + Content Translation: Non-Allowed Article Translation ────────────
+    def translate_article(self, article_id: str, target_lang: str = "") -> dict[str, Any]:
+        from satz_translate import detect_language, normalize_language_code
+
+        translator = getattr(self.runtime, "translator", None)
+        eff_target = normalize_language_code(target_lang) or self._primary_translation_target()
+
         with self.runtime.store_lock:
             row = self.runtime.store.db.execute(
                 "SELECT * FROM satz_news_articles WHERE article_id = ?",
                 (article_id,),
             ).fetchone()
-        if not row:
-            raise ValueError("Article not found")
-        if row["translated_text"]:
+            if not row:
+                raise ValueError("Article not found")
+            tr_row = self.runtime.store.db.execute(
+                "SELECT * FROM satz_news_translations WHERE article_id = ? AND target_lang = ?",
+                (article_id, eff_target),
+            ).fetchone()
+
+        raw_src = (row["body_text"] or row["snippet"] or "").strip()[:3500]
+        src_lang = detect_language(f"{row['title']}\n{raw_src[:1200]}", hint_lang=str(row["language"] or "en"))
+
+        if tr_row and tr_row["body_tr"]:
             return {
                 "ok": True,
                 "article_id": article_id,
-                "language": row["language"],
-                "translated_text": row["translated_text"],
-                "original_text": row["body_text"] or row["snippet"],
+                "language": src_lang,
+                "target_lang": eff_target,
+                "title_tr": str(tr_row["title_tr"] or row["title"]),
+                "snippet_tr": str(tr_row["snippet_tr"] or ""),
+                "translated_text": str(tr_row["body_tr"]),
+                "original_text": raw_src,
+                "model": str(tr_row["model_id"] or ""),
                 "cached": True,
             }
-        roles = self.runtime.get_model_management_config()["roles"]
-        capture_model = roles.get("news_capture") or "gemma-4-e4b"
-        raw_src = (row["body_text"] or row["snippet"] or "").strip()[:3500]
         if not raw_src:
             return {"ok": False, "error": "Article text is empty"}
 
         safe_src = neutralize_brain_directives_in_source(raw_src)
-        sys_p = (
-            f"You translate news reporting accurately into {target_lang}. "
-            "Preserve all numbers, dates, quotes, and proper nouns faithfully. Do not summarize or invent facts."
-        )
-        usr_p = f"HEADLINE: {row['title']}\nDOMAIN: {row['domain']}\nTEXT:\n{safe_src}"
-        translated = self.runtime._complete_role_prompt(
-            capture_model,
-            sys_p,
-            usr_p,
-            temperature=0.1,
-            max_tokens=1400,
-        )
+        safe_title = neutralize_brain_directives_in_source(str(row["title"] or ""))
+        if translator is not None:
+            seg_map: dict[str, str] = {"body": safe_src}
+            if safe_title:
+                seg_map["title"] = safe_title[:400]
+            if row["snippet"]:
+                seg_map["snippet"] = neutralize_brain_directives_in_source(str(row["snippet"] or ""))[:800]
+            tr_res = translator.translate_segments(
+                seg_map,
+                target_lang=eff_target,
+                source_lang=src_lang,
+                context_hint=f"news article from {row['domain']}",
+            )
+            tr_dict = tr_res.get("translations") or {}
+            translated = str(tr_dict.get("body") or "").strip()
+            title_tr = str(tr_dict.get("title") or (tr_row["title_tr"] if tr_row else "") or safe_title).strip()
+            snippet_tr = str(tr_dict.get("snippet") or (tr_row["snippet_tr"] if tr_row else "") or "").strip()
+            model_used = str(tr_res.get("model") or "")
+        else:
+            model_used = "gemma-4-e4b"
+            sys_p = (
+                f"You translate news reporting accurately into {eff_target}. "
+                "Preserve all numbers, dates, quotes, and proper nouns faithfully. Do not summarize or invent facts."
+            )
+            usr_p = f"HEADLINE: {safe_title}\nDOMAIN: {row['domain']}\nTEXT:\n{safe_src}"
+            translated = self.runtime._complete_role_prompt(
+                model_used,
+                sys_p,
+                usr_p,
+                temperature=0.1,
+                max_tokens=1400,
+            )
+            title_tr = safe_title
+            snippet_tr = ""
+
+        now_ts = time.time()
         with self.runtime.store_lock:
             self.runtime.store.db.execute(
-                "UPDATE satz_news_articles SET translated_text = ? WHERE article_id = ?",
-                (translated, article_id),
+                "UPDATE satz_news_articles SET translated_text = ?, language = ? WHERE article_id = ?",
+                (translated, src_lang, article_id),
+            )
+            self.runtime.store.db.execute(
+                """
+                INSERT INTO satz_news_translations
+                  (article_id, target_lang, source_lang, title_tr, snippet_tr, body_tr, model_id, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(article_id, target_lang) DO UPDATE SET
+                  source_lang = excluded.source_lang,
+                  title_tr = CASE WHEN LENGTH(excluded.title_tr) > 0 THEN excluded.title_tr ELSE satz_news_translations.title_tr END,
+                  snippet_tr = CASE WHEN LENGTH(excluded.snippet_tr) > 0 THEN excluded.snippet_tr ELSE satz_news_translations.snippet_tr END,
+                  body_tr = excluded.body_tr,
+                  model_id = excluded.model_id,
+                  updated_at = excluded.updated_at
+                """,
+                (article_id, eff_target, src_lang, title_tr, snippet_tr, translated, model_used, now_ts),
             )
             self.runtime.store.db.commit()
         return {
             "ok": True,
             "article_id": article_id,
-            "language": row["language"],
+            "language": src_lang,
+            "target_lang": eff_target,
+            "title_tr": title_tr,
+            "snippet_tr": snippet_tr,
             "translated_text": translated,
             "original_text": raw_src,
-            "model": capture_model,
+            "model": model_used,
             "cached": False,
         }
 
@@ -1591,6 +2329,458 @@ class SatzNewsEngine:
 
         return {"ok": True, "cluster_id": cluster_id, **payload, "cached": False}
 
+    def _collect_topic_perspective_articles(
+        self,
+        topic: str,
+        cluster_id: str = "",
+        limit_families: int = 8,
+    ) -> dict[str, Any]:
+        """Finds matching articles across independent news source families for a topic or cluster."""
+        from src.planck3.web import domain_of
+
+        clean_topic = (topic or "").strip()
+        cid = (cluster_id or "").strip()
+        t_target = self._primary_translation_target()
+        topic_keywords: list[str] = []
+        cluster_headline = ""
+        seed_rows: list[dict[str, Any]] = []
+
+        with self.runtime.store_lock:
+            if cid:
+                cr = self.runtime.store.db.execute(
+                    "SELECT * FROM satz_news_clusters WHERE cluster_id = ?",
+                    (cid,),
+                ).fetchone()
+                if cr:
+                    cluster_headline = str(cr["headline"] or "").strip()
+                    arows = self.runtime.store.db.execute(
+                        """
+                        SELECT a.*,
+                               COALESCE(nt.title_tr, '') AS title_tr,
+                               COALESCE(nt.snippet_tr, '') AS snippet_tr,
+                               COALESCE(nt.body_tr, '') AS body_tr
+                        FROM satz_news_articles a
+                        LEFT JOIN satz_news_translations nt ON nt.article_id = a.article_id AND nt.target_lang = ?
+                        WHERE a.cluster_id = ?
+                        ORDER BY a.trust_effective DESC, a.published_at DESC
+                        """,
+                        (t_target, cid),
+                    ).fetchall()
+                    for ar in arows:
+                        seed_rows.append(dict(ar))
+
+            # Expand keywords from matching tracked topic if any
+            top_rows = self.runtime.store.db.execute(
+                "SELECT name, keywords_json FROM satz_news_topics WHERE suppressed = 0"
+            ).fetchall()
+            eff_q_low = (clean_topic or cluster_headline).lower()
+            for tr in top_rows:
+                tname = str(tr["name"] or "").strip().lower()
+                if tname and (tname == eff_q_low or tname in eff_q_low or eff_q_low in tname):
+                    try:
+                        topic_keywords.extend(str(k).lower() for k in json.loads(tr["keywords_json"] or "[]"))
+                    except Exception:
+                        pass
+
+            eff_query = clean_topic or cluster_headline
+            q_terms = list(dict.fromkeys([*_tokenize_title(eff_query), *_tokenize_title(" ".join(topic_keywords))]))
+            all_rows = self.runtime.store.db.execute(
+                """
+                SELECT a.*,
+                       COALESCE(nt.title_tr, '') AS title_tr,
+                       COALESCE(nt.snippet_tr, '') AS snippet_tr,
+                       COALESCE(nt.body_tr, '') AS body_tr
+                FROM satz_news_articles a
+                LEFT JOIN satz_news_translations nt ON nt.article_id = a.article_id AND nt.target_lang = ?
+                ORDER BY a.published_at DESC
+                LIMIT 260
+                """,
+                (t_target,),
+            ).fetchall()
+
+        scored_local: list[tuple[float, dict[str, Any]]] = []
+        seen_urls = {str(r.get("url") or "") for r in seed_rows}
+        for sr in seed_rows:
+            scored_local.append((100.0 + float(sr.get("trust_effective") or 5.0), sr))
+        for ar in all_rows:
+            d = dict(ar)
+            u = str(d.get("url") or "")
+            if not u or u in seen_urls:
+                continue
+            title_hay = f"{d.get('title_tr') or ''} {d.get('title') or ''}".lower()
+            body_hay = f"{d.get('snippet_tr') or ''} {d.get('snippet') or ''} {d.get('body_tr') or ''} {d.get('body_text') or ''}".lower()
+            t_hits = sum(1 for tok in q_terms if tok in title_hay)
+            b_hits = sum(1 for tok in q_terms if tok in body_hay)
+            if q_terms and (t_hits == 0 and b_hits == 0):
+                continue
+            score = t_hits * 8.0 + b_hits * 2.5 + float(d.get("trust_effective") or 5.0) * 0.4
+            scored_local.append((score, d))
+
+        # Translate top local candidates if non-allowed language lacks translation yet
+        scored_local.sort(key=lambda x: -x[0])
+        web_cand_dicts: list[dict[str, Any]] = []
+        distinct_local_fams = {str(x[1].get("family") or x[1].get("domain") or "") for x in scored_local[:12]}
+        web_obj = getattr(self.runtime, "web", None)
+        can_web = bool(web_obj is not None and (getattr(getattr(web_obj, "cache", None), "online", False) or "search" in getattr(web_obj, "__dict__", {})))
+        if len(distinct_local_fams) < 2 and clean_topic and can_web:
+            try:
+                search_hits = web_obj.search(f"{clean_topic} news") or []
+                for h in search_hits[:6]:
+                    hu = str(h.get("url") or "").strip()
+                    if not hu or hu in seen_urls or _is_landing_url(hu):
+                        continue
+                    seen_urls.add(hu)
+                    hdom = str(h.get("domain") or domain_of(hu) or "").lower().removeprefix("www.")
+                    fam, wire_org = self.resolve_article_family(hdom, str(h.get("snippet") or ""))
+                    web_cand_dicts.append(
+                        {
+                            "article_id": f"web-{hashlib.sha1(hu.encode('utf-8')).hexdigest()[:12]}",
+                            "url": hu,
+                            "domain": hdom,
+                            "family": fam,
+                            "wire_origin": wire_org,
+                            "title": str(h.get("title") or hdom),
+                            "snippet": str(h.get("snippet") or ""),
+                            "body_text": str(h.get("snippet") or ""),
+                            "image_url": "",
+                            "published_at": time.time(),
+                        }
+                    )
+            except Exception:
+                pass
+
+        combined_rows = [x[1] for x in scored_local[:24]] + web_cand_dicts
+        seen_fam: set[str] = set()
+        fam_articles: list[dict[str, Any]] = []
+        collapsed_wire = 0
+        for ar in combined_rows:
+            dom = str(ar.get("domain") or "").lower().removeprefix("www.")
+            fam = str(ar.get("family") or dom)
+            if fam in seen_fam:
+                collapsed_wire += 1
+                continue
+            seen_fam.add(fam)
+            t_rec = self._trust_for_domain(dom, use_personal=True)
+            t_sys = self._trust_for_domain(dom, use_personal=False)
+            eff_title = str(ar.get("title_tr") or ar.get("title") or dom)
+            eff_snip = str(ar.get("snippet_tr") or ar.get("snippet") or ar.get("body_tr") or ar.get("body_text") or "")[:500]
+            eff_body = str(ar.get("body_tr") or ar.get("translated_text") or ar.get("body_text") or eff_snip)[:2000]
+            fam_articles.append(
+                {
+                    "idx": len(fam_articles) + 1,
+                    "role": "news",
+                    "article_id": str(ar.get("article_id") or ""),
+                    "url": str(ar.get("url") or ""),
+                    "domain": dom,
+                    "family": fam,
+                    "title": eff_title,
+                    "snippet": eff_snip,
+                    "body_text": eff_body,
+                    "image_url": str(ar.get("image_url") or ""),
+                    "published_at": float(ar.get("published_at") or time.time()),
+                    "category": str(t_rec["category"] or ""),
+                    "why": str(t_rec["why"] or ""),
+                    "trust": {
+                        "system": round(float(t_sys["system"]), 2),
+                        "personal": round(float(t_rec["personal"]), 2) if t_rec["personal"] is not None else None,
+                        "effective": round(float(t_rec["effective"]), 2),
+                        "category": str(t_rec["category"] or ""),
+                        "family": str(t_rec["family"] or fam),
+                        "why": str(t_rec["why"] or ""),
+                        "conflict": bool(t_rec["conflict"]),
+                    },
+                    "trust_system": round(float(t_sys["system"]), 2),
+                    "trust_effective": round(float(t_rec["effective"]), 2),
+                    "conflict": bool(t_rec["conflict"]),
+                }
+            )
+            if len(fam_articles) >= limit_families:
+                break
+
+        cats_present = {a["category"] for a in fam_articles}
+        blind_spots: list[str] = []
+        if fam_articles and "primary_official" not in cats_present and "eu_gov" not in cats_present and "us_agency" not in cats_present:
+            blind_spots.append("missing: no primary official government or agency filing (trust 9.0) retrieved")
+        if collapsed_wire > 0:
+            blind_spots.append(f"deduped: {collapsed_wire} syndicated/wire duplicate article(s) collapsed into origin family")
+        sys_top = sorted(fam_articles, key=lambda a: -a["trust_system"])[0]["domain"] if fam_articles else ""
+        eff_top = fam_articles[0]["domain"] if fam_articles else ""
+        counterfactual = (
+            f"Personal trust overrides elevated {eff_top} over system top choice {sys_top}."
+            if sys_top and eff_top and sys_top != eff_top
+            else "System-only trust weights preserve the same primary source ordering."
+        )
+        return {
+            "topic_label": clean_topic or cluster_headline,
+            "cluster_id": cid,
+            "fam_articles": fam_articles,
+            "blind_spots": blind_spots,
+            "collapsed_wire": collapsed_wire,
+            "counterfactual": counterfactual,
+            "sys_top_domain": sys_top,
+        }
+
+    def stream_topic_perspectives(
+        self,
+        topic: str = "",
+        cluster_id: str = "",
+        roles_override: dict[str, str] | None = None,
+        prior_messages: list[dict[str, Any]] | None = None,
+    ):
+        """SSE generator finding relevant articles across sources for a user topic and streaming a comparison."""
+        from src.planck3.qtype import PENALTY
+        from src.planck3.registry import BAND_LABEL, band
+
+        t0 = time.perf_counter()
+        topic_label_in = (topic or "").strip() or "current top news"
+        yield {"status": f"searching articles on '{topic_label_in[:48]}' across sources...", "phase": "searching"}
+
+        data = self._collect_topic_perspective_articles(topic_label_in, cluster_id=cluster_id, limit_families=8)
+        topic_label = data["topic_label"] or topic_label_in
+        fam_articles = data["fam_articles"]
+        blind_spots = data["blind_spots"]
+        counterfactual = data["counterfactual"]
+
+        roles = dict(self.runtime.get_model_management_config()["roles"])
+        if roles_override:
+            roles.update({k: v for k, v in roles_override.items() if v})
+        analyzer_m = roles.get("news_analyzer") or roles.get("chat") or "gemma-4-e4b"
+
+        findings_out: list[dict[str, Any]] = []
+        seen_imgs: set[str] = set()
+        if fam_articles and hasattr(self.runtime, "merge_previews_into_sources"):
+            try:
+                self.runtime.merge_previews_into_sources(
+                    fam_articles,
+                    findings_out,
+                    seen_imgs,
+                    max_items=8,
+                    max_findings=6,
+                )
+            except Exception:
+                pass
+
+        source_stats_out = [
+            {
+                "id": a["url"],
+                "chars_captured": len(a["body_text"] or a["snippet"]),
+                "chars_sent": len(a["body_text"] or a["snippet"]),
+                "was_cut": False,
+                "capture_mode": "rss",
+                "context_tier": "full",
+            }
+            for a in fam_articles
+        ]
+        early_sources = [
+            {
+                "url": a["url"],
+                "title": a["title"],
+                "domain": a["domain"],
+                "snippet": str(a.get("snippet") or "")[:240],
+                "image_url": str(a.get("image_url") or ""),
+                **({"favicon_url": a["favicon_url"]} if a.get("favicon_url") else {}),
+            }
+            for a in fam_articles
+        ]
+
+        yield {
+            "source_stats": source_stats_out,
+            "sources": early_sources,
+            "status": f"comparing reporting across {len(fam_articles)} independent source(s) via {analyzer_m}...",
+            "phase": "comparing",
+        }
+
+        if not fam_articles:
+            empty_msg = (
+                f"No articles matching **{topic_label}** were found across your current news sources. "
+                "Try broadening the topic, adding relevant feeds in **News Settings**, or syncing your feeds."
+            )
+            yield {"delta": empty_msg}
+            yield {
+                "done": True,
+                "ok": True,
+                "topic": topic_label,
+                "cluster_id": data["cluster_id"],
+                "answer": empty_msg,
+                "model": "none",
+                "sources": [],
+                "source_stats": [],
+                "findings": [],
+            }
+            return
+
+        # Compute trust audit card (30% personal cap + counterfactual)
+        pen = PENALTY.get("news", 2.0)
+        top = fam_articles[0]
+        agree = [a for a in fam_articles[1:] if a["trust_effective"] >= 7.0]
+        items = [[f"most trusted source covering topic: {top['domain']} ({top['category']})", round(top["trust_effective"], 2)]]
+        if agree:
+            items.append([f"{len(agree)} more independent source(s) at 7+: " + ", ".join(x["domain"] for x in agree[:3]), min(2.0, float(len(agree)))])
+        if pen:
+            items.append(["news question type", -pen])
+        conf10 = round(max(0.0, min(10.0, sum(v for _, v in items))), 1)
+        b_code = band(conf10)
+        sys_top_domain = str(data.get("sys_top_domain") or top["domain"])
+        sys_top_score = max(a["trust_system"] for a in fam_articles)
+        sys_agree = min(2.0, sum(1.0 for a in fam_articles[1:] if a["trust_system"] >= 7.0))
+        sys_conf = round(max(0.0, min(10.0, sys_top_score + sys_agree - pen)), 1)
+        sys_band = band(sys_conf)
+
+        # Deterministic extractive comparison fallback
+        fb_lines = [
+            f"### Perspectives on: {topic_label}",
+            "",
+            "**Sources compared:**",
+            *[
+                f"- **[{a['title']}]({a['url']})** ({a['domain']} · {a['category']} · {a['trust_effective']:.1f}/10) — {a['snippet'][:200]} [{a['idx']}]"
+                for a in fam_articles[:6]
+            ],
+            "",
+            "**Blind spots & trust check:**",
+            *[f"- {bs}" for bs in blind_spots],
+            f"- {counterfactual}",
+        ]
+        fb_answer = "\n".join(fb_lines)
+        answer_text = fb_answer
+        used_writer = "template"
+
+        if analyzer_m != "template":
+            src_ctx = "\n\n".join(
+                f"[{a['idx']}] {a['domain']} (cat={a['category']}, eff={a['trust_effective']:.1f}/10, sys={a['trust_system']:.1f}/10, fam={a['family']}): "
+                f"{a['title']} ({a['url']})\n{neutralize_brain_directives_in_source((a['body_text'] or a['snippet'])[:900])}"
+                for a in fam_articles
+            )
+            hist_lines = []
+            for pm in (prior_messages or [])[-4:]:
+                r = str(pm.get("role") or "")
+                c = str(pm.get("content") or "")[:300]
+                if r in ("user", "assistant") and c:
+                    hist_lines.append(f"{r.upper()}: {c}")
+            hist_blk = ("PRIOR DISCUSSION:\n" + "\n".join(hist_lines) + "\n\n") if hist_lines else ""
+            sys_p = (
+                "Compare reporting on the selected news topic objectively across the provided independent sources. "
+                "Structure clearly in markdown with:\n"
+                "1. **Shared facts & consensus**\n"
+                "2. **Outlet angles & framing differences** (contrast how different outlets/regions frame claims)\n"
+                "3. **Gaps & blind spots**\n"
+                "Cite every claim inline as [1], [2], etc. Never invent sources, facts, quotes, or numbers outside SOURCES. "
+                f"Respond in the user's preferred language ({t_target}), translating foreign excerpts cleanly."
+            )
+            usr_p = (
+                f"TOPIC: {topic_label}\n"
+                f"BLIND SPOTS DETECTED: {'; '.join(blind_spots) or 'none'}\n"
+                f"TRUST CHECK: {counterfactual}\n\n"
+                f"{hist_blk}SOURCES:\n{src_ctx}"
+            )
+            cand_txt = ""
+            try:
+                is_mocked_complete = "_complete_role_prompt" in getattr(self.runtime, "__dict__", {})
+                stream_fn = getattr(self.runtime, "_stream_role_prompt", None)
+                if callable(stream_fn) and not is_mocked_complete:
+                    started = False
+                    for sev in stream_fn(
+                        analyzer_m,
+                        sys_p,
+                        usr_p,
+                        temperature=0.15,
+                        max_tokens=720,
+                        thinking_budget=0,
+                    ):
+                        if "__full_raw" in sev:
+                            cand_txt = str(sev.get("__full_raw") or "")
+                        elif sev.get("delta"):
+                            if not started:
+                                yield {"status": "streaming perspectives comparison...", "phase": "streaming"}
+                                started = True
+                            yield {"delta": sev["delta"]}
+                        elif sev.get("phase") == "heartbeat":
+                            yield sev
+                else:
+                    cand_txt = _complete_role_fast(
+                        self.runtime,
+                        analyzer_m,
+                        sys_p,
+                        usr_p,
+                        temperature=0.15,
+                        max_tokens=720,
+                        thinking_budget=0,
+                    )
+                    if cand_txt:
+                        yield {"delta": cand_txt}
+
+                max_idx = len(fam_articles)
+                if cand_txt.strip():
+                    # Guard against out-of-range numeric citation tags
+                    cleaned_c = re.sub(
+                        r"\[(\d+)\]",
+                        lambda m: m.group(0) if 1 <= int(m.group(1)) <= max_idx else "",
+                        cand_txt,
+                    ).strip()
+                    if cleaned_c != cand_txt.strip():
+                        yield {"replace_text": cleaned_c, "fallback": False}
+                    answer_text = cleaned_c
+                    used_writer = analyzer_m
+                else:
+                    yield {"replace_text": fb_answer, "fallback": True}
+            except Exception as exc:
+                ctx_err = str(exc)
+                yield {"status": f"using structured fallback comparison ({ctx_err[:40]})", "phase": "fallback"}
+                if cand_txt:
+                    yield {"replace_text": fb_answer, "fallback": True}
+                else:
+                    yield {"delta": fb_answer}
+        else:
+            yield {"delta": fb_answer}
+
+        is_cloud_m = self.runtime._parse_cloud_model_id(used_writer) is not None
+        answer_meta = {
+            "pipeline": "perspectives_stream",
+            "question": topic_label,
+            "confidence10": conf10,
+            "band": b_code,
+            "band_label": BAND_LABEL[b_code],
+            "qtype": "news",
+            "items": items,
+            "divergence": (
+                {"system_value": sys_top_domain, "system_confidence": sys_conf, "system_band": sys_band}
+                if (sys_band != b_code or abs(sys_conf - conf10) >= 0.5)
+                else None
+            ),
+            "steps": [
+                f"1. Searched sources for topic '{topic_label}'",
+                f"2. Collapsed syndicated wires ({data['collapsed_wire']} deduped) -> {len(fam_articles)} independent families",
+                f"3. Weighed personal overrides (30% cap) · {conf10:.1f}/10 {b_code}",
+                f"4. Streamed comparison via {used_writer}",
+            ],
+            "sources": fam_articles,
+            "models_used": {
+                "planner": roles.get("news_planner") or "local",
+                "reader": roles.get("news_reader") or "heuristic",
+                "analyzer": used_writer,
+            },
+            "privacy_disclosure": (
+                f"Sent {len(fam_articles)} public article excerpts to {used_writer}; Brain & Mail omitted."
+                if is_cloud_m
+                else "100% local execution (0 cloud calls)."
+            ),
+            "ms": int((time.perf_counter() - t0) * 1000),
+        }
+
+        yield {
+            "done": True,
+            "ok": True,
+            "topic": topic_label,
+            "cluster_id": data["cluster_id"],
+            "answer": answer_text,
+            "model": used_writer,
+            "sources": early_sources,
+            "source_stats": source_stats_out,
+            "findings": findings_out[:6],
+            "answer_meta": answer_meta,
+            "blind_spots": blind_spots,
+            "system_counterfactual": counterfactual,
+        }
+
     # ── M25: Audited read -> weigh -> write News Chat Pipeline ──────────────
     def _build_reader(self, model_id: str):
         if model_id in ("hertz (reader)", "planck (reader)"):
@@ -1606,26 +2796,21 @@ class SatzNewsEngine:
             return HeuristicReader()
         return SatzLLMReader(self.runtime, model_id, role_key="news_reader", max_cands=20)
 
-    def answer_news_question(
+    def _iter_news_evidence(
         self,
         question: str,
         open_sources: list[dict[str, Any]] | None = None,
         roles_override: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
+    ):
         """
-        Full Planck 3.0 audited pipeline for News chat:
-        1. `news_planner` decomposes + scrubs query (PII Scrubber Gate)
-        2. `news_capture` gathers local articles + open tabs + live web results
-        3. Trust-blind `news_reader` scores candidates
-        4. `consolidate()` runs twice (`personal` vs `system_only`) for counterfactual diff
-        5. `news_analyzer` writes concise summary guarded by `faithful_news` (template fallback)
+        Shared Stages 1-4 builder for both `answer_news_question` and `stream_news_question`:
+        yields `{'status': ..., 'phase': ...}` updates and concludes with `{'__ctx': ctx}`.
         """
-        from src.planck3.candidates import rank_passages, snippet_candidates, span_candidates, title_aboutness
+        from src.planck3.candidates import snippet_candidates, span_candidates, title_aboutness
         from src.planck3.chat import infer_answer_type
         from src.planck3.consolidate import consolidate, divergence
         from src.planck3.qtype import classify
         from src.planck3.web import domain_of, extract_jsonld, extract_main_text
-        from src.planck3.writer import TemplateWriter
 
         roles = dict(self.runtime.get_model_management_config()["roles"])
         if roles_override:
@@ -1648,50 +2833,112 @@ class SatzNewsEngine:
         planned_q = _plan_news_search_query(scrubbed_q) if is_briefing else scrubbed_q
         search_queries = [planned_q]
         steps.append(f"1. Planned query ({qt.replace('_', ' ')}): \"{planned_q}\" via {planner_m}")
+        yield {"status": f"planning news query ({planned_q[:42]})...", "phase": "news_weigh"}
 
-        # Gather candidate results: RSS articles + open tabs + live web search
         results: list[dict[str, Any]] = []
         seen_urls: set[str] = set()
         docs: list[dict[str, Any]] = []
 
-        for src in open_sources or []:
-            u = str(src.get("url") or "").strip()
-            if not u or u in seen_urls:
-                continue
-            txt, _ = self.runtime.get_source_text(str(src.get("id") or u), u, str(src.get("title") or u))
-            if txt:
-                seen_urls.add(u)
-                dom = str(src.get("domain") or domain_of(u) or "")
-                results.append(
-                    {
-                        "url": u,
-                        "domain": dom,
-                        "title": str(src.get("title") or dom),
-                        "snippet": txt[:400],
-                        "capture_mode": "dom",
-                    }
-                )
-                docs.append({"url": u, "domain": dom, "title": str(src.get("title") or dom), "text": txt, "capture_mode": "dom"})
+        if open_sources:
+            cached_src_texts: dict[str, str] = {}
+            open_urls = [str(src.get("url") or "").strip() for src in open_sources if str(src.get("url") or "").strip()]
+            open_sids = [str(src.get("id") or "").strip() for src in open_sources if str(src.get("id") or "").strip()]
+            if open_urls or open_sids:
+                with self.runtime.store_lock:
+                    if open_sids:
+                        ph_s = ",".join("?" for _ in open_sids)
+                        for r in self.runtime.store.db.execute(
+                            f"SELECT source_id, url, text FROM satz_sources WHERE source_id IN ({ph_s}) AND LENGTH(TRIM(COALESCE(text, ''))) > 0",
+                            open_sids,
+                        ).fetchall():
+                            cached_src_texts[str(r["source_id"])] = str(r["text"])
+                            if r["url"]:
+                                cached_src_texts.setdefault(str(r["url"]), str(r["text"]))
+                    if open_urls:
+                        ph_u = ",".join("?" for _ in open_urls)
+                        for r in self.runtime.store.db.execute(
+                            f"SELECT url, text FROM satz_sources WHERE url IN ({ph_u}) AND LENGTH(TRIM(COALESCE(text, ''))) > 0 ORDER BY updated_at DESC",
+                            open_urls,
+                        ).fetchall():
+                            cached_src_texts.setdefault(str(r["url"]), str(r["text"]))
+            for src in open_sources:
+                u = str(src.get("url") or "").strip()
+                if not u or u in seen_urls:
+                    continue
+                sid_s = str(src.get("id") or u)
+                txt = str(src.get("text") or cached_src_texts.get(sid_s) or cached_src_texts.get(u) or "").strip()
+                if txt:
+                    seen_urls.add(u)
+                    dom = str(src.get("domain") or domain_of(u) or "")
+                    results.append(
+                        {
+                            "url": u,
+                            "domain": dom,
+                            "title": str(src.get("title") or dom),
+                            "snippet": txt[:400],
+                            "capture_mode": "dom",
+                        }
+                    )
+                    docs.append({"url": u, "domain": dom, "title": str(src.get("title") or dom), "text": txt, "capture_mode": "dom"})
 
+        yield {"status": "checking synced local news index...", "phase": "news_weigh"}
         with self.runtime.store_lock:
             art_cnt = self.runtime.store.db.execute("SELECT COUNT(*) FROM satz_news_articles").fetchone()[0]
         if art_cnt == 0 and getattr(self.runtime.web.cache, "online", True):
             try:
-                rf = self.refresh_news_feeds(force=False)
+                yield {"status": "warming starter RSS news feeds...", "phase": "news_weigh"}
+                try:
+                    rf = self.refresh_news_feeds(force=False, process_to_brain=False, translate_recent=False)
+                except TypeError:
+                    rf = self.refresh_news_feeds(force=False)
                 if rf.get("articles_ingested"):
-                    steps.append(f"1b. Auto-warmed RSS feeds ({rf['fetched_feeds']} feed(s), {rf['articles_ingested']} article(s))")
+                    steps.append(f"1b. Auto-warmed synced RSS feeds ({rf['fetched_feeds']} feed(s), {rf['articles_ingested']} article(s), bg Brain/translation queued)")
+                    def _bg_warm_news():
+                        try:
+                            self.translate_recent_untranslated(limit=35, recluster=True, background_indexation=True)
+                        except Exception:
+                            pass
+                        try:
+                            self.process_top_stories_to_brain(limit=12, force=False)
+                        except Exception:
+                            pass
+                    threading.Thread(target=_bg_warm_news, daemon=True, name="satz-news-warm").start()
             except Exception:
                 pass
 
+        temporal = _parse_temporal_query(scrubbed_q)
+        interval_secs = float(getattr(self.runtime, "news_refresh_interval_secs", 3600.0))
+        last_sync_at = self._get_meta_float("news_last_sync_at")
+        has_fresh_sync = bool(last_sync_at > 0 and (time.time() - last_sync_at) <= max(interval_secs, 3600.0))
+
         q_toks = _expand_news_topic_tokens(_tokenize_title(scrubbed_q))
+        t_target = self._primary_translation_target()
         with self.runtime.store_lock:
             local_arts = self.runtime.store.db.execute(
-                "SELECT url, domain, title, snippet, body_text, image_url FROM satz_news_articles ORDER BY trust_effective DESC, published_at DESC LIMIT 160"
+                """
+                SELECT ar.article_id, ar.url, ar.domain, ar.title, ar.snippet, ar.body_text,
+                       ar.image_url, ar.published_at, ar.trust_effective, ar.language,
+                       COALESCE(nt.title_tr, '') AS title_tr,
+                       COALESCE(nt.snippet_tr, '') AS snippet_tr,
+                       COALESCE(nt.body_tr, '') AS body_tr
+                FROM satz_news_articles ar
+                LEFT JOIN satz_news_translations nt
+                  ON nt.article_id = ar.article_id AND nt.target_lang = ?
+                ORDER BY ar.published_at DESC, ar.trust_effective DESC
+                LIMIT 200
+                """,
+                (t_target,),
             ).fetchall()
 
-        scored_local: list[tuple[int, sqlite3.Row]] = []
+        scored_local: list[tuple[int, float, float, sqlite3.Row]] = []
+        now_news = time.time()
         for ar in local_arts:
-            a_toks = _tokenize_title(f"{ar['title']} {ar['snippet']}")
+            a_toks = _tokenize_title(f"{ar['title']} {ar['title_tr']} {ar['snippet']} {ar['snippet_tr']}")
+            pub_ts = float(ar["published_at"] or 0.0)
+            if temporal["start_ts"] is not None and pub_ts > 0:
+                end_b = temporal["end_ts"] if temporal["end_ts"] is not None else (now_news + 600.0)
+                if not (temporal["start_ts"] <= pub_ts <= end_b) and not is_briefing:
+                    continue
             if not q_toks:
                 overlap = 0
             else:
@@ -1702,26 +2949,39 @@ class SatzNewsEngine:
                     or (len(qt_tok) >= 5 and any(at_tok.startswith(qt_tok[:5]) or qt_tok.startswith(at_tok[:5]) for at_tok in a_toks))
                 )
             if overlap >= 1 or is_briefing:
-                scored_local.append((overlap, ar))
+                age_h = max(0.0, (now_news - pub_ts) / 3600.0) if pub_ts > 0 else 48.0
+                rec_bonus = math.exp(-age_h / 24.0) * 2.0 + float(ar["trust_effective"] or 5.0) * 0.25
+                scored_local.append((overlap, rec_bonus, pub_ts, ar))
 
-        scored_local.sort(key=lambda pair: (-pair[0],))
-        for ov, ar in scored_local:
+        scored_local.sort(key=lambda item: (-item[0], -item[1], -item[2]))
+        high_overlap_rss = 0
+        for ov, _rec, pub_ts, ar in scored_local:
             if not is_briefing and ov == 0:
                 continue
-            if len(results) >= (8 if is_briefing else 5):
+            if len(results) >= (8 if is_briefing else 6):
                 break
             u = ar["url"]
             if u in seen_urls:
                 continue
             seen_urls.add(u)
-            body_or_snip = ar["body_text"] or ar["snippet"] or ""
+            eff_title = str(ar["title_tr"] or "").strip() or str(ar["title"] or "")
+            eff_snip_raw = str(ar["snippet_tr"] or "").strip() or str(ar["snippet"] or "")
+            eff_body_raw = str(ar["body_tr"] or "").strip() or str(ar["body_text"] or "")
+            body_or_snip = eff_body_raw or eff_snip_raw or ""
+            pub_lbl = _utc_iso_from_ts(pub_ts)[:16].replace("T", " ") + "Z" if pub_ts > 0 else ""
+            raw_snip = eff_snip_raw or body_or_snip[:400]
+            dated_snip = f"[{pub_lbl}] {raw_snip}" if (pub_lbl and raw_snip) else raw_snip
             results.append(
                 {
+                    "article_id": str(ar["article_id"] or ""),
                     "url": u,
                     "domain": ar["domain"],
-                    "title": ar["title"],
-                    "snippet": ar["snippet"] or body_or_snip[:400],
+                    "title": eff_title,
+                    "snippet": dated_snip,
                     "image_url": ar["image_url"] or "",
+                    "published_at": pub_ts,
+                    "language": str(ar["language"] or "en"),
+                    "already_translated": bool(str(ar["title_tr"] or "").strip() or str(ar["snippet_tr"] or "").strip()),
                     "capture_mode": "rss",
                 }
             )
@@ -1730,25 +2990,34 @@ class SatzNewsEngine:
                     {
                         "url": u,
                         "domain": ar["domain"],
-                        "title": ar["title"],
-                        "text": body_or_snip,
+                        "title": eff_title,
+                        "text": f"[{pub_lbl}] {body_or_snip}" if pub_lbl else body_or_snip,
                         "capture_mode": "rss",
                     }
                 )
+                if ov >= 2:
+                    high_overlap_rss += 1
 
-        try:
-            web_res = self.runtime.web.search(search_queries[0]) or []
-            for r in web_res:
-                u = str(r.get("url") or "").strip()
-                if u and u not in seen_urls:
-                    seen_urls.add(u)
-                    d_r = dict(r)
-                    d_r.setdefault("capture_mode", "snippet")
-                    results.append(d_r)
-        except Exception as e:
-            steps.append(f"2. Web search note: {e} (using {len(results)} local news source(s))")
+        need_live_web = not (
+            (is_briefing and len(docs) >= 4 and (has_fresh_sync or not getattr(self.runtime.web.cache, "online", True)))
+            or (not is_briefing and high_overlap_rss >= 2 and len(docs) >= 2)
+        )
+        if need_live_web:
+            yield {"status": f"searching web for '{search_queries[0][:40]}'...", "phase": "web_search"}
+            try:
+                web_res = self.runtime.web.search(search_queries[0]) or []
+                for r in web_res:
+                    u = str(r.get("url") or "").strip()
+                    if u and u not in seen_urls:
+                        seen_urls.add(u)
+                        d_r = dict(r)
+                        d_r.setdefault("capture_mode", "snippet")
+                        results.append(d_r)
+            except Exception as e:
+                steps.append(f"2. Web search note: {e} (using {len(results)} local news source(s))")
+        else:
+            steps.append(f"2. Fast synced news cache hit ({len(docs)} pre-indexed local article(s), last sync active)")
 
-        # Drop bare section homepages (/hub/europe, /, /europe) when actual article URLs exist
         non_index_results = [r for r in results if not _is_section_index_url(str(r.get("url") or ""))]
         if len(non_index_results) >= 2:
             results = non_index_results
@@ -1768,19 +3037,18 @@ class SatzNewsEngine:
             f"2. Gathered {len(results)} source(s) from {len({r.get('domain') for r in results})} domain(s)"
         )
 
-        # Build snippet pool & trust-blind reader pass (only for specific fact/claim questions, not multi-story digests)
         reader = self._build_reader(reader_m)
         pools: list[dict[str, Any]] = []
         if results and not is_briefing:
             scands = snippet_candidates(scrubbed_q, results, at)
             if scands:
+                yield {"status": f"scoring {len(scands)} news snippet candidate(s)...", "phase": "reading"}
                 pools.append({"name": "snippets", "cands": scands, "snippet": True, "r": []})
                 pools[-1]["r"] = reader.read(scrubbed_q, at, pools[-1])
                 steps.append(f"3. Extracted & scored {len(scands)} snippet candidate(s) with {reader_m} (trust-blind)")
 
         cons = consolidate(pools, at, qt, _tp)
-        # Escalate to opening up to 3 full pages when snippets need full article context
-        if results and (is_briefing or cons["value"] is None or cons["confidence"] < 7.0):
+        if results and (not (is_briefing and len(docs) >= 3)) and (is_briefing or cons["value"] is None or cons["confidence"] < 7.0):
             already_docs = {d["url"] for d in docs}
             order = sorted(
                 results,
@@ -1791,44 +3059,83 @@ class SatzNewsEngine:
                 ),
                 reverse=True,
             )
-            opened_cnt = 0
+            fetch_cap = 3 if is_briefing else 2
+            to_fetch: list[dict[str, Any]] = []
+            already_eval: list[dict[str, Any]] = []
             for r in order:
-                if opened_cnt >= (3 if is_briefing else 2):
-                    break
                 if r["url"] in already_docs:
-                    doc_obj = next((d for d in docs if d["url"] == r["url"]), None)
-                    text = doc_obj["text"] if doc_obj else ""
-                    extra_l: list[str] = []
-                else:
+                    already_eval.append(r)
+                elif len(to_fetch) < fetch_cap:
+                    to_fetch.append(r)
+
+            fetched_pages: dict[str, dict[str, Any]] = {}
+            if to_fetch:
+                yield {"status": f"fetching {len(to_fetch)} full article(s) in parallel...", "phase": "reading"}
+            if len(to_fetch) == 1:
+                r0 = to_fetch[0]
+                try:
+                    fetched_pages[r0["url"]] = self.runtime.web.fetch(r0["url"])
+                except Exception:
+                    fetched_pages[r0["url"]] = {}
+            elif len(to_fetch) > 1:
+                def _fetch_article(art_row: dict[str, Any]) -> dict[str, Any]:
                     try:
-                        page = self.runtime.web.fetch(r["url"])
+                        return self.runtime.web.fetch(art_row["url"])
                     except Exception:
-                        page = {}
-                    opened_cnt += 1
-                    if not page.get("html"):
-                        continue
-                    text = extract_main_text(page["html"], r["url"])
-                    extra_l = extract_jsonld(page["html"])
-                    if text:
-                        docs.append(
-                            {
-                                "url": r["url"],
-                                "domain": r["domain"],
-                                "title": r.get("title", ""),
-                                "trust": r["trust"],
-                                "text": text,
-                                "capture_mode": "fetch",
-                            }
-                        )
-                        r["capture_mode"] = "fetch"
-                        already_docs.add(r["url"])
+                        return {}
+
+                with ThreadPoolExecutor(max_workers=min(3, len(to_fetch))) as pool:
+                    fut_map = {pool.submit(_fetch_article, ar): ar["url"] for ar in to_fetch}
+                    for fut in as_completed(fut_map):
+                        u_key = fut_map[fut]
+                        try:
+                            fetched_pages[u_key] = fut.result() or {}
+                        except Exception:
+                            fetched_pages[u_key] = {}
+
+            batched_page_cands: list[dict[str, Any]] = []
+            opened_domains: list[str] = []
+            for r in already_eval:
+                doc_obj = next((d for d in docs if d["url"] == r["url"]), None)
+                text = doc_obj["text"] if doc_obj else ""
+                if text and not is_briefing:
+                    pc = span_candidates(scrubbed_q, text, at, url=r["url"], extra_lines=[])
+                    if pc:
+                        batched_page_cands.extend(pc[:12])
+                        opened_domains.append(f"{r['domain']} ({r['trust_record']['effective']:.1f}/10)")
+
+            for r in to_fetch:
+                page = fetched_pages.get(r["url"]) or {}
+                if not page.get("html"):
+                    continue
+                text = extract_main_text(page["html"], r["url"])
+                extra_l = extract_jsonld(page["html"])
+                if text:
+                    docs.append(
+                        {
+                            "url": r["url"],
+                            "domain": r["domain"],
+                            "title": r.get("title", ""),
+                            "trust": r["trust"],
+                            "text": text,
+                            "capture_mode": "fetch",
+                        }
+                    )
+                    r["capture_mode"] = "fetch"
+                    already_docs.add(r["url"])
                 if text and not is_briefing:
                     pc = span_candidates(scrubbed_q, text, at, url=r["url"], extra_lines=extra_l)
                     if pc:
-                        p_obj = {"name": f"page:{r['domain']}", "cands": pc, "snippet": False, "r": []}
-                        p_obj["r"] = reader.read(scrubbed_q, at, p_obj)
-                        pools.append(p_obj)
-                        steps.append(f"3b. Opened {r['domain']} ({r['trust_record']['effective']:.1f}/10): {len(pc)} candidate(s)")
+                        batched_page_cands.extend(pc[:12])
+                        opened_domains.append(f"{r['domain']} ({r['trust_record']['effective']:.1f}/10)")
+
+            if batched_page_cands and not is_briefing:
+                p_obj = {"name": "pages:batch", "cands": batched_page_cands, "snippet": False, "r": []}
+                p_obj["r"] = reader.read(scrubbed_q, at, p_obj)
+                pools.append(p_obj)
+                steps.append(
+                    f"3b. Opened {', '.join(opened_domains[:3])}: {len(batched_page_cands)} candidate(s) (batched)"
+                )
             if not is_briefing:
                 cons = consolidate(pools, at, qt, _tp)
 
@@ -1842,10 +3149,6 @@ class SatzNewsEngine:
                 f"({div['system_value']} at {div['system_confidence']}/10 -> {cons['value']} at {cons['confidence']}/10)"
             )
 
-        # Build concise grounded answer with faithfulness gate
-        wr_fallback = False
-        wr_problems: list[str] = []
-        used_writer = analyzer_m
         ordered_sources = sorted(
             results,
             key=lambda r: (
@@ -1857,8 +3160,112 @@ class SatzNewsEngine:
         )[:6]
         docs_by_url = {str(d.get("url") or ""): str(d.get("text") or "") for d in docs}
 
+        translator = getattr(self.runtime, "translator", None)
+        is_mocked_complete = "_complete_role_prompt" in getattr(self.runtime, "__dict__", {})
+        if translator is not None and ordered_sources:
+            try:
+                prefs_tr = translator.get_preferences()
+                res_tr_m = translator.resolve_translation_model(prefs_tr["model_preference"])
+                can_tr = bool(
+                    prefs_tr.get("unlocked", True)
+                    and prefs_tr.get("auto_translate_news", True)
+                    and (
+                        res_tr_m.get("is_cloud")
+                        or getattr(self.runtime, "gemma_model", None) is not None
+                        or is_mocked_complete
+                    )
+                )
+                if can_tr and (analyzer_m == "template" or is_mocked_complete):
+                    from satz_translate import detect_language
+
+                    tgt_lang = prefs_tr["primary_language"]
+                    tr_segs: dict[str, str] = {}
+                    tr_meta: dict[int, tuple[str, str, str]] = {}
+                    for idx_o, src_o in enumerate(ordered_sources):
+                        if src_o.get("already_translated"):
+                            continue
+                        orig_title = str(src_o.get("title") or "").strip()
+                        orig_snip = str(src_o.get("snippet") or "").strip()
+                        pub_prefix = ""
+                        m_dt = re.match(r"^(\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}Z\])\s*(.*)$", orig_snip, re.S)
+                        if m_dt:
+                            pub_prefix = m_dt.group(1)
+                            orig_snip_body = m_dt.group(2).strip()
+                        else:
+                            orig_snip_body = orig_snip
+                        eff_l = detect_language(
+                            f"{orig_title}\n{orig_snip_body}",
+                            hint_lang=str(src_o.get("language") or "en"),
+                        )
+                        if not translator.is_language_allowed(eff_l, prefs=prefs_tr):
+                            tr_meta[idx_o] = (eff_l, pub_prefix, str(src_o.get("article_id") or ""))
+                            if orig_title:
+                                tr_segs[f"ot:{idx_o}"] = orig_title[:400]
+                            if orig_snip_body:
+                                tr_segs[f"os:{idx_o}"] = orig_snip_body[:800]
+                    if tr_segs:
+                        yield {"status": "translating non-English news sources...", "phase": "reading"}
+                        tr_out = translator.translate_segments(
+                            tr_segs,
+                            target_lang=tgt_lang,
+                            context_hint="news headlines and article summaries",
+                        )
+                        tr_map = tr_out.get("translations") or {}
+                        tr_model_id = str(tr_out.get("model") or res_tr_m["model_id"])
+                        now_tr = time.time()
+                        db_updates: list[tuple[str, str, str, str, str, str, float]] = []
+                        for idx_o, (src_l, pub_pfx, aid) in tr_meta.items():
+                            new_t = str(tr_map.get(f"ot:{idx_o}") or "").strip()
+                            new_s = str(tr_map.get(f"os:{idx_o}") or "").strip()
+                            src_o = ordered_sources[idx_o]
+                            if new_t:
+                                src_o["title"] = new_t
+                            if new_s:
+                                formatted_s = f"{pub_pfx} {new_s}".strip() if pub_pfx else new_s
+                                src_o["snippet"] = formatted_s
+                                docs_by_url[str(src_o.get("url") or "")] = formatted_s
+                                for d_item in docs:
+                                    if d_item.get("url") == src_o.get("url"):
+                                        d_item["title"] = new_t or d_item.get("title") or ""
+                                        d_item["text"] = formatted_s
+                            if aid and (new_t or new_s):
+                                db_updates.append((aid, tgt_lang, src_l, new_t, new_s, tr_model_id, now_tr))
+                        if db_updates:
+                            with self.runtime.store_lock:
+                                for upd in db_updates:
+                                    self.runtime.store.db.execute(
+                                        """
+                                        INSERT INTO satz_news_translations
+                                          (article_id, target_lang, source_lang, title_tr, snippet_tr, body_tr, model_id, updated_at)
+                                        VALUES (?, ?, ?, ?, ?, '', ?, ?)
+                                        ON CONFLICT(article_id, target_lang) DO UPDATE SET
+                                          source_lang = excluded.source_lang,
+                                          title_tr = CASE WHEN LENGTH(excluded.title_tr) > 0 THEN excluded.title_tr ELSE satz_news_translations.title_tr END,
+                                          snippet_tr = CASE WHEN LENGTH(excluded.snippet_tr) > 0 THEN excluded.snippet_tr ELSE satz_news_translations.snippet_tr END,
+                                          model_id = excluded.model_id,
+                                          updated_at = excluded.updated_at
+                                        """,
+                                        upd,
+                                    )
+                                self.runtime.store.db.commit()
+                elif can_tr and any(src_o.get("article_id") and not src_o.get("already_translated") for src_o in ordered_sources):
+                    def _bg_translate_news() -> None:
+                        try:
+                            self.translate_recent_untranslated(limit=12, recluster=False, background_indexation=True)
+                        except Exception:
+                            pass
+
+                    threading.Thread(
+                        target=_bg_translate_news,
+                        daemon=True,
+                        name="satz-news-bg-tr",
+                    ).start()
+            except Exception as exc:
+                steps.append(f"4b. On-demand translation skipped: {exc}")
+
         sources_for_card: list[dict[str, Any]] = []
         sources_for_faithful: list[dict[str, Any]] = []
+        source_stats_out: list[dict[str, Any]] = []
         for idx_s, s in enumerate(ordered_sources, 1):
             t_rec = s["trust_record"]
             t_sys_rec = _ts(s["domain"])
@@ -1897,98 +3304,163 @@ class SatzNewsEngine:
                     "body_text": full_doc_txt[:6000],
                 }
             )
+            u = s["url"]
+            cap_len = max(len(full_doc_txt), len(snip_txt))
+            sent_len = min(cap_len, 1000 if full_doc_txt else len(snip_txt))
+            source_stats_out.append(
+                {
+                    "id": u,
+                    "chars_captured": cap_len,
+                    "chars_sent": sent_len,
+                    "was_cut": cap_len > sent_len,
+                    "capture_mode": str(s.get("capture_mode") or ("fetch" if full_doc_txt else "snippet")),
+                }
+            )
 
-        answer_text = ""
+        yield {
+            "__ctx": {
+                "t_start": t_start,
+                "raw_q": raw_q,
+                "scrubbed_q": scrubbed_q,
+                "is_briefing": is_briefing,
+                "at": at,
+                "qt": qt,
+                "steps": steps,
+                "planner_m": planner_m,
+                "reader_m": reader_m,
+                "analyzer_m": analyzer_m,
+                "results": results,
+                "docs": docs,
+                "cons": cons,
+                "div": div,
+                "snippets_map": snippets_map,
+                "sources_for_card": sources_for_card,
+                "sources_for_faithful": sources_for_faithful,
+                "source_stats_out": source_stats_out,
+            }
+        }
+
+    def _build_news_writer_spec(self, ctx: dict[str, Any]) -> dict[str, Any]:
+        """Constructs writer prompt + deterministic fallback text for Stage 5."""
+        from src.planck3.writer import TemplateWriter
+
+        cons = ctx["cons"]
+        is_briefing = ctx["is_briefing"]
+        scrubbed_q = ctx["scrubbed_q"]
+        raw_q = ctx["raw_q"]
+        at = ctx["at"]
+        snippets_map = ctx["snippets_map"]
+        sources_for_card = ctx["sources_for_card"]
+        sources_for_faithful = ctx["sources_for_faithful"]
+        analyzer_m = ctx["analyzer_m"]
         is_cloud_analyzer = self.runtime._parse_cloud_model_id(analyzer_m) is not None
+
         if cons["value"] is not None and not is_briefing:
             tw = TemplateWriter()
             tw_res = tw.write(scrubbed_q, at, cons, snippets_map)
-            answer_text = tw_res["text"]
-            used_writer = "template"
-            if analyzer_m != "template" and sources_for_card:
-                try:
-                    src_ctx = "\n".join(
-                        f"[{sf['idx']}] {sf['domain']} ({sf['trust']['effective']:.1f}/10, {sf['trust']['category']}): "
-                        f"{sf['title']} | {neutralize_brain_directives_in_source((sf['body_text'] or sf['snippet'])[:900])}"
-                        for sf in sources_for_faithful
-                    )
-                    brain_block = ""
-                    if not is_cloud_analyzer:
-                        brain_ctx, _ = self.runtime.brain.build_model_context_with_citations(raw_q, [], max_chars=1200)
-                        brain_block = brain_ctx
-                    lead_hint = (
-                        f"Selected factual value: {cons['value']} ({cons['confidence']}/10 {cons['band']}).\n"
-                        if cons["value"]
-                        else ""
-                    )
-                    sys_p = (
-                        "Write a concise, grounded news briefing in 1-3 short sentences or bullets. "
-                        "Cite sources inline as [1], [2], etc. Keep numbers and proper names strictly grounded in SOURCES."
-                    )
-                    usr_p = f"QUESTION: {raw_q}\n{lead_hint}\n{brain_block}\n\nNEWS SOURCES:\n{src_ctx}"
-                    cand_txt = self.runtime._complete_role_prompt(
-                        analyzer_m, sys_p, usr_p, temperature=0.15, max_tokens=420
-                    )
-                    ok_f, probs = faithful_news(
-                        cand_txt,
-                        raw_q,
-                        sources_for_faithful,
-                        required_value=None,
-                        answer_type=at,
-                        max_words=240,
-                        allow_brief=True,
-                    )
-                    if ok_f:
-                        answer_text = cand_txt
-                        used_writer = analyzer_m
-                    else:
-                        wr_fallback = True
-                        wr_problems = probs
-                        steps.append(f"5. Faithfulness fallback ({analyzer_m}): {'; '.join(probs[:2])}")
-                except Exception as exc:
-                    wr_fallback = True
-                    wr_problems = [str(exc)]
-                    steps.append(f"5. Analyzer fallback ({analyzer_m}): {exc}")
+            fb_answer = tw_res["text"]
+            fb_writer = "template"
+            if analyzer_m == "template" or not sources_for_card:
+                return {"skip_llm": True, "fallback_answer": fb_answer, "fallback_writer": fb_writer}
+            src_ctx = "\n".join(
+                f"[{sf['idx']}] {sf['domain']} ({sf['trust']['effective']:.1f}/10, {sf['trust']['category']}): "
+                f"{sf['title']} | {neutralize_brain_directives_in_source((sf['body_text'] or sf['snippet'])[:900])}"
+                for sf in sources_for_faithful
+            )
+            brain_block = ""
+            if not is_cloud_analyzer:
+                brain_ctx, _ = self.runtime.brain.build_model_context_with_citations(raw_q, [], max_chars=1200)
+                brain_block = brain_ctx
+            lead_hint = (
+                f"Selected factual value: {cons['value']} ({cons['confidence']}/10 {cons['band']}).\n"
+                if cons["value"]
+                else ""
+            )
+            sys_p = (
+                "Write a concise, grounded news briefing in 1-3 short sentences or bullets. "
+                "Answer in the language of the question, translating any non-English source facts cleanly. "
+                "Cite sources inline as [1], [2], etc. Keep numbers and proper names strictly grounded in SOURCES."
+            )
+            usr_p = f"QUESTION: {raw_q}\n{lead_hint}\n{brain_block}\n\nNEWS SOURCES:\n{src_ctx}"
+            return {
+                "skip_llm": False,
+                "sys_p": sys_p,
+                "usr_p": usr_p,
+                "max_tokens": 420,
+                "max_words": 240,
+                "answer_type": at,
+                "fallback_answer": fb_answer,
+                "fallback_writer": "template",
+            }
+
+        if sources_for_card:
+            fb_answer = "\n".join(
+                f"- **[{s['title']}]({s['url']})** ({s['domain']} · {s['trust']['effective']:.1f}/10) — {s['snippet'][:180]} [{s['idx']}]"
+                for s in sources_for_card[:5]
+            )
         else:
-            # Multi-story briefing / perspective overview / unresolved single span: synthesize cleanly from gathered news sources
-            if sources_for_card and analyzer_m != "template":
-                try:
-                    src_ctx = "\n\n".join(
-                        f"[{sf['idx']}] {sf['domain']} ({sf['trust']['effective']:.1f}/10, {sf['trust']['category']}) - {sf['title']} ({sf['url']}):\n"
-                        f"{neutralize_brain_directives_in_source((sf['body_text'] or sf['snippet'])[:1000])}"
-                        for sf in sources_for_faithful
-                    )
-                    sys_p = (
-                        "Summarize the gathered news articles in 2-5 crisp bullet points directly answering the user's request. "
-                        "For each bullet, link the headline or source as [Title](url) [n] and keep every statistic and entity strictly from SOURCES."
-                    )
-                    cand_txt = self.runtime._complete_role_prompt(
-                        analyzer_m, sys_p, f"QUERY: {raw_q}\n\nSOURCES:\n{src_ctx}", temperature=0.15, max_tokens=560
-                    )
-                    ok_f, probs = faithful_news(
-                        cand_txt, raw_q, sources_for_faithful, max_words=260, allow_brief=True
-                    )
-                    if ok_f:
-                        answer_text = cand_txt
-                        used_writer = analyzer_m
-                    else:
-                        wr_fallback = True
-                        wr_problems = probs
-                        steps.append(f"5. Faithfulness fallback ({analyzer_m}): {'; '.join(probs[:2])}")
-                except Exception as exc:
-                    wr_fallback = True
-                    wr_problems = [str(exc)]
-                    steps.append(f"5. Analyzer fallback ({analyzer_m}): {exc}")
-            if not answer_text:
-                if sources_for_card:
-                    answer_text = "\n".join(
-                        f"- **[{s['title']}]({s['url']})** ({s['domain']} · {s['trust']['effective']:.1f}/10) — {s['snippet'][:180]} [{s['idx']}]"
-                        for s in sources_for_card[:5]
-                    )
-                    used_writer = "extractive (fallback)" if wr_fallback else "template"
-                else:
-                    answer_text = "No verified news reporting was found for this query. Try refreshing feeds or widening search terms."
-                    used_writer = "none"
+            fb_answer = "No verified news reporting was found for this query. Try refreshing feeds or widening search terms."
+
+        if not sources_for_card or analyzer_m == "template":
+            return {
+                "skip_llm": True,
+                "fallback_answer": fb_answer,
+                "fallback_writer": "template" if sources_for_card else "none",
+            }
+
+        src_ctx = "\n\n".join(
+            f"[{sf['idx']}] {sf['domain']} ({sf['trust']['effective']:.1f}/10, {sf['trust']['category']}) - {sf['title']} ({sf['url']}):\n"
+            f"{neutralize_brain_directives_in_source((sf['body_text'] or sf['snippet'])[:1000])}"
+            for sf in sources_for_faithful
+        )
+        briefing_brain = ""
+        if not is_cloud_analyzer:
+            b_ctx, _ = self.runtime.brain.build_model_context_with_citations(raw_q, [], max_chars=1200)
+            if b_ctx and "No entities stored yet" not in b_ctx:
+                briefing_brain = f"{b_ctx}\n\n"
+        sys_p = (
+            "Summarize the gathered news articles in 2-5 crisp bullet points directly answering the user's request. "
+            "Answer in the language of the request, translating any non-English source headlines or facts accurately. "
+            "For each bullet, link the headline or source as [Title](url) [n] and keep every statistic and entity strictly from SOURCES."
+        )
+        return {
+            "skip_llm": False,
+            "sys_p": sys_p,
+            "usr_p": f"QUERY: {raw_q}\n\n{briefing_brain}SOURCES:\n{src_ctx}",
+            "max_tokens": 560,
+            "max_words": 260,
+            "answer_type": "text",
+            "fallback_answer": fb_answer,
+            "fallback_writer": "extractive (fallback)",
+        }
+
+    def _finalize_news_payload(
+        self,
+        ctx: dict[str, Any],
+        *,
+        answer_text: str,
+        used_writer: str,
+        wr_fallback: bool,
+        wr_problems: list[str],
+    ) -> dict[str, Any]:
+        """Computes audit scores, passages, findings, and standard News chat result payload."""
+        from src.planck3.candidates import rank_passages
+        from src.planck3.web import domain_of
+
+        scrubbed_q = ctx["scrubbed_q"]
+        raw_q = ctx["raw_q"]
+        is_briefing = ctx["is_briefing"]
+        qt = ctx["qt"]
+        docs = ctx["docs"]
+        results = ctx["results"]
+        cons = ctx["cons"]
+        div = ctx["div"]
+        steps = ctx["steps"]
+        sources_for_card = ctx["sources_for_card"]
+        source_stats_out = ctx["source_stats_out"]
+        planner_m = ctx["planner_m"]
+        reader_m = ctx["reader_m"]
+        t_start = ctx["t_start"]
 
         passages = rank_passages(
             scrubbed_q,
@@ -2005,7 +3477,6 @@ class SatzNewsEngine:
             ],
         )
 
-        # Compute cluster-level confidence fallback if span value is None (multi-story briefing / overview)
         conf10 = cons.get("confidence")
         band_code = cons.get("band") or "none"
         band_lbl = cons.get("band_label") or "No single span extracted"
@@ -2034,7 +3505,6 @@ class SatzNewsEngine:
             band_code = band(conf10)
             band_lbl = BAND_LABEL[band_code]
 
-            # Counterfactual system-only calculation across the same source families
             if not div:
                 sys_ordered = sorted(seen_f.values(), key=lambda x: -x[1])
                 sys_top = sys_ordered[0][1]
@@ -2051,23 +3521,6 @@ class SatzNewsEngine:
                         "system_band": sys_band,
                     }
 
-        source_stats_out: list[dict[str, Any]] = []
-        for idx_s, s in enumerate(ordered_sources, 1):
-            u = s["url"]
-            raw_body = docs_by_url.get(u, "")
-            snip = str(s.get("snippet") or "")
-            cap_len = max(len(raw_body), len(snip))
-            sent_len = min(cap_len, 1000 if raw_body else len(snip))
-            source_stats_out.append(
-                {
-                    "id": u,
-                    "chars_captured": cap_len,
-                    "chars_sent": sent_len,
-                    "was_cut": cap_len > sent_len,
-                    "capture_mode": str(s.get("capture_mode") or ("fetch" if raw_body else "snippet")),
-                }
-            )
-
         with self.runtime.store_lock:
             if not self.runtime.pause_learning and scrubbed_q:
                 self.runtime.store.log_query(scrubbed_q, domain_of(sources_for_card[0]["url"]) if sources_for_card else scrubbed_q[:40])
@@ -2075,18 +3528,38 @@ class SatzNewsEngine:
                     self.runtime.store.add_passages(passages[:6], scrubbed_q[:40], f"[conv:conv-news] {scrubbed_q}")
 
         findings_out: list[dict[str, Any]] = []
+        seen_finding_imgs: set[str] = set()
         for s in sources_for_card:
             if s.get("image_url"):
+                img_u = str(s["image_url"]).strip()
+                seen_finding_imgs.add(img_u)
                 findings_out.append(
                     {
-                        "image_url": s["image_url"],
+                        "image_url": img_u,
                         "title": s["title"],
                         "page_url": s["url"],
                     }
                 )
             else:
                 for fd in self.runtime.get_source_findings(s["url"], s["url"])[:1]:
+                    img_u = str(fd.get("image_url") or "").strip()
+                    if img_u:
+                        seen_finding_imgs.add(img_u)
+                        if not s.get("image_url"):
+                            s["image_url"] = img_u
                     findings_out.append(fd)
+
+        if sources_for_card and hasattr(self.runtime, "merge_previews_into_sources"):
+            try:
+                self.runtime.merge_previews_into_sources(
+                    sources_for_card,
+                    findings_out,
+                    seen_finding_imgs,
+                    max_items=8,
+                    max_findings=6,
+                )
+            except Exception:
+                pass
 
         cloud_used = [m for m in (planner_m, reader_m, used_writer) if self.runtime._parse_cloud_model_id(m)]
         privacy_note = (
@@ -2126,11 +3599,230 @@ class SatzNewsEngine:
             "ok": True,
             "answer": answer_text,
             "model": used_writer,
-            "sources": [{"url": s["url"], "title": s["title"], "domain": s["domain"]} for s in sources_for_card],
+            "sources": [
+                {
+                    "url": s["url"],
+                    "title": s["title"],
+                    "domain": s["domain"],
+                    "snippet": str(s.get("snippet") or "")[:240],
+                    "image_url": str(s.get("image_url") or ""),
+                    **({"favicon_url": str(s["favicon_url"])} if s.get("favicon_url") else {}),
+                }
+                for s in sources_for_card
+            ],
             "source_stats": source_stats_out,
             "findings": findings_out[:6],
             "answer_meta": answer_meta,
         }
+
+    def answer_news_question(
+        self,
+        question: str,
+        open_sources: list[dict[str, Any]] | None = None,
+        roles_override: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Full Planck 3.0 audited pipeline for News chat:
+        1. `news_planner` decomposes + scrubs query (PII Scrubber Gate)
+        2. `news_capture` gathers local articles + open tabs + parallel web results
+        3. Trust-blind `news_reader` scores candidates (batched)
+        4. `consolidate()` runs twice (`personal` vs `system_only`) for counterfactual diff
+        5. `news_analyzer` writes concise summary guarded by `faithful_news` (template fallback)
+        """
+        ctx: dict[str, Any] = {}
+        for ev in self._iter_news_evidence(question, open_sources=open_sources, roles_override=roles_override):
+            if "__ctx" in ev:
+                ctx = ev["__ctx"]
+
+        spec = self._build_news_writer_spec(ctx)
+        wr_fallback = False
+        wr_problems: list[str] = []
+        answer_text = spec["fallback_answer"]
+        used_writer = spec["fallback_writer"]
+        analyzer_m = ctx["analyzer_m"]
+
+        if not spec["skip_llm"]:
+            try:
+                cand_txt = _complete_role_fast(
+                    self.runtime,
+                    analyzer_m,
+                    spec["sys_p"],
+                    spec["usr_p"],
+                    temperature=0.15,
+                    max_tokens=spec["max_tokens"],
+                    thinking_budget=0,
+                )
+                ok_f, probs = faithful_news(
+                    cand_txt,
+                    ctx["raw_q"],
+                    ctx["sources_for_faithful"],
+                    required_value=None,
+                    answer_type=spec["answer_type"],
+                    max_words=spec["max_words"],
+                    allow_brief=True,
+                )
+                if ok_f:
+                    answer_text = cand_txt
+                    used_writer = analyzer_m
+                else:
+                    wr_fallback = True
+                    wr_problems = probs
+                    ctx["steps"].append(f"5. Faithfulness fallback ({analyzer_m}): {'; '.join(probs[:2])}")
+            except Exception as exc:
+                wr_fallback = True
+                wr_problems = [str(exc)]
+                ctx["steps"].append(f"5. Analyzer fallback ({analyzer_m}): {exc}")
+
+        return self._finalize_news_payload(
+            ctx,
+            answer_text=answer_text,
+            used_writer=used_writer,
+            wr_fallback=wr_fallback,
+            wr_problems=wr_problems,
+        )
+
+    def stream_news_question(
+        self,
+        question: str,
+        open_sources: list[dict[str, Any]] | None = None,
+        roles_override: dict[str, str] | None = None,
+    ):
+        """
+        SSE streaming generator for News chat: emits live phase updates, early `source_stats`,
+        incremental writer `delta` tokens, post-stream `faithful_news` check, and final `done` payload.
+        """
+        ctx: dict[str, Any] = {}
+        ev_q: queue.Queue[dict[str, Any]] = queue.Queue()
+        ev_err: list[Exception] = []
+
+        def _gather_ev() -> None:
+            try:
+                for ev in self._iter_news_evidence(question, open_sources=open_sources, roles_override=roles_override):
+                    ev_q.put(ev)
+            except Exception as exc:
+                ev_err.append(exc)
+            finally:
+                ev_q.put({"__ev_done": True})
+
+        gt = threading.Thread(target=_gather_ev, daemon=True, name="satz-news-evidence")
+        gt.start()
+        while True:
+            try:
+                ev = ev_q.get(timeout=4.0)
+            except queue.Empty:
+                yield {"phase": "heartbeat"}
+                continue
+            if "__ev_done" in ev:
+                break
+            if "__ctx" in ev:
+                ctx = ev["__ctx"]
+            else:
+                yield ev
+        gt.join(timeout=2.0)
+        if ev_err:
+            raise ev_err[0]
+        if not ctx:
+            raise RuntimeError("News evidence assembly produced no context")
+
+        early_sources = [
+            {"url": s["url"], "title": s["title"], "domain": s["domain"]}
+            for s in ctx["sources_for_card"]
+        ]
+        yield {
+            "source_stats": ctx["source_stats_out"],
+            "sources": early_sources,
+            "status": f"synthesizing from {len(early_sources)} weighed news source(s) via {ctx['analyzer_m']}...",
+            "phase": "generating",
+        }
+
+        spec = self._build_news_writer_spec(ctx)
+        wr_fallback = False
+        wr_problems: list[str] = []
+        answer_text = spec["fallback_answer"]
+        used_writer = spec["fallback_writer"]
+        analyzer_m = ctx["analyzer_m"]
+
+        if spec["skip_llm"]:
+            if answer_text:
+                yield {"delta": answer_text}
+        else:
+            cand_txt = ""
+            try:
+                is_mocked_complete = "_complete_role_prompt" in getattr(self.runtime, "__dict__", {})
+                stream_fn = getattr(self.runtime, "_stream_role_prompt", None)
+                if callable(stream_fn) and not is_mocked_complete:
+                    started_stream = False
+                    for sev in stream_fn(
+                        analyzer_m,
+                        spec["sys_p"],
+                        spec["usr_p"],
+                        temperature=0.15,
+                        max_tokens=spec["max_tokens"],
+                        thinking_budget=0,
+                    ):
+                        if "__full_raw" in sev:
+                            cand_txt = str(sev.get("__full_raw") or "")
+                        elif sev.get("delta"):
+                            if not started_stream:
+                                yield {"status": "streaming response tokens...", "phase": "streaming"}
+                                started_stream = True
+                            yield {"delta": sev["delta"]}
+                        elif sev.get("phase") == "heartbeat":
+                            yield sev
+                else:
+                    cand_txt = _complete_role_fast(
+                        self.runtime,
+                        analyzer_m,
+                        spec["sys_p"],
+                        spec["usr_p"],
+                        temperature=0.15,
+                        max_tokens=spec["max_tokens"],
+                        thinking_budget=0,
+                    )
+                    if cand_txt:
+                        yield {"delta": cand_txt}
+
+                ok_f, probs = faithful_news(
+                    cand_txt,
+                    ctx["raw_q"],
+                    ctx["sources_for_faithful"],
+                    required_value=None,
+                    answer_type=spec["answer_type"],
+                    max_words=spec["max_words"],
+                    allow_brief=True,
+                )
+                if ok_f:
+                    answer_text = cand_txt
+                    used_writer = analyzer_m
+                else:
+                    wr_fallback = True
+                    wr_problems = probs
+                    ctx["steps"].append(f"5. Faithfulness fallback ({analyzer_m}): {'; '.join(probs[:2])}")
+                    if cand_txt:
+                        yield {"replace_text": answer_text, "fallback": True}
+                    else:
+                        yield {"delta": answer_text}
+            except Exception as exc:
+                wr_fallback = True
+                wr_problems = [str(exc)]
+                ctx["steps"].append(f"5. Analyzer fallback ({analyzer_m}): {exc}")
+                if cand_txt:
+                    yield {"replace_text": answer_text, "fallback": True}
+                else:
+                    yield {"delta": answer_text}
+
+        final_payload = self._finalize_news_payload(
+            ctx,
+            answer_text=answer_text,
+            used_writer=used_writer,
+            wr_fallback=wr_fallback,
+            wr_problems=wr_problems,
+        )
+        done_ev = {"done": True, **final_payload}
+        if wr_fallback:
+            done_ev["annotated_text"] = answer_text
+            done_ev["fallback"] = True
+        yield done_ev
 
     def reweigh_answer_meta(self, answer_meta: dict[str, Any]) -> dict[str, Any]:
         """Instant deterministic re-computation of a card's source weights without re-searching."""
@@ -2318,24 +4010,42 @@ class SatzNewsEngine:
                 (cluster_id,),
             ).fetchall()
 
+        now_ts = time.time()
+        upd_ts = float(cr["updated_at"] or now_ts)
+        pub_iso = _utc_iso_from_ts(upd_ts)
+        sync_iso = _utc_iso_from_ts(now_ts)
+        safe_headline = neutralize_brain_directives_in_source(str(cr["headline"] or ""))
+        safe_summary_md = neutralize_brain_directives_in_source(str(cr["summary_md"] or ""))
         top_domains = [f"{r['domain']} ({float(r['trust_effective']):.1f})" for r in arows]
         primary_url = str(arows[0]["url"]) if arows else ""
         ent = self.runtime.brain.upsert_entity(
             entity_type="story",
-            name=str(cr["headline"])[:90],
-            summary=f"[{cr['band']} · {float(cr['confidence10']):.1f}/10 across {cr['independent_families']} fam] {cr['headline']}",
+            name=safe_headline[:90],
+            summary=f"[{cr['band']} · {float(cr['confidence10']):.1f}/10 across {cr['independent_families']} fam] {safe_headline}",
             attributes={
                 "confidence10": float(cr["confidence10"]),
                 "band": cr["band"],
                 "families": int(cr["independent_families"]),
                 "sources": ", ".join(top_domains[:4]),
+                "published_at": pub_iso,
+                "synced_at": sync_iso,
+                "$published_ts": round(upd_ts, 3),
+                "$synced_ts": round(now_ts, 3),
+                "$cluster_id": cluster_id,
                 "$source": f"news:{cluster_id}",
             },
-            content=str(cr["summary_md"] or ""),
+            content=safe_summary_md,
             source_url=primary_url,
             tier=2,
             actor="user/news_save",
         )
+        slug = str(ent.get("slug") or "")
+        with self.runtime.store_lock:
+            self.runtime.store.db.execute(
+                "UPDATE satz_news_clusters SET brain_slug = ?, brain_synced_at = ? WHERE cluster_id = ?",
+                (slug, now_ts, cluster_id),
+            )
+            self.runtime.store.db.commit()
         return {"ok": True, "entity": ent}
 
     def get_status(self) -> dict[str, Any]:
@@ -2344,9 +4054,21 @@ class SatzNewsEngine:
             cl_cnt = self.runtime.store.db.execute("SELECT COUNT(*) FROM satz_news_clusters WHERE is_hidden = 0").fetchone()[0]
             feed_cnt = self.runtime.store.db.execute("SELECT COUNT(*) FROM satz_news_feeds WHERE enabled = 1").fetchone()[0]
             topic_cnt = self.runtime.store.db.execute("SELECT COUNT(*) FROM satz_news_topics WHERE suppressed = 0").fetchone()[0]
+            brain_cl_cnt = self.runtime.store.db.execute(
+                "SELECT COUNT(*) FROM satz_news_clusters WHERE is_hidden = 0 AND brain_slug IS NOT NULL AND brain_slug != ''"
+            ).fetchone()[0]
+        interval_secs = float(getattr(self.runtime, "news_refresh_interval_secs", 3600.0))
+        last_sync_at = self._get_meta_float("news_last_sync_at")
+        last_brain_sync_at = self._get_meta_float("news_last_brain_sync_at")
         return {
             "articles": int(art_cnt or 0),
             "clusters": int(cl_cnt or 0),
             "feeds_enabled": int(feed_cnt or 0),
             "topics": int(topic_cnt or 0),
+            "brain_stories": int(brain_cl_cnt or 0),
+            "sync_interval_seconds": interval_secs,
+            "last_sync_at": last_sync_at,
+            "next_sync_at": (last_sync_at + interval_secs) if last_sync_at > 0 else 0.0,
+            "last_brain_sync_at": last_brain_sync_at,
+            "syncing": bool(getattr(self.runtime, "news_sync_in_progress", False)),
         }

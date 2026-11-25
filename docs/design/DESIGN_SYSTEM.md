@@ -1,6 +1,6 @@
 # Satz Design System
 
-Version 1.1 · 2026-11-19 · Status: migrated (D1-D9 complete) · Owner: Nikita Gorshkov
+Version 1.2 · 2026-11-24 · Status: migrated (D1-D9 + v0.8 Settings Chat complete) · Owner: Nikita Gorshkov
 
 **TL;DR.** Satz moves from the v0.5 terminal look (black, monospace everywhere, square corners) to a calmer reading tool: paper light and violet-black dark themes, Inter for UI, Besley for display, JetBrains Mono kept only for data, and mildly rounded corners. Telemetry leaves the status bar and moves into a popover, the composer puts the prompt first, the sidebar becomes an accordion, and the on-tab agent folds to a strip. This file is the spec for every component the app uses today. Tokens live in `src/design-system/tokens.css`, the logo in `src/design-system/brand.ts`, icons in `src/design-system/icons.ts`. Component styles live in `src/design-system/components.css`, rendered in the gallery `docs/design/components.html` (regenerate with `python3 scripts/build_components_gallery.py`). Full-screen mocks are in `docs/design/satz-directions.html`. The step-by-step migration is `docs/PLAN_v0.7_design_system.md`.
 
@@ -9,7 +9,7 @@ This document is written for coding agents (Gemini / Antigravity) and humans. Se
 ## 1. Rules for agents
 
 1. **Tokens only.** Components use semantic tokens (`--canvas`, `--panel`, `--sunk`, `--hover`, `--line`, `--ink`, `--muted`, `--faint`, `--accent`, `--accent-ink`, `--accent-soft`, `--good`, `--warn`, `--danger`). Never write a hex value, `rgb()` or `#000000` in `src/*.ts` or component CSS. The brand ramp (`--violet-*`, `--dither-*`) is for the logo and charts only.
-2. **No inline `style="..."` for color, font, radius or spacing.** There are 26 inline styles today (`start.ts` 14, `news.ts` 6, `chat.ts` 4, `rail.ts` 1, `knowledge.ts` 1). Replace each with a class when you touch that file. Inline `style` is allowed only for computed values (grid column counts, progress widths via a CSS variable like `style="--c:78%"`).
+2. **No inline `style="..."` for color, font, radius or spacing.** Only computed values (grid column counts `--cols`, progress/confidence bar CSS variables like `style="--c:78%"` or `width:%`, plus programmatic textarea auto-resize) may set inline style properties. All spacing/layout helpers use CSS classes in `src/design-system/components.css`.
 3. **Three fonts, three jobs.**
    - `--font-ui` (Inter): everything by default.
    - `--font-display` (Besley 700): the wordmark, the home greeting, view titles, the email subject in the reader. Never body text, never buttons, never below 15px.
@@ -391,11 +391,17 @@ Replaces: `.news-story-card`, `.news-card-media-row`, `.news-card-thumb`, and al
 
 Grid of 2, 3 or 4 live tabs. Gap 1px on `--line` background (square, it is a grid). Each `.compare-tile` has a 30px header with favicon, host mono, close `x`. In floating layout the whole grid sits in a `--r-lg` container with `overflow: hidden`. Replaces `.compare-grid`, `.panes-2`, `.panes-3`, `.panes-4`, `.compare-tile`, `.webview-slot` (webview placeholder text `--faint` centered).
 
+### 5.17 Settings Chat (`conv-settings`, `origin = "settings"`)
+
+- **Trigger & sidebar footprint:** Settings uses the existing footer settings icon button (`.foot .icon-btn`, highlighted `.active.on` when open) and profile menu item without duplicating a separate pinned row in the sidebar.
+- **Mode header (no browser controls):** When viewing Settings Chat or Manual settings (`!siteTab`), `.top-nav` (Back/Forward/Reload), `+ New tab`, `Compare`, and the Assistant panel toggle are hidden, and `#region-tab-strip` stays hidden unless an interactive OAuth sign-in browser tab is open. The header uses `.addr.addr-static-box` (`Settings · <profile status>`) on the left and a two-mode `.seg` switcher (`Chat` | `Manual settings`) on the right.
+- **Staged files & inline interactive cards:** `.json`/`.env` attachments stage in sidecar RAM via `staging_id` handles and render as `.pill.accent` chips. Settings Chat hides web/mail/tab composer chips while keeping the model switcher and `Attach`. Interactive Settings cards inside `.thread` use `.card.inset` (`--sunk` fill inside `--panel`) with `.input.pin`, `.select`, `.kb-kv-row`, `.settings-card-note`, `.settings-card-actions`, `.settings-card-keys`, `.settings-card-file-btn`, and `.draft` send-gate cards (`Confirm` + `Cancel`). Fallback spacing utilities `.mt-1`, `.mt-2`, `.mb-2`, `.pointer`, `.w-210`, `.card.compact` live in `src/design-system/components.css`.
+
 ## 6. Icons
 
 `src/design-system/icons.ts`. 24px grid, 1.7 stroke, round caps and joins, no fill, `currentColor`. Render at 16px (`.ico`), 14px in rows (`.ico-sm`), 11px in chips.
 
-Set: `home`, `cmd`, `compose`, `mail`, `news`, `pin`, `chat`, `brain`, `settings`, `pulse`, `chev`, `back`, `fwd`, `reload`, `panel`, `send`, `globe`, `lock`, `spark`, `attach`, `reply`, `cal`, `doc`, `star`, `box`, `archive`, `x`, `plus`, `more`, `search`, `check`, `trash`, `compare`, `external`, `translate`, `eye`, `watch`.
+Set: `home`, `cmd`, `compose`, `mail`, `news`, `pin`, `chat`, `brain`, `settings`, `pulse`, `chev`, `back`, `fwd`, `reload`, `panel`, `send`, `globe`, `lock`, `spark`, `attach`, `image`, `reply`, `cal`, `doc`, `folder`, `drive`, `up`, `sheet`, `slide`, `star`, `box`, `archive`, `x`, `plus`, `more`, `search`, `check`, `trash`, `compare`, `external`, `translate`, `eye`, `watch`.
 
 Need a new icon? Draw it on the same grid and stroke, add it to `ICONS`, and list it here. No icon fonts, no emoji, no filled icons.
 
@@ -459,7 +465,7 @@ Every class defined or used in `src/style.css` and `src/*.ts` as of 2026-11-18 (
 | `.kb-status-banner`, `.profile-status-banner` | `.banner` | 5.1 |
 | `.accordion-header` | `.acc-h` | 5.11 |
 | `.mail-lane-list`, `.mail-lane-row`, `.mail-unseen`, `.mail-col-from`, `.mail-col-subject`, `.mail-col-time` | `.mail-list`, `.mail-row` | 5.13 |
-| `.email-body-iframe`, `.email-tab-header` | `.email-frame`, reading pane header | 5.13 |
+| `.email-body-iframe`, `.email-tab-header` | `.email-frame`, reading pane header (`.mail-move-wrap`, `.mail-move-select`) | 5.13 |
 | `.news-story-card`, `.news-card-media-row`, `.news-card-thumb` | `.story` | 5.14 |
 | `.news-band-pill`, `.news-band-good`, `.news-band-low` | `.conf` | 5.14 |
 | `.news-audit-box`, `.news-reader-overlay` | Reader `.card` + `.section` | 5.14 |
@@ -468,6 +474,9 @@ Every class defined or used in `src/style.css` and `src/*.ts` as of 2026-11-18 (
 | `#start-profile-unlock-card` | Home unlock `.card` | 5.8 |
 | `#region-error-log-overlay` | Error log panel | 5.12 |
 | `#chat-model-select`, `#start-model-select`, `#overlay-model-select` | Model `.chip` + `.menu` | 5.6 |
+| Settings cards & utilities (v0.8) | `.addr-static.mono`, `.card.compact`, `.settings-card-*`, `.mt-1`, `.mt-2`, `.mb-2`, `.pointer`, `.w-210` | 5.17 |
+| App-wide interface localization (v0.9) | `.kb-app-lang-block`, `.kb-app-lang-meta`, `.kb-app-lang-actions`, `.kb-app-lang-progress`, `.kb-app-lang-editor` | 5.18 |
+| Transient confirmation toasts (v0.9) | `.toast-host`, `.toast`, `.toast.danger`, `.toast.leaving` | 5.19 |
 
 All v0.5 class rules and compatibility aliases (`--bg`, `--surface`, `--border`, `--fg`) were retired and `src/style.css` removed in D9; active layout and component styles reside solely in `src/design-system/tokens.css` and `src/design-system/components.css`.
 

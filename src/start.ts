@@ -1,9 +1,12 @@
+import { startDitherLoaderAnimation } from "./design-system/brand";
 import { icon, type IconName } from "./design-system/icons";
+import { formatLocaleDateLine, t, tCount } from "./i18n";
 import {
   escapeHtml,
   formatRelativeTime,
   getAvailableModelsForPicker,
   getModelPrivacySummary,
+  getResolvedTheme,
   MOD_LABEL,
   rankCommandBarRoutes,
   state,
@@ -27,29 +30,29 @@ export interface StartScreenActions {
 function digestKindMeta(kind?: string): { ico: IconName; label: string } {
   switch (kind) {
     case "watch_triggered":
-      return { ico: "watch", label: "Watch" };
+      return { ico: "watch", label: t("start.digest_watch") };
     case "bookmark_changed":
-      return { ico: "star", label: "Changed" };
+      return { ico: "star", label: t("start.digest_changed") };
     case "mail_reply":
-      return { ico: "reply", label: "Reply" };
+      return { ico: "reply", label: t("start.digest_reply") };
     case "mail_recent":
-      return { ico: "mail", label: "Mail" };
+      return { ico: "mail", label: t("common.mail") };
     case "mail_ping":
-      return { ico: "mail", label: "Ping" };
+      return { ico: "mail", label: t("start.digest_ping") };
     case "mail_order":
-      return { ico: "box", label: "Order" };
+      return { ico: "box", label: t("start.digest_order") };
     case "mail_promo":
-      return { ico: "spark", label: "Promo" };
+      return { ico: "spark", label: t("start.digest_promo") };
     case "news_story":
-      return { ico: "news", label: "News" };
+      return { ico: "news", label: t("common.news") };
     case "brain_entity":
-      return { ico: "brain", label: "Brain" };
+      return { ico: "brain", label: t("start.digest_brain") };
     case "digest_adjacent":
-      return { ico: "globe", label: "Related" };
+      return { ico: "globe", label: t("start.digest_related") };
     case "source_capture":
-      return { ico: "doc", label: "Captured" };
+      return { ico: "doc", label: t("start.digest_captured") };
     default:
-      return { ico: "globe", label: "Web" };
+      return { ico: "globe", label: t("common.web") };
   }
 }
 
@@ -61,6 +64,8 @@ function routeKindIcon(kind: CommandBarRoute["kind"]): string {
       return icon("spark", "ico-sm");
     case "search_mail":
       return icon("mail", "ico-sm");
+    case "search_drives":
+      return icon("drive", "ico-sm");
     case "search_brain":
       return icon("brain", "ico-sm");
     case "search_news":
@@ -76,6 +81,8 @@ function convOriginIcon(origin?: string): string {
       return icon("mail", "ico-sm");
     case "news":
       return icon("news", "ico-sm");
+    case "drives":
+      return icon("drive", "ico-sm");
     default:
       return icon("chat", "ico-sm");
   }
@@ -87,15 +94,7 @@ function formatDigestTime(ts?: number): string {
 }
 
 function formatHomeDateLine(): string {
-  const now = new Date();
-  const weekday = now
-    .toLocaleDateString("en-US", { weekday: "long" })
-    .toUpperCase();
-  const day = String(now.getDate());
-  const month = now
-    .toLocaleDateString("en-US", { month: "short" })
-    .toUpperCase();
-  return `${weekday} · ${day} ${month}`;
+  return formatLocaleDateLine();
 }
 
 function formatHomeGreeting(): string {
@@ -104,12 +103,14 @@ function formatHomeGreeting(): string {
     ? profileInfo.active_profile?.name?.trim()
     : "";
   const hour = new Date().getHours();
-  const part =
-    hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
   if (activeName) {
-    return `${part}, ${activeName}`;
+    return hour < 12
+      ? t("start.greeting_morning", { name: activeName })
+      : hour < 18
+        ? t("start.greeting_afternoon", { name: activeName })
+        : t("start.greeting_evening", { name: activeName });
   }
-  return "Where do you want to start?";
+  return t("start.greeting_default");
 }
 
 function formatPlainPrivacyNote(rawPrivacy: string): string {
@@ -125,7 +126,7 @@ function renderDigestItemsHtml(
   mode: "start" | "overlay"
 ): string {
   if (items.length === 0) {
-    return `<div class="home-empty">Unlock a profile, receive mail, browse pages, or refresh news to populate your feed.</div>`;
+    return `<div class="home-empty">${escapeHtml(t("start.digest_empty"))}</div>`;
   }
   const visible = mode === "overlay" ? items.slice(0, 6) : items;
   return visible
@@ -221,9 +222,9 @@ export function updateStartDigestInPlace(actions: StartScreenActions): boolean {
   const meta = document.getElementById("start-foryou-meta");
   if (meta) {
     const updatedLbl = state.digestUpdatedAt
-      ? `updated ${formatRelativeTime(String(Math.floor(state.digestUpdatedAt / 1000)))}`
+      ? t("start.updated_rel", { rel: formatRelativeTime(String(Math.floor(state.digestUpdatedAt / 1000))) })
       : "";
-    meta.textContent = `${state.digestItems.length} item${state.digestItems.length === 1 ? "" : "s"}${state.digestRefreshing ? " · updating..." : updatedLbl ? ` · ${updatedLbl}` : ""}`;
+    meta.textContent = `${tCount("start.item_count", state.digestItems.length)}${state.digestRefreshing ? ` · ${t("start.updating")}` : updatedLbl ? ` · ${updatedLbl}` : ""}`;
   }
   bindDigestItemEvents(slot, actions, false);
   return true;
@@ -235,7 +236,7 @@ export function updateOverlayDigestInPlace(actions: StartScreenActions): boolean
   slot.innerHTML = renderDigestItemsHtml(state.digestItems, "overlay");
   const countEl = document.getElementById("overlay-foryou-count");
   if (countEl) {
-    countEl.textContent = `(${state.digestItems.length}${state.digestRefreshing ? " · updating..." : ""})`;
+    countEl.textContent = `(${state.digestItems.length}${state.digestRefreshing ? ` · ${t("start.updating")}` : ""})`;
   }
   bindDigestItemEvents(slot, actions, true);
   return true;
@@ -339,13 +340,13 @@ function renderBigBarHtml(
           spellcheck="false"
           autocorrect="off"
           autocapitalize="off"
-          placeholder="URL, question, mail: term, brain: term, or command"
+          placeholder="${escapeHtml(t("start.cmd_placeholder"))}"
           value="${escapeHtml(state.commandBarInput)}"
         />
         ${
           mode === "start"
             ? `<span class="kbd">${escapeHtml(MOD_LABEL)}+K</span>`
-            : `<button id="command-bar-close-btn" class="icon-btn" type="button" title="Close command bar (Esc)">${icon("x", "ico-sm")}</button>`
+            : `<button id="command-bar-close-btn" class="icon-btn" type="button" title="${escapeHtml(t("start.cmd_close_title"))}">${icon("x", "ico-sm")}</button>`
         }
       </div>
 
@@ -356,21 +357,21 @@ function renderBigBarHtml(
           type="button"
           class="chip ${state.webSearchEnabled ? "on" : ""}"
           aria-pressed="${state.webSearchEnabled ? "true" : "false"}"
-          title="Toggle live web search"
+          title="${escapeHtml(t("start.toggle_web_title"))}"
         >
           ${icon("globe", "ico-sm")}
-          <span>Web</span>
+          <span>${escapeHtml(t("common.web"))}</span>
         </button>
         ${
           mode === "overlay"
             ? `
-              <button id="command-bar-home-btn" class="chip" type="button" title="Go to Home">
+              <button id="command-bar-home-btn" class="chip" type="button" title="${escapeHtml(t("start.go_home_title"))}">
                 ${icon("home", "ico-sm")}
-                <span>Home</span>
+                <span>${escapeHtml(t("rail.home"))}</span>
               </button>
-              <button id="command-bar-refresh-btn" class="chip" type="button" title="Refresh For you digest">
+              <button id="command-bar-refresh-btn" class="chip" type="button" title="${escapeHtml(t("start.refresh_digest_title"))}">
                 ${icon("reload", "ico-sm")}
-                <span>Refresh</span>
+                <span>${escapeHtml(t("common.refresh"))}</span>
               </button>
             `
             : ""
@@ -379,7 +380,7 @@ function renderBigBarHtml(
           id="${mode}-submit-btn"
           class="send"
           type="button"
-          title="Run selected route (Enter)"
+          title="${escapeHtml(t("start.run_route_title"))}"
         >
           ${icon("send", "ico-sm")}
         </button>
@@ -395,9 +396,9 @@ function renderBigBarHtml(
             <div class="sep cmd-sep"></div>
             <div class="cmd-foryou-head">
               <div class="label">
-                <span>For you</span>
-                <span class="ct" id="overlay-foryou-count">(${state.digestItems.length}${state.digestRefreshing ? " · updating..." : ""})</span>
-                <button id="overlay-open-home-foryou-btn" class="btn-text end" type="button">View all</button>
+                <span>${escapeHtml(t("start.foryou"))}</span>
+                <span class="ct" id="overlay-foryou-count">(${state.digestItems.length}${state.digestRefreshing ? ` · ${escapeHtml(t("start.updating"))}` : ""})</span>
+                <button id="overlay-open-home-foryou-btn" class="btn-text end" type="button">${escapeHtml(t("start.view_all"))}</button>
               </div>
             </div>
             <div id="overlay-foryou-slot" class="cmd-foryou-list">
@@ -416,7 +417,7 @@ export function renderStartScreen(
   autoFocusInput = true
 ): void {
   const resumeConvs = state.conversations
-    .filter((c) => c.status === "active")
+    .filter((c) => c.status === "active" && c.origin !== "settings")
     .slice(0, 6);
 
   const initialRoutes = rankCommandBarRoutes(state.commandBarInput);
@@ -431,16 +432,23 @@ export function renderStartScreen(
     profileInfo?.unlocked && profileInfo?.active_profile
   );
 
+  const unlockBusy = Boolean(state.profileUnlocking);
+  const unlockDisabledAttr = unlockBusy ? "disabled" : "";
   const unlockPromptHtml = !isUnlocked
     ? `
       <div class="card start-unlock-card" id="start-profile-unlock-card">
         <div class="card-h">
           ${icon("lock", "ico-sm")}
-          <b>Profile locked</b>
-          <span class="end muted">Unlock Brain, Mail &amp; Password Vault</span>
+          <b>${escapeHtml(t("profile.locked_title"))}</b>
+          <span class="end muted">${escapeHtml(unlockBusy ? t("profile.unlocking_short") : t("profile.unlock_subtitle"))}</span>
         </div>
         ${
-          state.profileStatusMessage
+          unlockBusy
+            ? `<div class="unlock-loading-row" role="status" aria-live="polite"><span class="satz-spinner" aria-hidden="true"></span><span>${escapeHtml(state.profileUnlockLabel || t("profile.unlocking_long"))}</span></div>`
+            : ""
+        }
+        ${
+          !unlockBusy && state.profileStatusMessage
             ? `<div class="${renderBannerClass(state.profileStatusMessage)}">${escapeHtml(state.profileStatusMessage)}</div>`
             : ""
         }
@@ -448,7 +456,7 @@ export function renderStartScreen(
           profilesList.length > 0
             ? `
               <div class="form-row">
-                <select id="start-unlock-profile-select" class="select">
+                <select id="start-unlock-profile-select" class="select" ${unlockDisabledAttr}>
                   ${profilesList
                     .map(
                       (p) =>
@@ -465,16 +473,17 @@ export function renderStartScreen(
                   spellcheck="false"
                   autocorrect="off"
                   autocapitalize="off"
-                  placeholder="PIN"
+                  placeholder="${escapeHtml(t("profile.pin_placeholder"))}"
+                  ${unlockDisabledAttr}
                 />
-                <button id="start-unlock-profile-btn" class="btn primary" type="button">Unlock</button>
+                <button id="start-unlock-profile-btn" class="btn primary" type="button" ${unlockDisabledAttr}>${escapeHtml(unlockBusy ? t("profile.unlocking_short") : t("profile.unlock_btn"))}</button>
               </div>
               <div class="sep"></div>
             `
             : ""
         }
         <div class="section">
-          <div class="muted">${profilesList.length > 0 ? "Or create a new profile" : "Create a new profile with a 6-digit PIN"}</div>
+          <div class="muted">${escapeHtml(profilesList.length > 0 ? t("profile.or_create_new") : t("profile.create_new_hint"))}</div>
           <div class="form-row">
             <input
               id="start-create-profile-name"
@@ -483,7 +492,8 @@ export function renderStartScreen(
               spellcheck="false"
               autocorrect="off"
               autocapitalize="off"
-              placeholder="Profile name (e.g. Nikita)"
+              placeholder="${escapeHtml(t("profile.name_placeholder"))}"
+              ${unlockDisabledAttr}
             />
             <input
               id="start-create-profile-pin"
@@ -494,9 +504,10 @@ export function renderStartScreen(
               spellcheck="false"
               autocorrect="off"
               autocapitalize="off"
-              placeholder="6-digit PIN"
+              placeholder="${escapeHtml(t("profile.pin6_placeholder"))}"
+              ${unlockDisabledAttr}
             />
-            <button id="start-create-profile-btn" class="btn" type="button">Create &amp; unlock</button>
+            <button id="start-create-profile-btn" class="btn" type="button" ${unlockDisabledAttr}>${escapeHtml(unlockBusy ? t("profile.creating") : t("profile.create_unlock"))}</button>
           </div>
         </div>
       </div>
@@ -504,9 +515,9 @@ export function renderStartScreen(
     : "";
 
   const updatedLabel = state.digestUpdatedAt
-    ? ` · updated ${formatRelativeTime(String(Math.floor(state.digestUpdatedAt / 1000)))}`
+    ? ` · ${t("start.updated_rel", { rel: formatRelativeTime(String(Math.floor(state.digestUpdatedAt / 1000))) })}`
     : "";
-  const foryouMeta = `${state.digestItems.length} item${state.digestItems.length === 1 ? "" : "s"}${state.digestRefreshing ? " · updating..." : updatedLabel}`;
+  const foryouMeta = `${tCount("start.item_count", state.digestItems.length)}${state.digestRefreshing ? ` · ${t("start.updating")}` : updatedLabel}`;
 
   container.innerHTML = `
     <div class="home">
@@ -522,9 +533,9 @@ export function renderStartScreen(
       <div class="home-cols">
         <div>
           <div class="label home-section-head">
-            <span>For you</span>
+            <span>${escapeHtml(t("start.foryou"))}</span>
             <span class="ct" id="start-foryou-meta">${escapeHtml(foryouMeta)}</span>
-            <button id="start-refresh-digest-btn" class="btn-text end" type="button">Refresh</button>
+            <button id="start-refresh-digest-btn" class="btn-text end" type="button">${escapeHtml(t("common.refresh"))}</button>
           </div>
           <div id="start-foryou-slot">
             ${renderDigestItemsHtml(state.digestItems, "start")}
@@ -533,19 +544,19 @@ export function renderStartScreen(
 
         <div>
           <div class="label home-section-head">
-            <span>Resume</span>
-            <span class="end">${resumeConvs.length} conversation${resumeConvs.length === 1 ? "" : "s"}</span>
+            <span>${escapeHtml(t("start.resume"))}</span>
+            <span class="end">${escapeHtml(tCount("start.conversation_count", resumeConvs.length))}</span>
           </div>
           ${
             resumeConvs.length === 0
-              ? `<div class="home-empty">No recent conversations yet.</div>`
+              ? `<div class="home-empty">${escapeHtml(t("start.no_recent_convs"))}</div>`
               : resumeConvs
                   .map(
                     (c) => `
                 <div class="row" data-resume-id="${escapeHtml(c.id)}">
                   ${convOriginIcon(c.origin)}
                   <span class="t">${escapeHtml(c.title)}</span>
-                  <span class="meta">${c.source_count ?? 0} src · ${escapeHtml(formatRelativeTime(c.last_active_at))}</span>
+                  <span class="meta">${escapeHtml(t("rail.src_count", { count: c.source_count ?? 0 }))} · ${escapeHtml(formatRelativeTime(c.last_active_at))}</span>
                 </div>
               `
                   )
@@ -575,6 +586,7 @@ export function renderStartScreen(
   }
 
   const triggerStartUnlock = () => {
+    if (state.profileUnlocking) return;
     const sel = container.querySelector(
       "#start-unlock-profile-select"
     ) as HTMLSelectElement | null;
@@ -596,6 +608,7 @@ export function renderStartScreen(
   });
 
   const triggerStartCreate = () => {
+    if (state.profileUnlocking) return;
     const nameEl = container.querySelector(
       "#start-create-profile-name"
     ) as HTMLInputElement | null;
@@ -867,6 +880,63 @@ function bindBigBarEvents(
   });
 }
 
+let stopPostUnlockDither: (() => void) | null = null;
+
+export function renderPostUnlockGlassOverlay(): void {
+  const existing = document.getElementById("post-unlock-glass-overlay");
+  if (!state.postUnlockLoading) {
+    if (stopPostUnlockDither) {
+      stopPostUnlockDither();
+      stopPostUnlockDither = null;
+    }
+    existing?.remove();
+    return;
+  }
+
+  const labelText = state.postUnlockLabel || t("profile.syncing_vault");
+  const activeName =
+    state.knowledge.profile?.active_profile?.name ||
+    state.knowledge.profile?.active_profile_id ||
+    t("profile.unlocking_short");
+
+  if (existing) {
+    const statusEl = document.getElementById("post-unlock-status-text");
+    if (statusEl && statusEl.textContent !== labelText) {
+      statusEl.textContent = labelText;
+    }
+    const titleEl = document.getElementById("post-unlock-profile-title");
+    if (titleEl && titleEl.textContent !== activeName) {
+      titleEl.textContent = activeName;
+    }
+    return;
+  }
+
+  if (stopPostUnlockDither) {
+    stopPostUnlockDither();
+    stopPostUnlockDither = null;
+  }
+
+  const overlay = document.createElement("div");
+  overlay.id = "post-unlock-glass-overlay";
+  overlay.className = "glass-load-backdrop";
+  overlay.innerHTML = `
+    <div class="glass-load-panel glass" role="status" aria-live="polite">
+      <canvas id="post-unlock-dither-canvas" aria-hidden="true"></canvas>
+      <div id="post-unlock-profile-title" class="glass-load-title">${escapeHtml(activeName)}</div>
+      <div id="post-unlock-status-text" class="glass-load-status">${escapeHtml(labelText)}</div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const cv = document.getElementById("post-unlock-dither-canvas") as HTMLCanvasElement | null;
+  if (cv) {
+    stopPostUnlockDither = startDitherLoaderAnimation(cv, {
+      size: 76,
+      theme: getResolvedTheme(),
+    });
+  }
+}
+
 export function renderProfileUnlockOverlay(actions: {
   onUnlockProfile?: (profileId: string, pin: string) => void;
   onCreateProfile?: (name: string, pin: string) => void;
@@ -895,16 +965,23 @@ export function renderProfileUnlockOverlay(actions: {
   }
 
   const profilesList = profileInfo?.profiles ?? [];
+  const unlockBusy = Boolean(state.profileUnlocking);
+  const disabledAttr = unlockBusy ? "disabled" : "";
 
   overlay.innerHTML = `
     <div id="profile-unlock-modal" class="card profile-modal">
       <div class="card-h">
         ${icon("lock", "ico-sm")}
-        <b>Unlock profile</b>
-        <button id="profile-modal-dismiss-btn" class="btn-text end" type="button">Skip</button>
+        <b>${escapeHtml(t("profile.unlock_modal_title"))}</b>
+        <button id="profile-modal-dismiss-btn" class="btn-text end" type="button" ${disabledAttr}>${escapeHtml(t("profile.skip"))}</button>
       </div>
       ${
-        state.profileStatusMessage
+        unlockBusy
+          ? `<div class="unlock-loading-row" role="status" aria-live="polite"><span class="satz-spinner" aria-hidden="true"></span><span>${escapeHtml(state.profileUnlockLabel || t("profile.unlocking_long"))}</span></div>`
+          : ""
+      }
+      ${
+        !unlockBusy && state.profileStatusMessage
           ? `<div class="${renderBannerClass(state.profileStatusMessage)}">${escapeHtml(state.profileStatusMessage)}</div>`
           : ""
       }
@@ -912,9 +989,9 @@ export function renderProfileUnlockOverlay(actions: {
         profilesList.length > 0
           ? `
             <div class="section">
-              <div class="muted">Select your profile and enter its 6-digit PIN to load Brain, Mail &amp; Vault.</div>
+              <div class="muted">${escapeHtml(t("profile.unlock_modal_hint"))}</div>
               <div class="form-row">
-                <select id="profile-modal-select" class="select">
+                <select id="profile-modal-select" class="select" ${disabledAttr}>
                   ${profilesList
                     .map(
                       (p) =>
@@ -931,9 +1008,10 @@ export function renderProfileUnlockOverlay(actions: {
                   spellcheck="false"
                   autocorrect="off"
                   autocapitalize="off"
-                  placeholder="PIN"
+                  placeholder="${escapeHtml(t("profile.pin_placeholder"))}"
+                  ${disabledAttr}
                 />
-                <button id="profile-modal-unlock-btn" class="btn primary" type="button">Unlock</button>
+                <button id="profile-modal-unlock-btn" class="btn primary" type="button" ${disabledAttr}>${escapeHtml(unlockBusy ? t("profile.unlocking_short") : t("profile.unlock_btn"))}</button>
               </div>
             </div>
             <div class="sep"></div>
@@ -941,7 +1019,7 @@ export function renderProfileUnlockOverlay(actions: {
           : ""
       }
       <div class="section">
-        <div class="muted">${profilesList.length > 0 ? "Or create a new profile" : "Create a profile with a 6-digit PIN"}</div>
+        <div class="muted">${escapeHtml(profilesList.length > 0 ? t("profile.or_create_new") : t("profile.create_new_hint"))}</div>
         <div class="form-row">
           <input
             id="profile-modal-create-name"
@@ -950,7 +1028,8 @@ export function renderProfileUnlockOverlay(actions: {
             spellcheck="false"
             autocorrect="off"
             autocapitalize="off"
-            placeholder="Profile name (e.g. Nikita)"
+            placeholder="${escapeHtml(t("profile.name_placeholder"))}"
+            ${disabledAttr}
           />
           <input
             id="profile-modal-create-pin"
@@ -961,9 +1040,10 @@ export function renderProfileUnlockOverlay(actions: {
             spellcheck="false"
             autocorrect="off"
             autocapitalize="off"
-            placeholder="6-digit PIN"
+            placeholder="${escapeHtml(t("profile.pin6_placeholder"))}"
+            ${disabledAttr}
           />
-          <button id="profile-modal-create-btn" class="btn" type="button">Create &amp; unlock</button>
+          <button id="profile-modal-create-btn" class="btn" type="button" ${disabledAttr}>${escapeHtml(unlockBusy ? t("profile.creating") : t("profile.create_unlock"))}</button>
         </div>
       </div>
     </div>
@@ -975,19 +1055,23 @@ export function renderProfileUnlockOverlay(actions: {
   const createNameEl = overlay.querySelector(
     "#profile-modal-create-name"
   ) as HTMLInputElement | null;
-  if (pinEl) {
-    pinEl.focus();
-  } else {
-    createNameEl?.focus();
+  if (!unlockBusy) {
+    if (pinEl) {
+      pinEl.focus();
+    } else {
+      createNameEl?.focus();
+    }
   }
 
   overlay
     .querySelector("#profile-modal-dismiss-btn")
     ?.addEventListener("click", () => {
+      if (state.profileUnlocking) return;
       actions.onDismissProfilePrompt?.();
     });
 
   const doUnlock = () => {
+    if (state.profileUnlocking) return;
     const sel = overlay?.querySelector(
       "#profile-modal-select"
     ) as HTMLSelectElement | null;
@@ -1007,11 +1091,14 @@ export function renderProfileUnlockOverlay(actions: {
       doUnlock();
     } else if (e.key === "Escape") {
       e.preventDefault();
-      actions.onDismissProfilePrompt?.();
+      if (!state.profileUnlocking) {
+        actions.onDismissProfilePrompt?.();
+      }
     }
   });
 
   const doCreate = () => {
+    if (state.profileUnlocking) return;
     const cPinEl = overlay?.querySelector(
       "#profile-modal-create-pin"
     ) as HTMLInputElement | null;

@@ -11,14 +11,30 @@ import {
   sidecarSetDomainTrust,
   sidecarTranslateNewsArticle,
 } from "./api";
+import { drawWordmark, fontsReady } from "./design-system/brand";
 import { icon } from "./design-system/icons";
-import { escapeHtml, formatRelativeTime, MOD_LABEL, state } from "./state";
+import { t, tCount } from "./i18n";
+import {
+  escapeHtml,
+  formatRelativeTime,
+  getResolvedTheme,
+  isContentLanguageAllowed,
+  MOD_LABEL,
+  state,
+} from "./state";
 import type { NewsLane, NewsStoryCluster } from "./types";
+import {
+  bindInlineProfileGateEvents,
+  renderInlineProfileGateHtml,
+} from "./profile_prompt";
 
 export interface NewsViewActions {
-  onOpenSiteUrl: (url: string, title: string) => void;
+  onOpenSiteUrl: (url: string, title: string, activate?: boolean) => void;
   onCompareUrls: (urls: Array<{ url: string; title: string }>) => Promise<void>;
   onAskInNewsChat: (prompt: string) => Promise<void>;
+  onUnlockProfile?: (profileId: string, pin: string) => void | Promise<void>;
+  onUnlockProfileKeychain?: (profileId: string) => void | Promise<void>;
+  onCreateProfile?: (name: string, pin: string) => void | Promise<void>;
   onRefreshShell: () => void;
 }
 
@@ -78,7 +94,10 @@ export async function refreshNewsState(lane?: NewsLane): Promise<void> {
 
 function renderStatusBannerHtml(msg: string): string {
   const low = msg.toLowerCase();
-  const variant = low.startsWith("error") ? "banner danger" : "banner";
+  const variant =
+    low.startsWith("error") || msg.startsWith(t("common.error_prefix"))
+      ? "banner danger"
+      : "banner";
   return `<div class="${variant}">${escapeHtml(msg)}</div>`;
 }
 
@@ -98,18 +117,25 @@ function renderStoryCardsHtml(
     return `
       <div class="card">
         <div class="card-h">
-          <b>No news clusters loaded yet</b>
+          <b>${escapeHtml(t("news.empty_title"))}</b>
         </div>
         <div class="muted">
-          Click Refresh feeds above to poll active RSS/Atom sources, or ask a breaking-news question in Chat.
+          ${escapeHtml(t("news.empty_hint"))}
         </div>
       </div>
     `;
   }
 
+  const primaryLang = state.contentTranslationConfig?.primary_language || "en";
+
   return `<div class="news-story-list">${stories
     .map((s) => {
-      const bulletLines = s.summary_md
+      const showOrig = Boolean(state.newsStoryShowOriginal[s.cluster_id]);
+      const hasClusterTr = Boolean(s.translated_headline || s.translated_summary_md);
+      const dispHeadline = !showOrig && s.translated_headline ? s.translated_headline : s.headline;
+      const dispSummaryMd =
+        !showOrig && s.translated_summary_md ? s.translated_summary_md : s.summary_md;
+      const bulletLines = dispSummaryMd
         .split("\n")
         .map((ln) => ln.replace(/^[-*•]\s+/, "").trim())
         .filter(Boolean)
@@ -126,8 +152,9 @@ function renderStoryCardsHtml(
       const famHtml = shownFams
         .map((f) => {
           const confMark = f.conflict ? " · !" : "";
-          const langTag = f.language && f.language !== "en" ? ` (${f.language})` : "";
-          return `<button type="button" class="pill" data-news-open-url="${escapeHtml(f.url)}" data-news-open-title="${escapeHtml(s.headline)}" title="Trust ${f.trust_effective.toFixed(1)}/10 (${escapeHtml(f.category)})${escapeHtml(langTag)}">${escapeHtml(f.domain)} · ${f.trust_effective.toFixed(1)}${escapeHtml(confMark)}${escapeHtml(langTag)}</button>`;
+          const langTag =
+            f.language && !isContentLanguageAllowed(f.language) ? ` (${f.language})` : "";
+          return `<button type="button" class="pill" data-news-open-url="${escapeHtml(f.url)}" data-news-open-title="${escapeHtml(dispHeadline)}" title="${escapeHtml(t("news.trust_title", { trust: f.trust_effective.toFixed(1), category: f.category, langTag }))}">${escapeHtml(f.domain)} · ${f.trust_effective.toFixed(1)}${escapeHtml(confMark)}${escapeHtml(langTag)}</button>`;
         })
         .join("");
       const moreFamsTooltip = hiddenFams
@@ -137,43 +164,46 @@ function renderStoryCardsHtml(
         hiddenFams.length > 0
           ? `<button type="button" class="pill" data-news-expand-fams="${escapeHtml(s.cluster_id)}" title="${escapeHtml(moreFamsTooltip)}">+${hiddenFams.length}</button>`
           : isExpanded && fams.length > 2
-            ? `<button type="button" class="pill" data-news-expand-fams="${escapeHtml(s.cluster_id)}" title="Collapse sources">Less</button>`
+            ? `<button type="button" class="pill" data-news-expand-fams="${escapeHtml(s.cluster_id)}" title="${escapeHtml(t("news.collapse_sources"))}">${escapeHtml(t("news.less"))}</button>`
             : "";
 
       const reasonsParts = s.brain_match_reasons ?? [];
       const reasonsHtml =
         reasonsParts.length > 0 || s.outside_usual
           ? `<div class="story-match">
-              ${reasonsParts.length > 0 ? `<span>Match: ${escapeHtml(reasonsParts.join(" · "))}</span>` : ""}
-              ${s.outside_usual ? `<span class="flag">outside usual sources</span>` : ""}
+              ${reasonsParts.length > 0 ? `<span>${escapeHtml(t("news.match_prefix", { reasons: reasonsParts.join(" · ") }))}</span>` : ""}
+              ${s.outside_usual ? `<span class="flag">${escapeHtml(t("news.outside_usual"))}</span>` : ""}
             </div>`
           : "";
 
       const leadArt = s.articles?.[0];
-      const hasNonEnglish = Boolean(leadArt && leadArt.language && leadArt.language !== "en");
+      const artLang = leadArt?.language || s.language || "";
+      const hasUnsupportedLang = Boolean(artLang && !isContentLanguageAllowed(artLang));
+      const trSrc = s.translation_source_lang || artLang || "?";
+      const trTgt = s.translation_target_lang || primaryLang;
       const compareUrls = fams
         .slice(0, 3)
-        .map((f) => `${f.url}|||${s.headline}`)
+        .map((f) => `${f.url}|||${dispHeadline}`)
         .join(";;;");
 
       const relAge = formatRelativeTime(String(Math.floor(s.updated_at)));
       const statusHtml = s.has_conflict
-        ? `<span class="live">contested · ${escapeHtml(relAge)}</span>`
-        : `<span>${s.independent_families} fam · ${escapeHtml(relAge)}</span>`;
+        ? `<span class="live">${escapeHtml(t("news.contested_age", { age: relAge }))}</span>`
+        : `<span>${escapeHtml(t("news.fam_age", { count: s.independent_families, age: relAge }))}</span>`;
       const primaryTopic = s.topic_tags?.[0] ?? "";
       const secondActionKind: "perspectives" | "translate" | "ask" =
         fams.length >= 2
           ? "perspectives"
-          : hasNonEnglish && leadArt
+          : hasUnsupportedLang && leadArt && !hasClusterTr
             ? "translate"
             : "ask";
 
       const secondActionHtml =
         secondActionKind === "perspectives"
-          ? `<button type="button" class="btn-text" data-news-open-perspectives="${escapeHtml(s.cluster_id)}">Perspectives (${fams.length})</button>`
+          ? `<button type="button" class="btn-text" data-news-open-perspectives="${escapeHtml(s.cluster_id)}">${escapeHtml(t("news.perspectives_n", { count: fams.length }))}</button>`
           : secondActionKind === "translate" && leadArt
-            ? `<button type="button" class="btn-text" data-news-translate="${escapeHtml(leadArt.article_id)}">Translate ${escapeHtml(leadArt.language)}→en</button>`
-            : `<button type="button" class="btn-text" data-news-ask-chat="${escapeHtml(s.headline)}">Ask in chat</button>`;
+            ? `<button type="button" class="btn-text" data-news-translate="${escapeHtml(leadArt.article_id)}">${escapeHtml(t("news.translate_arrow", { lang: artLang, target: primaryLang }))}</button>`
+            : `<button type="button" class="btn-text" data-news-ask-chat="${escapeHtml(dispHeadline)}">${escapeHtml(t("news.ask_in_chat"))}</button>`;
 
       const menuOpen = state.newsStoryMenuId === s.cluster_id;
 
@@ -188,10 +218,15 @@ function renderStoryCardsHtml(
             <div class="story-meta">
               ${statusHtml}
               ${primaryTopic ? `<span>${escapeHtml(primaryTopic)}</span>` : ""}
-              ${s.collapsed_mirrors > 0 ? `<span>+${s.collapsed_mirrors} wire</span>` : ""}
+              ${s.collapsed_mirrors > 0 ? `<span>${escapeHtml(t("news.plus_wire", { count: s.collapsed_mirrors }))}</span>` : ""}
+              ${
+                hasClusterTr && !showOrig
+                  ? `<span class="badge soft">${escapeHtml(t("news.tr_pill", { src: trSrc, tgt: trTgt }))}</span>`
+                  : ""
+              }
               ${renderBandPillHtml(s.has_conflict ? "contested" : s.band, s.confidence10)}
             </div>
-            <h3 class="story-title">${escapeHtml(s.headline)}</h3>
+            <h3 class="story-title">${escapeHtml(dispHeadline)}</h3>
             ${bulletsHtml}
             ${reasonsHtml}
             <div class="story-foot">
@@ -201,17 +236,26 @@ function renderStoryCardsHtml(
               <div class="acts">
                 ${
                   leadArt
-                    ? `<button type="button" class="btn-text pri" data-news-open-reader="${escapeHtml(leadArt.article_id)}">Open reader</button>`
+                    ? `<button type="button" class="btn-text pri" data-news-open-reader="${escapeHtml(leadArt.article_id)}">${escapeHtml(t("news.open_reader"))}</button>`
+                    : ""
+                }
+                ${
+                  hasClusterTr
+                    ? `<button type="button" class="btn-text" data-news-toggle-orig="${escapeHtml(s.cluster_id)}">${escapeHtml(
+                        showOrig
+                          ? t("news.tr_show_tr", { src: trSrc, tgt: trTgt })
+                          : t("news.tr_show_orig", { src: trSrc })
+                      )}</button>`
                     : ""
                 }
                 ${secondActionHtml}
-                <button type="button" class="btn-text" data-news-save-brain="${escapeHtml(s.cluster_id)}">Save</button>
+                <button type="button" class="btn-text" data-news-save-brain="${escapeHtml(s.cluster_id)}">${escapeHtml(t("common.save"))}</button>
                 <div class="story-more-anchor">
                   <button
                     type="button"
                     class="icon-btn"
                     data-news-story-menu="${escapeHtml(s.cluster_id)}"
-                    title="More actions"
+                    title="${escapeHtml(t("news.more_actions"))}"
                     aria-expanded="${menuOpen ? "true" : "false"}"
                   >${icon("more", "ico-sm")}</button>
                   ${
@@ -219,25 +263,25 @@ function renderStoryCardsHtml(
                       ? `<div class="menu story-more-menu" role="menu">
                           ${
                             fams.length >= 2
-                              ? `<button type="button" class="menu-item" data-news-compare-urls="${escapeHtml(compareUrls)}">${icon("compare", "ico-sm")}<span>Compare (${Math.min(3, fams.length)})</span></button>`
+                              ? `<button type="button" class="menu-item" data-news-compare-urls="${escapeHtml(compareUrls)}">${icon("compare", "ico-sm")}<span>${escapeHtml(t("news.compare_n", { count: Math.min(3, fams.length) }))}</span></button>`
                               : ""
                           }
                           ${
-                            hasNonEnglish && leadArt && secondActionKind !== "translate"
-                              ? `<button type="button" class="menu-item" data-news-translate="${escapeHtml(leadArt.article_id)}">${icon("translate", "ico-sm")}<span>Translate ${escapeHtml(leadArt.language)}→en</span></button>`
+                            hasUnsupportedLang && leadArt && secondActionKind !== "translate"
+                              ? `<button type="button" class="menu-item" data-news-translate="${escapeHtml(leadArt.article_id)}">${icon("translate", "ico-sm")}<span>${escapeHtml(t("news.translate_arrow", { lang: artLang, target: primaryLang }))}</span></button>`
                               : ""
                           }
                           ${
                             secondActionKind !== "ask"
-                              ? `<button type="button" class="menu-item" data-news-ask-chat="${escapeHtml(s.headline)}">${icon("chat", "ico-sm")}<span>Ask in chat</span></button>`
+                              ? `<button type="button" class="menu-item" data-news-ask-chat="${escapeHtml(s.headline)}">${icon("chat", "ico-sm")}<span>${escapeHtml(t("news.ask_in_chat"))}</span></button>`
                               : ""
                           }
                           ${
                             lane === "foryou" && s.topic_tags.length > 0
-                              ? `<button type="button" class="menu-item" data-news-less-topic="${escapeHtml(s.topic_tags[0])}">${icon("x", "ico-sm")}<span>Less like this</span></button>`
+                              ? `<button type="button" class="menu-item" data-news-less-topic="${escapeHtml(s.topic_tags[0])}">${icon("x", "ico-sm")}<span>${escapeHtml(t("news.less_like_this"))}</span></button>`
                               : ""
                           }
-                          <button type="button" class="menu-item danger" data-news-hide-cluster="${escapeHtml(s.cluster_id)}">${icon("trash", "ico-sm")}<span>Hide</span></button>
+                          <button type="button" class="menu-item danger" data-news-hide-cluster="${escapeHtml(s.cluster_id)}">${icon("trash", "ico-sm")}<span>${escapeHtml(t("news.hide"))}</span></button>
                         </div>`
                       : ""
                   }
@@ -257,7 +301,7 @@ function renderPerspectivesLaneHtml(): string {
     return `
       <div class="card">
         <div class="muted">
-          No multi-family stories yet. Refresh feeds (+ web) or ask a contested news question in Chat first.
+          ${escapeHtml(t("news.no_persp_stories"))}
         </div>
       </div>
     `;
@@ -266,7 +310,7 @@ function renderPerspectivesLaneHtml(): string {
   const selectorHtml = `
     <div class="card">
       <div class="form-row">
-        <label class="muted">Story cluster (${list.length})</label>
+        <label class="muted">${escapeHtml(t("news.story_cluster_n", { count: list.length }))}</label>
         <select id="news-persp-cluster-select" class="select">
           ${list
             .map(
@@ -275,14 +319,14 @@ function renderPerspectivesLaneHtml(): string {
             )
             .join("")}
         </select>
-        <button id="news-persp-recompute-btn" type="button" class="btn">Re-analyze perspectives</button>
+        <button id="news-persp-recompute-btn" type="button" class="btn">${escapeHtml(t("news.reanalyze_perspectives"))}</button>
       </div>
     </div>
   `;
 
   const m = state.newsPerspectiveMatrix;
   if (!m || !m.ok) {
-    return `${selectorHtml}<div class="card"><span class="muted">Select a cluster to build its Perspective Spread matrix.</span></div>`;
+    return `${selectorHtml}<div class="card"><span class="muted">${escapeHtml(t("news.select_cluster_persp"))}</span></div>`;
   }
 
   const comparePayload = (m.framings ?? [])
@@ -297,16 +341,16 @@ function renderPerspectivesLaneHtml(): string {
     ${selectorHtml}
     <div class="card">
       <div class="card-h">
-        <b>Perspective spread</b>
+        <b>${escapeHtml(t("news.perspective_spread"))}</b>
         <span class="truncate muted">${escapeHtml(m.headline)}</span>
         <span class="end">
-          ${comparePayload ? `<button type="button" class="btn" data-news-compare-urls="${escapeHtml(comparePayload)}">${icon("compare", "ico-sm")}<span>Tile in Compare (${escapeHtml(MOD_LABEL)}+M)</span></button>` : ""}
+          ${comparePayload ? `<button type="button" class="btn" data-news-compare-urls="${escapeHtml(comparePayload)}">${icon("compare", "ico-sm")}<span>${escapeHtml(t("news.tile_compare", { mod: MOD_LABEL }))}</span></button>` : ""}
         </span>
       </div>
-      <div class="muted">Analyzer: ${escapeHtml(m.analyzer_model)} · ${escapeHtml(m.privacy_disclosure)}</div>
+      <div class="muted">${escapeHtml(t("news.analyzer_line", { model: m.analyzer_model, privacy: m.privacy_disclosure }))}</div>
 
       <div class="section">
-        <div class="label">Agreed facts across independent families</div>
+        <div class="label">${escapeHtml(t("news.agreed_facts"))}</div>
         <ul class="persp-bullets">
           ${(m.agreed ?? []).map((a) => `<li>${escapeHtml(a)}</li>`).join("")}
         </ul>
@@ -337,10 +381,10 @@ function renderPerspectivesLaneHtml(): string {
       </div>
 
       <div class="section">
-        <div class="label">Blind spots, missing perspectives &amp; system counterfactual</div>
+        <div class="label">${escapeHtml(t("news.blind_spots_heading"))}</div>
         <ul class="persp-bullets muted">
           ${(m.blind_spots ?? []).map((b) => `<li>${escapeHtml(b)}</li>`).join("")}
-          <li>Counterfactual: ${escapeHtml(m.system_counterfactual)}</li>
+          <li>${escapeHtml(t("news.counterfactual", { text: m.system_counterfactual }))}</li>
         </ul>
       </div>
     </div>
@@ -352,38 +396,39 @@ function renderTopicsLaneHtml(): string {
   return `
     <div class="card">
       <div class="card-h">
-        <b>Tracked news topics &amp; watches</b>
-        <span class="end muted">Queries stripped by PII Scrubber before searching</span>
+        <b>${escapeHtml(t("news.tracked_topics_title"))}</b>
+        <span class="end muted">${escapeHtml(t("news.topics_scrubber_note"))}</span>
       </div>
       <div class="form-row">
-        <input id="news-topic-name-input" class="input" placeholder="e.g. EU AI Act, Berlin Transit, Semiconductors" />
-        <input id="news-topic-kw-input" class="input" placeholder="Optional keywords comma-separated" />
-        <button id="news-topic-add-btn" type="button" class="btn primary">${icon("plus", "ico-sm")}<span>Track topic</span></button>
+        <input id="news-topic-name-input" class="input" placeholder="${escapeHtml(t("news.topic_name_placeholder"))}" />
+        <input id="news-topic-kw-input" class="input" placeholder="${escapeHtml(t("news.topic_kw_placeholder"))}" />
+        <button id="news-topic-add-btn" type="button" class="btn primary">${icon("plus", "ico-sm")}<span>${escapeHtml(t("news.track_topic"))}</span></button>
       </div>
     </div>
     ${
       topics.length === 0
-        ? `<div class="card"><span class="muted">No custom topics added yet. Track a topic above or click Save on a story.</span></div>`
+        ? `<div class="card"><span class="muted">${escapeHtml(t("news.no_topics"))}</span></div>`
         : `<div class="card news-card-list">
             ${topics
               .map(
-                (t) => `
+                (tp) => `
               <div class="source-row">
                 <div class="source-row-top">
                   <span class="t">
-                    <b>${escapeHtml(t.name)}</b>
-                    ${t.suppressed ? ` <span class="flag">suppressed</span>` : ""}
-                    ${t.badge_unread ? ` <span class="badge">watch</span>` : ""}
+                    <b>${escapeHtml(tp.name)}</b>
+                    ${tp.suppressed ? ` <span class="flag">${escapeHtml(t("news.suppressed"))}</span>` : ""}
+                    ${tp.badge_unread ? ` <span class="badge">${escapeHtml(t("news.watch_badge"))}</span>` : ""}
                   </span>
-                  <button type="button" class="btn-text" data-news-ask-chat="${escapeHtml(`${t.name} latest news`)}">Query now</button>
-                  <button type="button" class="btn-text" data-news-topic-del="${escapeHtml(t.topic_id)}">Remove</button>
+                  <button type="button" class="btn-text" data-news-ask-chat="${escapeHtml(t("news.latest_news_query", { name: tp.name }))}">${escapeHtml(t("news.query_now"))}</button>
+                  <button type="button" class="btn-text" data-news-topic-del="${escapeHtml(tp.topic_id)}">${escapeHtml(t("news.remove"))}</button>
                 </div>
                 <div class="source-row-meta">
-                  Keywords: ${escapeHtml(t.keywords.join(", ") || t.name)} · Last checked: ${
-                    t.last_checked_at > 0
-                      ? escapeHtml(formatRelativeTime(String(Math.floor(t.last_checked_at))))
-                      : "pending"
-                  }
+                  ${escapeHtml(t("news.topic_meta", {
+                    keywords: tp.keywords.join(", ") || tp.name,
+                    checked: tp.last_checked_at > 0
+                      ? formatRelativeTime(String(Math.floor(tp.last_checked_at)))
+                      : t("common.pending"),
+                  }))}
                 </div>
               </div>`
               )
@@ -400,17 +445,18 @@ function renderSourcesLaneHtml(): string {
   return `
     <div class="card">
       <div class="card-h">
-        <b>Source trust registry &amp; RSS feeds</b>
-        <span class="muted">As of ${escapeHtml(state.newsSourcesAsOf || "2026-10-09")}</span>
-        <span class="end muted">Personal trust counts for at most 30% (0.7 system + 0.3 yours)</span>
+        <b>${escapeHtml(t("news.trust_registry_title"))}</b>
+        <span class="badge soft">${srcs.length}</span>
+        <span class="muted">${escapeHtml(t("news.as_of", { date: state.newsSourcesAsOf || "2026-10-09" }))}</span>
+        <span class="end muted">${escapeHtml(t("news.trust_cap_note"))}</span>
       </div>
       <div class="form-row">
         <div class="input-wrap">
           ${icon("search", "ico-sm")}
-          <input id="news-src-search-input" class="input" value="${escapeHtml(state.newsSourcesFilterQuery)}" placeholder="Filter domain, category, rubric" />
+          <input id="news-src-search-input" class="input" value="${escapeHtml(state.newsSourcesFilterQuery)}" placeholder="${escapeHtml(t("news.filter_sources_placeholder"))}" />
         </div>
         <select id="news-src-cat-select" class="select">
-          <option value="">All categories (${cats.length})</option>
+          <option value="">${escapeHtml(t("news.all_categories", { count: cats.length }))}</option>
           ${cats
             .map(
               (c) =>
@@ -419,22 +465,22 @@ function renderSourcesLaneHtml(): string {
             .join("")}
         </select>
         <select id="news-src-band-select" class="select">
-          <option value="">All bands</option>
-          <option value="high" ${state.newsSourcesFilterBand === "high" ? "selected" : ""}>9-10 high trust</option>
-          <option value="good" ${state.newsSourcesFilterBand === "good" ? "selected" : ""}>7-8 good trust</option>
-          <option value="low" ${state.newsSourcesFilterBand === "low" ? "selected" : ""}>5-6 low trust</option>
-          <option value="sceptical" ${state.newsSourcesFilterBand === "sceptical" ? "selected" : ""}>0-4 sceptical</option>
-          <option value="unscored" ${state.newsSourcesFilterBand === "unscored" ? "selected" : ""}>Unscored (5.0)</option>
+          <option value="">${escapeHtml(t("news.all_bands"))}</option>
+          <option value="high" ${state.newsSourcesFilterBand === "high" ? "selected" : ""}>${escapeHtml(t("news.band_high"))}</option>
+          <option value="good" ${state.newsSourcesFilterBand === "good" ? "selected" : ""}>${escapeHtml(t("news.band_good"))}</option>
+          <option value="low" ${state.newsSourcesFilterBand === "low" ? "selected" : ""}>${escapeHtml(t("news.band_low"))}</option>
+          <option value="sceptical" ${state.newsSourcesFilterBand === "sceptical" ? "selected" : ""}>${escapeHtml(t("news.band_sceptical"))}</option>
+          <option value="unscored" ${state.newsSourcesFilterBand === "unscored" ? "selected" : ""}>${escapeHtml(t("news.band_unscored"))}</option>
         </select>
         <div class="news-src-checks">
-          <label><input type="checkbox" id="news-src-rss-chk" ${state.newsSourcesRssOnly ? "checked" : ""} /> With RSS</label>
-          <label><input type="checkbox" id="news-src-conf-chk" ${state.newsSourcesConflictedOnly ? "checked" : ""} /> Conflicts</label>
+          <label><input type="checkbox" id="news-src-rss-chk" ${state.newsSourcesRssOnly ? "checked" : ""} /> ${escapeHtml(t("news.with_rss"))}</label>
+          <label><input type="checkbox" id="news-src-conf-chk" ${state.newsSourcesConflictedOnly ? "checked" : ""} /> ${escapeHtml(t("news.conflicts"))}</label>
         </div>
       </div>
       <div class="form-row">
-        <input id="news-add-feed-url" class="input" placeholder="Add RSS/Atom URL (e.g. https://rss.dw.com/xml/rss-en-all) or domain" />
-        <input id="news-add-feed-title" class="input" placeholder="Optional label" />
-        <button id="news-add-feed-btn" type="button" class="btn">${icon("plus", "ico-sm")}<span>Add feed / domain</span></button>
+        <input id="news-add-feed-url" class="input" placeholder="${escapeHtml(t("news.add_feed_placeholder"))}" />
+        <input id="news-add-feed-title" class="input" placeholder="${escapeHtml(t("news.optional_label"))}" />
+        <button id="news-add-feed-btn" type="button" class="btn">${icon("plus", "ico-sm")}<span>${escapeHtml(t("news.add_feed_btn"))}</span></button>
       </div>
     </div>
 
@@ -442,23 +488,22 @@ function renderSourcesLaneHtml(): string {
       <table class="table">
         <thead>
           <tr>
-            <th>Domain &amp; feeds</th>
-            <th>Category</th>
-            <th class="num">System</th>
-            <th>Personal trust (max 30%)</th>
-            <th class="num">Effective</th>
+            <th>${escapeHtml(t("news.col_domain_feeds"))}</th>
+            <th>${escapeHtml(t("news.col_category"))}</th>
+            <th class="num">${escapeHtml(t("news.col_system"))}</th>
+            <th>${escapeHtml(t("news.col_personal_trust"))}</th>
+            <th class="num">${escapeHtml(t("news.col_effective"))}</th>
           </tr>
         </thead>
         <tbody>
           ${
             srcs.length === 0
-              ? `<tr><td colspan="5" class="muted">No sources matched the current filters.</td></tr>`
+              ? `<tr><td colspan="5" class="muted">${escapeHtml(t("news.no_sources_matched"))}</td></tr>`
               : srcs
-                  .slice(0, 120)
                   .map((d) => {
                     const personalVal = d.personal ?? d.system;
                     const confBadge = d.conflict
-                      ? ` <span class="badge soft" title="Personal and system trust differ by at least 3.0">Conflict</span>`
+                      ? ` <span class="badge soft" title="${escapeHtml(t("news.conflict_title"))}">${escapeHtml(t("news.conflict_badge"))}</span>`
                       : "";
                     const rubricTag = d.rubric ? ` · rubric: ${d.rubric}` : "";
                     const feedsHtml = d.feeds
@@ -466,7 +511,14 @@ function renderSourcesLaneHtml(): string {
                         (f) => `
                       <div class="news-src-rss-row">
                         <span class="truncate">RSS (${escapeHtml(f.language)}): ${escapeHtml(f.feed_url)}</span>
-                        <button type="button" class="btn-text" data-news-toggle-feed="${escapeHtml(f.feed_id)}" data-enabled="${f.enabled ? "0" : "1"}">${f.enabled ? "Enabled" : "Paused"}</button>
+                        <span class="badge ${f.enabled && f.last_fetched_at > 0 ? "good" : "soft"}">${escapeHtml(
+                          !f.enabled
+                            ? t("common.paused")
+                            : f.last_fetched_at > 0
+                              ? t("news.synced_age", { age: formatRelativeTime(String(Math.floor(f.last_fetched_at))) })
+                              : t("common.pending")
+                        )}</span>
+                        <button type="button" class="btn-text" data-news-toggle-feed="${escapeHtml(f.feed_id)}" data-enabled="${f.enabled ? "0" : "1"}">${escapeHtml(f.enabled ? t("news.pause") : t("news.sync"))}</button>
                       </div>`
                       )
                       .join("");
@@ -474,18 +526,18 @@ function renderSourcesLaneHtml(): string {
                       <tr>
                         <td>
                           <div><b>${escapeHtml(d.domain)}</b></div>
-                          <div class="muted">Family: ${escapeHtml(d.family)}${escapeHtml(rubricTag)}</div>
+                          <div class="muted">${escapeHtml(t("news.family_line", { family: d.family, rubric: rubricTag }))}</div>
                           ${feedsHtml}
                         </td>
                         <td>${escapeHtml(d.category || "unscored")}</td>
-                        <td class="num" title="${escapeHtml(d.why || "System trust rubric")}">${d.system.toFixed(1)}</td>
+                        <td class="num" title="${escapeHtml(d.why || t("news.system_rubric"))}">${d.system.toFixed(1)}</td>
                         <td>
                           <div class="slider-row">
                             <input class="slider" type="range" min="0" max="10" step="0.5" value="${personalVal}" data-news-src-slider="${escapeHtml(d.domain)}" />
                             <span class="slider-val" data-news-src-slider-val="${escapeHtml(d.domain)}">${personalVal.toFixed(1)}</span>
                             ${
                               d.personal !== null
-                                ? `<button type="button" class="btn-text" data-news-src-reset="${escapeHtml(d.domain)}">Reset</button>`
+                                ? `<button type="button" class="btn-text" data-news-src-reset="${escapeHtml(d.domain)}">${escapeHtml(t("common.reset"))}</button>`
                                 : ""
                             }
                           </div>
@@ -513,28 +565,30 @@ function renderReaderOverlayHtml(): string {
   ];
   const art = allArts.find((a) => a.article_id === aid);
   if (!art) return "";
-  const showingTranslated = Boolean(art.translated_text) && !state.newsReaderShowOriginal;
+  const artHasTr = Boolean(art.translated_text || art.title_tr || art.snippet_tr);
+  const showingTranslated = artHasTr && !state.newsReaderShowOriginal;
+  const displayTitle = showingTranslated && art.title_tr ? art.title_tr : art.title;
   const displayText = showingTranslated
-    ? art.translated_text || ""
-    : art.body_text || art.snippet || "(Summary only; click Open live tab to read full article.)";
+    ? art.translated_text || art.snippet_tr || art.body_text || art.snippet || ""
+    : art.body_text || art.snippet || t("news.reader_summary_only");
 
   return `
     <div class="card reader-card">
       <div class="card-h">
-        <span class="muted">Reader · ${escapeHtml(art.domain)} · ${art.trust_effective.toFixed(1)}/10 · ${escapeHtml(art.category)}</span>
+        <span class="muted">${escapeHtml(t("news.reader_meta", { domain: art.domain, trust: art.trust_effective.toFixed(1), category: art.category }))}</span>
         <span class="end">
           ${
-            art.translated_text
-              ? `<button id="news-reader-toggle-orig-btn" type="button" class="btn">${showingTranslated ? `Show original (${escapeHtml(art.language)})` : "Show translation"}</button>`
-              : `<button type="button" class="btn" data-news-translate="${escapeHtml(art.article_id)}">${icon("translate", "ico-sm")}<span>Translate</span></button>`
+            artHasTr
+              ? `<button id="news-reader-toggle-orig-btn" type="button" class="btn">${escapeHtml(showingTranslated ? t("news.show_original", { lang: art.language || "?" }) : t("news.show_translation"))}</button>`
+              : `<button type="button" class="btn" data-news-translate="${escapeHtml(art.article_id)}">${icon("translate", "ico-sm")}<span>${escapeHtml(t("news.translate"))}</span></button>`
           }
-          <button type="button" class="btn primary" data-news-open-url="${escapeHtml(art.url)}" data-news-open-title="${escapeHtml(art.title)}">${icon("external", "ico-sm")}<span>Open live tab</span></button>
-          <button id="news-reader-close-btn" type="button" class="icon-btn" title="Close reader">${icon("x", "ico-sm")}</button>
+          <button type="button" class="btn primary" data-news-open-url="${escapeHtml(art.url)}" data-news-open-title="${escapeHtml(displayTitle)}">${icon("external", "ico-sm")}<span>${escapeHtml(t("news.open_live_tab"))}</span></button>
+          <button id="news-reader-close-btn" type="button" class="icon-btn" title="${escapeHtml(t("news.close_reader"))}">${icon("x", "ico-sm")}</button>
         </span>
       </div>
       <div class="reader">
-        <h1>${escapeHtml(art.title)}</h1>
-        ${art.author ? `<div class="muted">By ${escapeHtml(art.author)} · ${escapeHtml(formatRelativeTime(String(Math.floor(art.published_at))))}</div>` : ""}
+        <h1>${escapeHtml(displayTitle)}</h1>
+        ${art.author ? `<div class="muted">${escapeHtml(t("news.by_author", { author: art.author, age: formatRelativeTime(String(Math.floor(art.published_at))) }))}</div>` : ""}
         ${art.image_url ? `<img class="attach-img" src="${escapeHtml(art.image_url)}" alt="" />` : ""}
         <div class="reader-body">${escapeHtml(displayText)}</div>
       </div>
@@ -545,15 +599,31 @@ function renderReaderOverlayHtml(): string {
 function getNewsLaneSubtitle(lane: NewsLane): string {
   switch (lane) {
     case "stories":
-      return "Clustered by independent source families and corroborated confidence";
+      return t("news.sub_stories");
     case "foryou":
-      return "Matched locally from Brain & Mail with 25% trusted explore";
+      return t("news.sub_foryou");
     case "perspectives":
-      return "Framings, shared facts, blind spots, and system counterfactual";
+      return t("news.sub_perspectives");
     case "topics":
-      return "Custom topics & watches stripped by the PII Scrubber";
+      return t("news.sub_topics");
     case "sources":
-      return "Hand-scored source trust registry (personal trust capped at 30%)";
+      return t("news.sub_sources");
+  }
+}
+
+export function paintNewsWordmark(): void {
+  const cv = document.getElementById("news-wordmark-canvas") as HTMLCanvasElement | null;
+  if (!cv) return;
+  const draw = () => {
+    const live = document.getElementById("news-wordmark-canvas") as HTMLCanvasElement | null;
+    if (live) {
+      drawWordmark(live, { height: 24, theme: getResolvedTheme(), variant: "backdrop" });
+    }
+  };
+  if (typeof document !== "undefined" && document.fonts?.check("700 16px Besley")) {
+    draw();
+  } else {
+    void fontsReady().then(draw);
   }
 }
 
@@ -561,6 +631,26 @@ export function renderNewsLaneView(
   container: HTMLElement,
   actions: NewsViewActions
 ): void {
+  const prof = state.knowledge.profile;
+  const isUnlocked = Boolean(prof?.unlocked && prof?.active_profile);
+  const hasProfiles = (prof?.profiles.length ?? 0) > 0;
+  if (!isUnlocked || !hasProfiles) {
+    container.innerHTML = `
+      <div class="news-view">
+        ${renderInlineProfileGateHtml({
+          iconName: "news",
+          subtitle: t("news.locked_subtitle"),
+        })}
+      </div>
+    `;
+    bindInlineProfileGateEvents(container, {
+      onUnlockProfile: actions.onUnlockProfile,
+      onUnlockProfileKeychain: actions.onUnlockProfileKeychain,
+      onCreateProfile: actions.onCreateProfile,
+    });
+    return;
+  }
+
   const lane = state.newsActiveLane;
   let bodyHtml = "";
   if (lane === "stories") {
@@ -575,12 +665,29 @@ export function renderNewsLaneView(
     bodyHtml = renderSourcesLaneHtml();
   }
 
+  const nStat = state.sidecar.news;
+  const syncAge =
+    nStat?.last_sync_at && nStat.last_sync_at > 0
+      ? formatRelativeTime(String(Math.floor(nStat.last_sync_at)))
+      : "";
+  const syncMetaText = nStat
+    ? `${tCount("news.hourly_sync", nStat.feeds_enabled)}${
+        syncAge ? ` · ${t("news.synced_short", { age: syncAge })}` : ""
+      }${nStat.brain_stories ? ` · ${t("news.in_brain_n", { count: nStat.brain_stories })}` : ""}`
+    : "";
+
   container.innerHTML = `
     <div class="news-view">
       <div class="view-h">
         <div>
-          <h1>Satz News${state.newsLoading ? ` <span class="badge soft">Refreshing</span>` : ""}</h1>
-          <p>${escapeHtml(getNewsLaneSubtitle(lane))}</p>
+          <h1 class="news-brand-lockup" aria-label="Satz News">
+            <canvas id="news-wordmark-canvas" aria-hidden="true"></canvas>
+            <span class="display news-brand-sub">${escapeHtml(t("common.news"))}</span>
+            ${state.newsLoading || nStat?.syncing ? `<span class="badge soft">${escapeHtml(t("common.syncing"))}</span>` : ""}
+          </h1>
+          <p>${escapeHtml(getNewsLaneSubtitle(lane))}${
+            syncMetaText ? ` · ${escapeHtml(syncMetaText)}` : ""
+          }</p>
         </div>
         <div class="end news-head-actions">
           <button
@@ -588,14 +695,14 @@ export function renderNewsLaneView(
             class="btn"
             type="button"
             aria-pressed="${state.newsExploreMode ? "true" : "false"}"
-          >Explore: ${state.newsExploreMode ? "On" : "Off"}</button>
+          >${escapeHtml(t("news.explore_toggle", { state: state.newsExploreMode ? t("common.on") : t("common.off") }))}</button>
           <button id="news-refresh-feeds-btn" class="btn" type="button">
             ${icon("reload", "ico-sm")}
-            <span>Refresh feeds</span>
+            <span>${escapeHtml(t("news.sync_feeds_btn"))}</span>
           </button>
           <button id="news-refresh-search-btn" class="btn primary" type="button">
             ${icon("search", "ico-sm")}
-            <span>Refresh + web</span>
+            <span>${escapeHtml(t("news.refresh_web_btn"))}</span>
           </button>
         </div>
       </div>
@@ -609,6 +716,7 @@ export function renderNewsLaneView(
     </div>
   `;
 
+  paintNewsWordmark();
   bindNewsViewEvents(container, actions);
 }
 
@@ -624,13 +732,19 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
   container.querySelector("#news-refresh-feeds-btn")?.addEventListener("click", () => {
     void (async () => {
       state.newsLoading = true;
-      state.newsStatusMessage = "Polling conditional RSS/Atom feeds...";
+      state.newsStatusMessage = t("news.syncing_feeds_status");
       renderNewsLaneView(container, actions);
-      const res = await sidecarRefreshNews(true, false);
+      const res = await sidecarRefreshNews(true, false, true);
       state.newsLoading = false;
       state.newsStatusMessage = res.ok
-        ? `Feeds synced: ${res.fetched_feeds ?? 0} fetched, ${res.not_modified ?? 0} unchanged (304), ${res.articles_ingested ?? 0} articles, ${res.clusters ?? 0} clusters.`
-        : `error: ${res.error ?? "feed refresh failed"}`;
+        ? t("news.feeds_synced_status", {
+            fetched: res.fetched_feeds ?? 0,
+            unchanged: res.not_modified ?? 0,
+            articles: res.articles_ingested ?? 0,
+            clusters: res.clusters ?? 0,
+            brain: res.brain_synced ?? 0,
+          })
+        : `${t("common.error_prefix")} ${res.error ?? t("news.feed_refresh_failed")}`;
       await refreshNewsState(state.newsActiveLane);
       renderNewsLaneView(container, actions);
       actions.onRefreshShell();
@@ -640,13 +754,17 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
   container.querySelector("#news-refresh-search-btn")?.addEventListener("click", () => {
     void (async () => {
       state.newsLoading = true;
-      state.newsStatusMessage = "Polling feeds and PII-scrubbed web search for tracked topics...";
+      state.newsStatusMessage = t("news.polling_web_status");
       renderNewsLaneView(container, actions);
-      const res = await sidecarRefreshNews(true, true);
+      const res = await sidecarRefreshNews(true, true, true);
       state.newsLoading = false;
       state.newsStatusMessage = res.ok
-        ? `Feeds + search synced: ${res.articles_ingested ?? 0} articles into ${res.clusters ?? 0} clusters.`
-        : `error: ${res.error ?? "refresh failed"}`;
+        ? t("news.feeds_web_synced_status", {
+            articles: res.articles_ingested ?? 0,
+            clusters: res.clusters ?? 0,
+            brain: res.brain_synced ?? 0,
+          })
+        : `${t("common.error_prefix")} ${res.error ?? t("news.refresh_failed")}`;
       await refreshNewsState(state.newsActiveLane);
       renderNewsLaneView(container, actions);
       actions.onRefreshShell();
@@ -684,10 +802,27 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
   });
 
   container.querySelectorAll("[data-news-open-url]").forEach((btn) => {
+    const readNewsTarget = () => {
+      const el = btn as HTMLElement;
+      return {
+        url: el.getAttribute("data-news-open-url") ?? "",
+        title: el.getAttribute("data-news-open-title") ?? "",
+      };
+    };
     btn.addEventListener("click", () => {
-      const url = (btn as HTMLElement).getAttribute("data-news-open-url") ?? "";
-      const title = (btn as HTMLElement).getAttribute("data-news-open-title") ?? "";
-      if (url) actions.onOpenSiteUrl(url, title);
+      const { url, title } = readNewsTarget();
+      if (url) actions.onOpenSiteUrl(url, title, true);
+    });
+    btn.addEventListener("mousedown", (e) => {
+      if ((e as MouseEvent).button === 1) e.preventDefault();
+    });
+    btn.addEventListener("auxclick", (e) => {
+      const me = e as MouseEvent;
+      if (me.button !== 1) return;
+      me.preventDefault();
+      me.stopPropagation();
+      const { url, title } = readNewsTarget();
+      if (url) actions.onOpenSiteUrl(url, title, false);
     });
   });
 
@@ -736,8 +871,8 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
       if (!cid) return;
       void sidecarSaveNewsClusterToBrain(cid).then((r) => {
         state.newsStatusMessage = r.ok
-          ? "Saved story cluster to Satz Brain (News/Stories)."
-          : `error: ${r.error ?? "unlock profile to save to Brain"}`;
+          ? t("news.saved_brain_status")
+          : `${t("common.error_prefix")} ${r.error ?? t("news.unlock_to_save_brain")}`;
         renderNewsLaneView(container, actions);
       });
     });
@@ -761,7 +896,7 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
       const name = (btn as HTMLElement).getAttribute("data-news-less-topic") ?? "";
       if (!name) return;
       void sidecarManageNewsTopic({ action: "suppress", name }).then(async () => {
-        state.newsStatusMessage = `Reduced future stories on "${name}".`;
+        state.newsStatusMessage = t("news.reduced_topic_status", { name });
         await refreshNewsState("foryou");
         renderNewsLaneView(container, actions);
       });
@@ -786,25 +921,41 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
     renderNewsLaneView(container, actions);
   });
 
+  container.querySelectorAll("[data-news-toggle-orig]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const cid = (btn as HTMLElement).getAttribute("data-news-toggle-orig") ?? "";
+      if (!cid) return;
+      state.newsStoryShowOriginal[cid] = !state.newsStoryShowOriginal[cid];
+      renderNewsLaneView(container, actions);
+    });
+  });
+
   container.querySelectorAll("[data-news-translate]").forEach((btn) => {
     btn.addEventListener("click", () => {
       state.newsStoryMenuId = null;
       const aid = (btn as HTMLElement).getAttribute("data-news-translate") ?? "";
       if (!aid) return;
-      state.newsStatusMessage = "Translating article via news_capture role...";
+      state.newsStatusMessage = t("news.translating_article");
       renderNewsLaneView(container, actions);
-      void sidecarTranslateNewsArticle(aid, "en").then(async (r) => {
-        if (r.ok && r.translated_text) {
+      const targetLang = state.contentTranslationConfig?.primary_language || "";
+      void sidecarTranslateNewsArticle(aid, targetLang).then(async (r) => {
+        if (r.ok && (r.translated_text || r.title_tr || r.snippet_tr)) {
           for (const s of [...state.newsStories, ...state.newsForYouStories, ...state.newsPerspectivesStories]) {
             for (const a of s.articles) {
-              if (a.article_id === aid) a.translated_text = r.translated_text;
+              if (a.article_id === aid) {
+                if (r.translated_text) a.translated_text = r.translated_text;
+                if (r.title_tr) a.title_tr = r.title_tr;
+                if (r.snippet_tr) a.snippet_tr = r.snippet_tr;
+                if (!s.translated_headline && r.title_tr) s.translated_headline = r.title_tr;
+                if (!s.translated_summary_md && r.snippet_tr) s.translated_summary_md = r.snippet_tr;
+              }
             }
           }
           state.newsReaderArticleId = aid;
           state.newsReaderShowOriginal = false;
-          state.newsStatusMessage = "Translated article.";
+          state.newsStatusMessage = t("news.translated_article");
         } else {
-          state.newsStatusMessage = `error: ${r.error ?? "translation failed"}`;
+          state.newsStatusMessage = `${t("common.error_prefix")} ${r.error ?? t("news.translation_failed")}`;
         }
         renderNewsLaneView(container, actions);
       });
@@ -822,11 +973,11 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
 
   container.querySelector("#news-persp-recompute-btn")?.addEventListener("click", () => {
     if (!state.newsSelectedClusterId) return;
-    state.newsStatusMessage = "Re-analyzing source perspectives...";
+    state.newsStatusMessage = t("news.reanalyzing_persp");
     renderNewsLaneView(container, actions);
     void sidecarFetchNewsPerspectives(state.newsSelectedClusterId, true).then((mat) => {
       state.newsPerspectiveMatrix = mat;
-      state.newsStatusMessage = mat?.ok ? "Perspective matrix updated." : "Perspective analysis failed.";
+      state.newsStatusMessage = mat?.ok ? t("news.persp_updated") : t("news.persp_failed");
       renderNewsLaneView(container, actions);
     });
   });
@@ -843,7 +994,7 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
       keywords: kwEl?.value.trim() ?? "",
       watch: true,
     }).then(async (r) => {
-      state.newsStatusMessage = r.ok ? `Tracked topic "${name}" with active watch.` : `error: ${r.error}`;
+      state.newsStatusMessage = r.ok ? t("news.tracked_topic_added", { name }) : `${t("common.error_prefix")} ${r.error}`;
       await refreshNewsState("topics");
       renderNewsLaneView(container, actions);
       actions.onRefreshShell();
@@ -905,7 +1056,7 @@ function bindNewsViewEvents(container: HTMLElement, actions: NewsViewActions): v
         ? { feed_url: val, title: titleEl?.value.trim() ?? "" }
         : { domain: val, title: titleEl?.value.trim() ?? "" }
     ).then((r) => {
-      state.newsStatusMessage = r.ok ? `Added ${val}` : `error: ${r.error}`;
+      state.newsStatusMessage = r.ok ? t("news.added_item", { item: val }) : `${t("common.error_prefix")} ${r.error}`;
       reloadSources();
     });
   });

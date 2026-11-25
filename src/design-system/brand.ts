@@ -41,22 +41,36 @@ function prepare(cv: HTMLCanvasElement, w: number, h: number): CanvasRenderingCo
   return g;
 }
 
-/** Ordered-dither dot disc. Gradient runs top-left (purple) to bottom-right (grey). */
-function drawDisc(g: CanvasRenderingContext2D, cx: number, cy: number, r: number, step: number): void {
+/** Ordered-dither dot disc. Gradient runs along `angleRad` (default top-left purple to bottom-right grey). */
+function drawDisc(
+  g: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  r: number,
+  step: number,
+  angleRad = Math.PI * 0.25,
+  wavePhase = 0,
+): void {
   const n = Math.ceil((2 * r) / step);
   const x0 = cx - r;
   const y0 = cy - r;
+  const ux = Math.cos(angleRad);
+  const uy = Math.sin(angleRad);
+  const hasWave = wavePhase !== 0;
   for (let gy = 0; gy < n; gy++) {
     for (let gx = 0; gx < n; gx++) {
       const x = x0 + (gx + 0.5) * step;
       const y = y0 + (gy + 0.5) * step;
       const d = Math.hypot(x - cx, y - cy) / r;
       if (d > 0.98) continue;
-      const t = Math.min(1, Math.max(0, ((x - x0 + (y - y0)) / (4 * r)) * 1.3 - 0.28));
+      const proj = ((x - cx) * ux + (y - cy) * uy) / (2 * r) + 0.5;
+      const ripple = hasWave ? 0.14 * Math.sin(d * 6.5 - wavePhase * 2.0) : 0;
+      const t = Math.min(1, Math.max(0, (proj + ripple) * 1.3 - 0.28));
       const v = t * (DITHER_STOPS.length - 1);
       const i = Math.floor(v);
       const threshold = (BAYER4[(gy % 4) * 4 + (gx % 4)] + 0.5) / 16;
-      let rad = step * 0.42;
+      const pulse = hasWave ? 0.88 + 0.22 * (0.5 + 0.5 * Math.sin(wavePhase * 1.6 - d * 5.0)) : 1;
+      let rad = step * 0.42 * pulse;
       if (d > 0.9) rad *= 1 - (d - 0.9) * 5;
       g.fillStyle = DITHER_STOPS[Math.min(DITHER_STOPS.length - 1, v - i > threshold ? i + 1 : i)];
       g.beginPath();
@@ -125,4 +139,64 @@ export function drawIcon(cv: HTMLCanvasElement, opts: { size: number; tile?: boo
   const s = g.measureText("S");
   g.fillStyle = "#ffffff";
   g.fillText("S", c, c + (s.actualBoundingBoxAscent - s.actualBoundingBoxDescent) / 2);
+}
+
+/**
+ * Animated post-unlock emblem using the logo's Bayer ordered-dither dot matrix.
+ * Returns a cleanup callback to stop the `requestAnimationFrame` loop.
+ */
+export function startDitherLoaderAnimation(
+  cv: HTMLCanvasElement,
+  opts: { size: number; theme: MarkTheme },
+): () => void {
+  const px = opts.size;
+  const g = prepare(cv, px, px);
+  const c = px / 2;
+  const r = px * 0.47;
+  const step = Math.max(1.5, (2 * r) / 19);
+  const reducedMotion =
+    typeof window !== "undefined" &&
+    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  let rafId = 0;
+  let stopped = false;
+  const t0 = performance.now();
+
+  const renderFrame = (nowMs: number) => {
+    const secs = Math.max(0, (nowMs - t0) / 1000);
+    const angle = reducedMotion ? Math.PI * 0.25 : Math.PI * 0.25 + secs * 1.45;
+    const wave = reducedMotion ? 0 : secs * 2.4;
+    g.clearRect(0, 0, px, px);
+    drawDisc(g, c, c, r, step, angle, wave);
+    g.font = font(r * 1.38);
+    g.textAlign = "center";
+    g.textBaseline = "alphabetic";
+    g.lineJoin = "round";
+    g.globalCompositeOperation = "destination-out";
+    g.lineWidth = Math.max(1.8, r * 0.14);
+    const s = g.measureText("S");
+    const yBase = c + (s.actualBoundingBoxAscent - s.actualBoundingBoxDescent) / 2;
+    if (opts.theme === "light") g.strokeText("S", c, yBase);
+    g.globalCompositeOperation = "source-over";
+    g.fillStyle = INK[opts.theme];
+    g.fillText("S", c, yBase);
+  };
+
+  renderFrame(t0);
+  void fontsReady().then(() => {
+    if (!stopped) renderFrame(performance.now());
+  });
+
+  if (!reducedMotion) {
+    const tick = (nowMs: number) => {
+      if (stopped) return;
+      renderFrame(nowMs);
+      rafId = window.requestAnimationFrame(tick);
+    };
+    rafId = window.requestAnimationFrame(tick);
+  }
+
+  return () => {
+    stopped = true;
+    if (rafId) window.cancelAnimationFrame(rafId);
+  };
 }

@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "eval_id": "eval_20261121_order_mail_citation_grounding",
+  "created_at": "2026-11-21T15:30:00Z",
+  "title": "Zalando order delivery lookup cites mail source [1] without hallucinating",
+  "notes": "Verifies grounded mail reading and citation checking across local Gemma and Cloud.",
+  "model_id": "gemini:gemini-4-hydrogen (cloud)",
+  "mode": {
+    "web_enabled": false,
+    "mail_enabled": true
+  },
+  "user_msg": "When does my Zalando order arrive? Cite the email [1].",
+  "prior_messages": [],
+  "bad_assistant_answer": "",
+  "sources": [
+    {
+      "id": "mail:eval-msg-1",
+      "url": "satzmail://message/eval-msg-1",
+      "title": "Zalando Order #9988 Shipped",
+      "domain": "mail",
+      "is_open_tab": true,
+      "text": "Order #9988 from Zalando shipped via DHL tracking [REF_CODE]. Estimated delivery: Friday afternoon.",
+      "mail_fixture": {
+        "from_addr": "Zalando <sender-1@zalando.de>",
+        "subject": "Zalando Order #9988 Shipped",
+        "list_unsub": "",
+        "list_unsub_post": "",
+        "html_body": "<p>Order #9988 from Zalando shipped via DHL tracking [REF_CODE]. Estimated delivery: Friday afternoon.</p>",
+        "plain_body": "Order #9988 from Zalando shipped via DHL tracking [REF_CODE]. Estimated delivery: Friday afternoon."
+      }
+    }
+  ],
+  "expected": {
+    "expected_tools": [],
+    "expected_task_agent": "",
+    "require_send_gate": false,
+    "max_tasks": 0,
+    "min_citations": 1,
+    "max_flagged_citations": 0,
+    "must_contain": [
+      "Friday"
+    ],
+    "forbidden_substrings": [],
+    "min_answer_chars": 15
+  }
+}

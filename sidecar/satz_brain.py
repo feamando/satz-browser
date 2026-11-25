@@ -17,11 +17,14 @@ Implements the Brain knowledgebase management approach for the Satz browser:
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import re
 import secrets
 import threading
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +42,7 @@ ENTITY_TYPE_DIRS: dict[str, str] = {
     "address": "Entities/Places",
     "organization": "Entities/Organizations",
     "account": "Entities/Accounts",
+    "document": "Entities/Documents",
     "order": "Entities/Orders",
     "promotion": "Entities/Promotions",
     "project": "Projects",
@@ -49,6 +53,7 @@ ENTITY_TYPE_DIRS: dict[str, str] = {
     "claim": "News/Claims",
     "topic": "News/Topics",
     "source": "Sources/Media",
+    "skill": "Skills",
 }
 
 BOOKING_OR_TRACKING_RE = re.compile(
@@ -85,8 +90,134 @@ def _utc_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _utc_iso_from_ts(ts: float) -> str:
+    return datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _utc_date() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _parse_ts(val: Any) -> float | None:
+    if val is None or val == "":
+        return None
+    if isinstance(val, (int, float)):
+        v = float(val)
+        return v if v > 1_000_000_000.0 else None
+    s = str(val).strip()
+    if not s:
+        return None
+    try:
+        v = float(s)
+        if v > 1_000_000_000.0:
+            return v
+    except ValueError:
+        pass
+    try:
+        iso_s = s.replace("Z", "+00:00")
+        if len(iso_s) == 10 and iso_s[4] == "-" and iso_s[7] == "-":
+            iso_s += "T12:00:00+00:00"
+        dt = datetime.fromisoformat(iso_s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return None
+
+
+def _entity_event_ts(meta: dict[str, Any]) -> float:
+    attrs = meta.get("attributes") or {}
+    for cand in (
+        attrs.get("$published_ts"),
+        attrs.get("published_at"),
+        attrs.get("event_time"),
+        meta.get("published_at"),
+        attrs.get("$synced_ts"),
+        attrs.get("synced_at"),
+        meta.get("synced_at"),
+        meta.get("updated"),
+    ):
+        parsed = _parse_ts(cand)
+        if parsed is not None:
+            return parsed
+    return 0.0
+
+
+def _format_time_tag(ts: float, now_ts: float | None = None) -> str:
+    if ts <= 0.0:
+        return ""
+    cur = float(now_ts if now_ts is not None else time.time())
+    diff = max(0.0, cur - ts)
+    if diff < 120.0:
+        age = "just now"
+    elif diff < 3600.0:
+        age = f"{int(diff // 60)}m ago"
+    elif diff < 48 * 3600.0:
+        age = f"{int(diff // 3600)}h ago"
+    else:
+        age = f"{int(diff // 86400)}d ago"
+    dt_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%MZ")
+    return f"{dt_str} · {age}"
+
+
+_NEWS_TEMPORAL_RE = re.compile(
+    r"\b(news|story|stories|headline|headlines|briefing|corroborated|world\s+news|top\s+stories|happened|developments?|synced)\b",
+    re.IGNORECASE,
+)
+
+
+def _parse_temporal_query(query: str, now_ts: float | None = None) -> dict[str, Any]:
+    cur = float(now_ts if now_ts is not None else time.time())
+    q = (query or "").lower()
+    recency_bias = False
+    start_ts: float | None = None
+    end_ts: float | None = None
+    label: str | None = None
+
+    date_m = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", q)
+    if date_m:
+        try:
+            dt = datetime.strptime(date_m.group(1), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            start_ts = (dt - timedelta(hours=2)).timestamp()
+            end_ts = (dt + timedelta(hours=26)).timestamp()
+            label = date_m.group(1)
+            recency_bias = True
+        except Exception:
+            pass
+    elif re.search(r"\b(last\s+hour|past\s+hour|this\s+hour|just\s+now)\b", q):
+        start_ts = cur - 3600.0
+        end_ts = cur + 600.0
+        label = "last hour"
+        recency_bias = True
+    elif re.search(r"\byesterday\b", q):
+        today_mid = datetime.fromtimestamp(cur, tz=timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        start_ts = (today_mid - timedelta(days=1, hours=2)).timestamp()
+        end_ts = (today_mid + timedelta(hours=2)).timestamp()
+        label = "yesterday"
+    elif re.search(r"\b(today|today's|todays|this\s+morning|tonight)\b", q):
+        start_ts = cur - 86400.0
+        end_ts = cur + 600.0
+        label = "today"
+        recency_bias = True
+    elif re.search(r"\b(this\s+week|past\s+week|last\s+week|last\s+7\s+days)\b", q):
+        start_ts = cur - 7 * 86400.0
+        end_ts = cur + 600.0
+        label = "this week"
+        recency_bias = True
+    elif re.search(r"\b(latest|recent|recently|newest|current|currently|breaking|fresh|update|updates|top\s+stories)\b", q):
+        recency_bias = True
+
+    is_news_query = bool(_NEWS_TEMPORAL_RE.search(q))
+    if is_news_query:
+        recency_bias = True
+
+    return {
+        "recency_bias": recency_bias,
+        "is_news_query": is_news_query,
+        "start_ts": start_ts,
+        "end_ts": end_ts,
+        "label": label,
+    }
 
 
 def slugify(value: str) -> str:
@@ -119,12 +250,19 @@ def _load_yaml(text: str) -> dict[str, Any]:
 
 def neutralize_brain_directives_in_source(text: str) -> str:
     """
-    Section 2.4: Before prompt assembly, neutralise directive tags inside source text
-    (`<brain_store>` -> `‹brain_store›`) so a page cannot plant one for the model to echo.
+    Section 2.4 & Tool Read/Act Boundary: Before prompt assembly or tool return, neutralise
+    directive tags inside untrusted source text (`<brain_store>`, `<tool_call>`, `<tool_result>`)
+    so a page or email cannot plant one for the model to echo or trigger.
     """
     if not text:
         return ""
-    out = re.sub(r"<\s*(/?)\s*brain_store\b([^>]*)>", r"‹\1brain_store\2›", text, flags=re.IGNORECASE)
+    out = re.sub(
+        r"<\s*(/?)\s*(brain_store|tool_call|tool_result)\b([^>]*)>",
+        r"‹\1\2\3›",
+        text,
+        flags=re.IGNORECASE,
+    )
+    out = out.replace("<|tool_call>", "‹|tool_call›").replace("<tool_call|>", "‹tool_call|›")
     return out
 
 
@@ -145,10 +283,29 @@ class SatzBrain:
         self.proposals: dict[str, dict[str, Any]] = {}
         self._brain_md_cache: str = ""
         self._brain_md_mtime: float = -1.0
+        self._summary_cache: dict[str, Any] | None = None
+        self._summary_cache_mtime: float = -1.0
+        self._summary_cache_brain_mtime: float = -1.0
         self._encoder: Any = None
         self._entity_emb_cache: dict[str, tuple[str, Any]] = {}
         if not self.locked:
             self._ensure_layout()
+
+    def prewarm_encoder(self) -> bool:
+        """Warms the Brain semantic/lexical encoder in the background without blocking callers."""
+        if self.locked:
+            return False
+        try:
+            enc = self._get_encoder()
+            return enc is not None
+        except Exception:
+            return False
+
+    def invalidate_summary_cache(self) -> None:
+        with self.lock:
+            self._summary_cache = None
+            self._summary_cache_mtime = -1.0
+            self._summary_cache_brain_mtime = -1.0
 
     def get_encoder_status(self) -> dict[str, Any]:
         sgs_base = self.sgs_root or (Path(__file__).resolve().parent.parent.parent / "sgs")
@@ -363,6 +520,42 @@ class SatzBrain:
                     if other_prov:
                         slug = slugify(f"{provider_val}-{email_val}")
 
+            if norm_type == "story":
+                in_attrs = attributes or {}
+                src_key = str(in_attrs.get("$source") or "").strip()
+                cid_key = str(in_attrs.get("$cluster_id") or "").strip()
+                if src_key or cid_key:
+                    for cand_slug, cand_meta in (reg.get("entities") or {}).items():
+                        if str(cand_meta.get("$type") or "") != "story":
+                            continue
+                        cand_attrs = cand_meta.get("attributes") or {}
+                        if (src_key and str(cand_attrs.get("$source") or "").strip() == src_key) or (
+                            cid_key and str(cand_attrs.get("$cluster_id") or "").strip() == cid_key
+                        ):
+                            slug = cand_slug
+                            break
+
+            if norm_type == "document":
+                in_attrs = attributes or {}
+                item_key = str(in_attrs.get("$item_key") or "").strip()
+                if item_key:
+                    matched_doc_slug: str | None = None
+                    for cand_slug, cand_meta in (reg.get("entities") or {}).items():
+                        if str(cand_meta.get("$type") or "") != "document":
+                            continue
+                        cand_attrs = cand_meta.get("attributes") or {}
+                        if str(cand_attrs.get("$item_key") or "").strip() == item_key:
+                            matched_doc_slug = cand_slug
+                            break
+                    if matched_doc_slug:
+                        slug = matched_doc_slug
+                    elif slug in (reg.get("entities") or {}):
+                        existing_meta = reg["entities"][slug]
+                        existing_ikey = str((existing_meta.get("attributes") or {}).get("$item_key") or "").strip()
+                        if existing_ikey and existing_ikey != item_key:
+                            short_suffix = hashlib.sha1(item_key.encode("utf-8")).hexdigest()[:6]
+                            slug = f"{slug[:56]}-{short_suffix}"
+
             existing_entry = reg["entities"].get(slug)
             if existing_entry and existing_entry.get("$ref"):
                 rel_path = str(existing_entry["$ref"])
@@ -443,10 +636,37 @@ class SatzBrain:
                 "updated": today,
                 "$events": events,
             }
+            if norm_type == "skill":
+                for sk_key in (
+                    "trigger_examples",
+                    "required_context",
+                    "step_graph",
+                    "send_gate_steps",
+                    "domain_recipes",
+                    "last_success_at",
+                    "redteam_passed",
+                    "redteam_checked_at",
+                    "redteam_cases_run",
+                    "redteam_summary",
+                ):
+                    if sk_key in merged_attrs:
+                        new_fm[sk_key] = merged_attrs[sk_key]
 
             # Assemble Markdown body
             body_lines: list[str] = []
-            if not existing_body:
+            refresh_story_body = bool(
+                (
+                    norm_type == "story"
+                    and actor in ("news/hourly_sync", "user/news_save")
+                    and (content or "").strip()
+                )
+                or (
+                    norm_type == "document"
+                    and actor in ("drives/background_sync", "drives/manual_sync")
+                    and (content or "").strip()
+                )
+            )
+            if not existing_body or refresh_story_body:
                 body_lines.append(f"# {clean_name}")
                 body_lines.append("")
                 if effective_summary:
@@ -459,7 +679,7 @@ class SatzBrain:
             visible_attrs = {k: v for k, v in merged_attrs.items() if not str(k).startswith("$") and k != "source_url"}
             if visible_attrs:
                 attr_block = "\n".join(f"- **{k}**: {v}" for k, v in visible_attrs.items())
-                if "## Attributes" not in existing_body:
+                if refresh_story_body or "## Attributes" not in existing_body:
                     body_lines.append("## Attributes")
                     body_lines.append(attr_block)
                     body_lines.append("")
@@ -471,7 +691,7 @@ class SatzBrain:
                             body_lines.append(f"- **{k}**: {v}")
 
             clean_content = (content or "").strip()
-            if clean_content and clean_content not in existing_body:
+            if clean_content and (refresh_story_body or clean_content not in existing_body):
                 body_lines.append(f"## Captured Context ({today})")
                 if source_url:
                     body_lines.append(f"Source: `{source_url}`")
@@ -481,7 +701,10 @@ class SatzBrain:
             final_body = "\n".join(body_lines).strip()
             self._write_entity_file(abs_path, new_fm, final_body)
 
-            reg["entities"][slug] = {
+            pub_at_str = str(merged_attrs.get("published_at") or "").strip()
+            sync_at_str = str(merged_attrs.get("synced_at") or "").strip()
+            pub_ts_num = _parse_ts(merged_attrs.get("$published_ts")) or _parse_ts(pub_at_str)
+            reg_rec: dict[str, Any] = {
                 "$type": norm_type,
                 "$status": "active",
                 "$ref": rel_path,
@@ -492,8 +715,16 @@ class SatzBrain:
                 "attributes": merged_attrs,
                 "updated": now_iso,
             }
+            if pub_at_str:
+                reg_rec["published_at"] = pub_at_str
+            if sync_at_str:
+                reg_rec["synced_at"] = sync_at_str
+            if pub_ts_num is not None:
+                reg_rec["$published_ts"] = float(pub_ts_num)
+            reg["entities"][slug] = reg_rec
             self._save_registry(reg)
             self.regenerate_brain_md()
+            self.invalidate_summary_cache()
 
             return {
                 "slug": slug,
@@ -503,6 +734,8 @@ class SatzBrain:
                 "tier": effective_tier,
                 "summary": effective_summary,
                 "attributes": merged_attrs,
+                "published_at": pub_at_str or now_iso,
+                "synced_at": sync_at_str,
                 "updated": now_iso,
             }
 
@@ -523,7 +756,43 @@ class SatzBrain:
                         pass
             self._save_registry(reg)
             self.regenerate_brain_md()
+            self.invalidate_summary_cache()
             return True
+
+    def delete_entities_by_source(self, sources: set[str], entity_type: str | None = None) -> int:
+        """Removes entities matching any `$source` / `source_url` using registry metadata without rebuilding summaries per entity."""
+        if not sources:
+            return 0
+        removed = 0
+        with self.lock:
+            reg = self._load_registry()
+            entities = reg.get("entities") or {}
+            to_delete: list[str] = []
+            for slug, meta in entities.items():
+                if entity_type and str(meta.get("$type") or "") != entity_type:
+                    continue
+                attrs = meta.get("attributes") or {}
+                src = str(attrs.get("source_url") or attrs.get("$source") or "")
+                if src in sources:
+                    to_delete.append(slug)
+            if not to_delete:
+                return 0
+            for slug in to_delete:
+                self._entity_emb_cache.pop(slug, None)
+                entry = entities.pop(slug, None)
+                ref = entry.get("$ref") if isinstance(entry, dict) else None
+                if ref:
+                    p = self.brain_dir / str(ref)
+                    if p.exists():
+                        try:
+                            p.unlink()
+                        except OSError:
+                            pass
+                removed += 1
+            self._save_registry(reg)
+            self.regenerate_brain_md()
+            self.invalidate_summary_cache()
+        return removed
 
     def regenerate_brain_md(self) -> str:
         """
@@ -602,6 +871,99 @@ class SatzBrain:
     def list_entities(self) -> list[dict[str, Any]]:
         return list(self.get_brain_summary().get("entities") or [])
 
+    def get_entity_by_slug(self, slug: str, body_limit: int | None = 4000) -> dict[str, Any] | None:
+        """Returns a full entity record (including clean attributes and body) by slug or alias."""
+        if self.locked:
+            return None
+        key = slugify(slug) if slug else ""
+        if not key:
+            return None
+        with self.lock:
+            reg = self._load_registry()
+            entities = reg.get("entities") or {}
+            meta = entities.get(key)
+            if meta is None:
+                alias_idx = reg.get("alias_index") or {}
+                mapped = alias_idx.get((slug or "").strip().lower())
+                if mapped and mapped in entities:
+                    key = mapped
+                    meta = entities[mapped]
+            if meta is None:
+                return None
+            return self._build_entity_record(key, meta, body_limit=body_limit)
+
+    def _build_entity_record(
+        self,
+        slug: str,
+        meta: dict[str, Any],
+        *,
+        now_snap: float | None = None,
+        body_limit: int | None = 600,
+    ) -> dict[str, Any]:
+        raw_attrs = meta.get("attributes") or {}
+        clean_attrs = {
+            k: v
+            for k, v in raw_attrs.items()
+            if not str(k).startswith("$")
+        }
+        ref = str(meta.get("$ref") or "")
+        fm: dict[str, Any] = {}
+        body_text = ""
+        if ref:
+            try:
+                fm, body_text = self._parse_entity_file(self.brain_dir / ref)
+            except Exception:
+                fm, body_text = {}, ""
+        source_url = str(raw_attrs.get("source_url") or raw_attrs.get("$source") or "")
+        ev_ts = _entity_event_ts(meta)
+        cur_now = float(now_snap if now_snap is not None else time.time())
+        body_out = body_text[:body_limit] if (body_limit is not None and body_limit > 0) else body_text
+        record: dict[str, Any] = {
+            "slug": slug,
+            "type": str(meta.get("$type") or "note"),
+            "name": str(meta.get("name") or slug),
+            "tier": int(meta.get("tier") or 2),
+            "summary": str(meta.get("summary") or ""),
+            "path": ref,
+            "source_url": source_url,
+            "body": body_out,
+            "attributes": clean_attrs,
+            "published_at": str(raw_attrs.get("published_at") or meta.get("published_at") or meta.get("updated") or ""),
+            "synced_at": str(raw_attrs.get("synced_at") or meta.get("synced_at") or ""),
+            "timestamp_ts": round(ev_ts, 3) if ev_ts > 0 else 0.0,
+            "age_label": _format_time_tag(ev_ts, cur_now),
+            "updated": str(meta.get("updated") or ""),
+        }
+        if body_limit is None:
+            record["aliases"] = list(meta.get("aliases") or fm.get("aliases") or [])
+            record["relationships"] = list(fm.get("relationships") or meta.get("relationships") or [])
+        return record
+
+    def get_entity(self, slug: str) -> dict[str, Any] | None:
+        """Reads the complete entity record (frontmatter + full Markdown body) by slug or alias."""
+        if self.locked:
+            return None
+        key = (slug or "").strip()
+        if key.startswith("brain:"):
+            key = key[6:].strip()
+        if not key:
+            return None
+        with self.lock:
+            reg = self._load_registry()
+            entities = reg.get("entities") or {}
+            resolved_slug = key if key in entities else (reg.get("alias_index") or {}).get(key.lower(), "")
+            if not resolved_slug:
+                cand = slugify(key)
+                if cand in entities:
+                    resolved_slug = cand
+            if not resolved_slug or resolved_slug not in entities:
+                return None
+            return self._build_entity_record(
+                resolved_slug,
+                entities[resolved_slug],
+                body_limit=None,
+            )
+
     def get_brain_summary(self) -> dict[str, Any]:
         enc_status = self.get_encoder_status()
         if self.locked:
@@ -616,43 +978,50 @@ class SatzBrain:
                 "brain_ranking": enc_status["label"],
             }
         with self.lock:
+            try:
+                reg_mtime = self.registry_path.stat().st_mtime if self.registry_path.exists() else -2.0
+            except OSError:
+                reg_mtime = -2.0
+            try:
+                bmd_mtime = self.brain_md_path.stat().st_mtime if self.brain_md_path.exists() else -2.0
+            except OSError:
+                bmd_mtime = -2.0
+            if (
+                self._summary_cache is not None
+                and reg_mtime == self._summary_cache_mtime
+                and bmd_mtime == self._summary_cache_brain_mtime
+            ):
+                now_snap = time.time()
+                cached = self._summary_cache
+                refreshed_entities: list[dict[str, Any]] = []
+                for ent in cached.get("entities") or []:
+                    ev_ts = float(ent.get("timestamp_ts") or 0.0)
+                    ent_copy = dict(ent)
+                    ent_copy["age_label"] = _format_time_tag(ev_ts, now_snap)
+                    refreshed_entities.append(ent_copy)
+                return {
+                    "brain_dir": cached["brain_dir"],
+                    "brain_md": cached["brain_md"],
+                    "entity_count": cached["entity_count"],
+                    "entities": refreshed_entities,
+                    "locked": False,
+                    "encoder": enc_status,
+                    "brain_ranking": enc_status["label"],
+                }
+
             reg = self._load_registry()
             brain_md = self.get_cached_brain_md()
             entities_out: list[dict[str, Any]] = []
+            now_snap = time.time()
             for slug, meta in sorted(
                 (reg.get("entities") or {}).items(),
-                key=lambda kv: str(kv[1].get("updated") or ""),
+                key=lambda kv: (_entity_event_ts(kv[1]), str(kv[1].get("updated") or "")),
                 reverse=True,
             ):
-                raw_attrs = meta.get("attributes") or {}
-                clean_attrs = {
-                    k: v
-                    for k, v in raw_attrs.items()
-                    if not str(k).startswith("$")
-                }
-                ref = str(meta.get("$ref") or "")
-                body_text = ""
-                if ref:
-                    try:
-                        _, body_text = self._parse_entity_file(self.brain_dir / ref)
-                    except Exception:
-                        body_text = ""
-                source_url = str(raw_attrs.get("source_url") or raw_attrs.get("$source") or "")
                 entities_out.append(
-                    {
-                        "slug": slug,
-                        "type": str(meta.get("$type") or "note"),
-                        "name": str(meta.get("name") or slug),
-                        "tier": int(meta.get("tier") or 2),
-                        "summary": str(meta.get("summary") or ""),
-                        "path": ref,
-                        "source_url": source_url,
-                        "body": body_text[:600],
-                        "attributes": clean_attrs,
-                        "updated": str(meta.get("updated") or ""),
-                    }
+                    self._build_entity_record(slug, meta, now_snap=now_snap, body_limit=600)
                 )
-            return {
+            summary_payload = {
                 "brain_dir": str(self.brain_dir),
                 "brain_md": brain_md,
                 "entity_count": len(entities_out),
@@ -661,14 +1030,69 @@ class SatzBrain:
                 "encoder": enc_status,
                 "brain_ranking": enc_status["label"],
             }
+            self._summary_cache = summary_payload
+            try:
+                self._summary_cache_mtime = self.registry_path.stat().st_mtime if self.registry_path.exists() else -2.0
+                self._summary_cache_brain_mtime = self.brain_md_path.stat().st_mtime if self.brain_md_path.exists() else -2.0
+            except OSError:
+                self._summary_cache_mtime = reg_mtime
+                self._summary_cache_brain_mtime = bmd_mtime
+            return summary_payload
 
-    def search_entities(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
+    def search_by_time(
+        self,
+        hours: float = 24.0,
+        entity_types: list[str] | None = None,
+        query: str = "",
+        limit: int = 20,
+        now_ts: float | None = None,
+    ) -> list[dict[str, Any]]:
+        if self.locked:
+            return []
+        cur = float(now_ts if now_ts is not None else time.time())
+        cutoff = cur - max(0.1, float(hours)) * 3600.0
+        type_filter = {t.strip().lower() for t in (entity_types or []) if t.strip()}
+        q_low = (query or "").strip().lower()
+        q_toks = re.findall(r"[a-z0-9äöüß]{3,}", q_low) if q_low else []
+        matched: list[dict[str, Any]] = []
+        for ent in self.get_brain_summary().get("entities") or []:
+            if type_filter and str(ent.get("type") or "").lower() not in type_filter:
+                continue
+            ev_ts = float(ent.get("timestamp_ts") or 0.0)
+            if ev_ts < cutoff:
+                continue
+            if q_toks:
+                hay = f"{ent['slug']} {ent['name']} {ent['summary']} {ent.get('body') or ''}".lower()
+                if q_low not in hay and not any(tok in hay for tok in q_toks):
+                    continue
+            matched.append(ent)
+        matched.sort(key=lambda e: (-float(e.get("timestamp_ts") or 0.0), float((e.get("attributes") or {}).get("confidence10") or 0.0)))
+        return matched[:limit]
+
+    def search_entities(
+        self,
+        query: str,
+        limit: int = 20,
+        hours: float | None = None,
+        entity_type: str | None = None,
+        now_ts: float | None = None,
+    ) -> list[dict[str, Any]]:
         if self.locked:
             return []
         q_str = (query or "").strip()
+        cur = float(now_ts if now_ts is not None else time.time())
+        cutoff = (cur - float(hours) * 3600.0) if (hours is not None and hours > 0) else None
+        etype_f = entity_type.strip().lower() if entity_type else None
+
         if not q_str:
-            return list(self.get_brain_summary().get("entities") or [])[:limit]
-        hot = self.load_hot_entities(q_str, open_sources=None, limit=limit)
+            ents = list(self.get_brain_summary().get("entities") or [])
+            if etype_f:
+                ents = [e for e in ents if str(e.get("type") or "").lower() == etype_f]
+            if cutoff is not None:
+                ents = [e for e in ents if float(e.get("timestamp_ts") or 0.0) >= cutoff]
+            return ents[:limit]
+
+        hot = self.load_hot_entities(q_str, open_sources=None, limit=limit * 2, now_ts=cur)
         seen_slugs = {h["slug"] for h in hot}
         q_low = q_str.lower()
         for ent in self.get_brain_summary().get("entities") or []:
@@ -678,8 +1102,10 @@ class SatzBrain:
             if q_low in hay or any(tok in hay for tok in re.findall(r"[a-z0-9äöüß]{3,}", q_low)):
                 hot.append(ent)
                 seen_slugs.add(ent["slug"])
-                if len(hot) >= limit:
-                    break
+        if etype_f:
+            hot = [e for e in hot if str(e.get("type") or "").lower() == etype_f]
+        if cutoff is not None:
+            hot = [e for e in hot if float(e.get("timestamp_ts") or 0.0) >= cutoff]
         return hot[:limit]
 
     def load_hot_entities(
@@ -687,6 +1113,7 @@ class SatzBrain:
         query: str,
         open_sources: list[dict[str, Any]] | None = None,
         limit: int = 5,
+        now_ts: float | None = None,
     ) -> list[dict[str, Any]]:
         if self.locked:
             return []
@@ -695,6 +1122,9 @@ class SatzBrain:
             entities = reg.get("entities") or {}
             if not entities:
                 return []
+
+            cur_now = float(now_ts if now_ts is not None else time.time())
+            temporal = _parse_temporal_query(query or "", now_ts=cur_now)
 
             search_blob = (query or "").lower()
             for src in open_sources or []:
@@ -752,7 +1182,10 @@ class SatzBrain:
                 name_l = str(meta.get("name") or "").lower()
                 summary_l = str(meta.get("summary") or "").lower()
                 etype_l = str(meta.get("$type") or "").lower()
-                attrs_str = json.dumps(meta.get("attributes") or {}, ensure_ascii=False).lower()
+                attrs_dict = meta.get("attributes") or {}
+                attrs_str = json.dumps(attrs_dict, ensure_ascii=False).lower()
+                ev_ts = _entity_event_ts(meta)
+                age_hours = max(0.0, (cur_now - ev_ts) / 3600.0) if ev_ts > 0.0 else 1e6
 
                 if slug in search_blob or (name_l and name_l in search_blob):
                     score += 5.0
@@ -776,12 +1209,41 @@ class SatzBrain:
                     score += 3.5
                 if any(w in search_blob for w in ("code", "voucher", "discount", "promo", "coupon")) and etype_l == "promotion":
                     score += 3.5
+                if etype_l == "skill":
+                    for trig in attrs_dict.get("trigger_examples") or []:
+                        t_l = str(trig or "").strip().lower()
+                        if t_l and (t_l in search_blob or (query_tokens and any(tok in t_l for tok in query_tokens))):
+                            score += 4.0
+                            break
                 if int(meta.get("tier") or 2) == 1:
                     score += 1.0
 
                 sim = sim_scores.get(slug, 0.0)
                 if sim > 0.12:
                     score += sim * 2.5
+
+                # Time-aware ranking for synced news stories and timestamped knowledge
+                has_topical_signal = score > (1.0 if int(meta.get("tier") or 2) == 1 else 0.2)
+                is_news_story_temporal = temporal["is_news_query"] and etype_l in ("story", "claim")
+                if ev_ts > 0.0 and (has_topical_signal or is_news_story_temporal):
+                    if temporal["start_ts"] is not None:
+                        end_bound = temporal["end_ts"] if temporal["end_ts"] is not None else (cur_now + 600.0)
+                        if temporal["start_ts"] <= ev_ts <= end_bound:
+                            span_pos = math.exp(-age_hours / 36.0)
+                            score += 1.2 + 2.6 * span_pos
+                        elif etype_l == "story":
+                            score -= 2.5
+                    elif temporal["recency_bias"]:
+                        score += 2.8 * math.exp(-age_hours / 48.0)
+                    elif etype_l in ("story", "claim", "note"):
+                        score += 0.9 * math.exp(-age_hours / 72.0)
+
+                    if etype_l == "story" and score > 0.0:
+                        try:
+                            conf10 = float(attrs_dict.get("confidence10") or 0.0)
+                        except (TypeError, ValueError):
+                            conf10 = 0.0
+                        score += min(0.8, conf10 / 12.5)
 
                 if score > 0.6:
                     scored.append((score, slug, meta))
@@ -800,6 +1262,7 @@ class SatzBrain:
                     if not str(k).startswith("$")
                 }
                 source_url = str(raw_attrs.get("source_url") or raw_attrs.get("$source") or "")
+                ev_ts = _entity_event_ts(meta)
                 results.append(
                     {
                         "slug": slug,
@@ -810,6 +1273,10 @@ class SatzBrain:
                         "source_url": source_url,
                         "summary": meta.get("summary") or "",
                         "attributes": clean_attrs,
+                        "published_at": str(raw_attrs.get("published_at") or meta.get("published_at") or meta.get("updated") or ""),
+                        "synced_at": str(raw_attrs.get("synced_at") or meta.get("synced_at") or ""),
+                        "timestamp_ts": round(ev_ts, 3) if ev_ts > 0.0 else 0.0,
+                        "age_label": _format_time_tag(ev_ts, cur_now),
                         "body": body_text[:1400],
                         "score": round(float(sc_val), 3),
                     }
@@ -885,6 +1352,9 @@ class SatzBrain:
                         "path": str(h.get("path") or ""),
                         "source_url": str(h.get("source_url") or ""),
                         "attributes": clean_h_attrs,
+                        "published_at": str(h.get("published_at") or ""),
+                        "timestamp_ts": float(h.get("timestamp_ts") or 0.0),
+                        "age_label": str(h.get("age_label") or ""),
                         "body": body_str,
                         "text": full_text[:1200],
                         "full_text": full_text,
@@ -903,8 +1373,10 @@ class SatzBrain:
                         if bs["attributes"]
                         else "{}"
                     )
+                    age_line = f"Time: {bs['age_label']}\n" if bs.get("age_label") else ""
                     block = (
                         f"\n[{bs['cite_label']}] ({bs['type']}) {bs['name']} · {bs['summary']}\n"
+                        f"{age_line}"
                         f"Attributes: {attrs_json}"
                     )
                     if bs["body"]:

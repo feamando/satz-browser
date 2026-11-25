@@ -76,6 +76,8 @@ pub struct BookmarkItem {
     pub url: String,
     pub position: i32,
     pub created_at: String,
+    #[serde(default)]
+    pub favicon_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,6 +188,7 @@ impl DbState {
             db_path,
         };
         let _ = state.ensure_news_conversation();
+        let _ = state.ensure_drives_conversation();
         Ok(state)
     }
 
@@ -370,6 +373,20 @@ impl DbState {
             }
         }
 
+        let has_bookmark_favicon_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('bookmarks') WHERE name = 'favicon_url'",
+                [],
+                |r| {
+                    let c: i64 = r.get(0)?;
+                    Ok(c > 0)
+                },
+            )
+            .unwrap_or(false);
+        if !has_bookmark_favicon_col {
+            conn.execute("ALTER TABLE bookmarks ADD COLUMN favicon_url TEXT NULL", [])?;
+        }
+
         let unseeded_v05: Option<String> = conn
             .query_row(
                 "SELECT value FROM meta WHERE key = 'v05_unseeded_bookmarks'",
@@ -552,8 +569,12 @@ impl DbState {
                     c.summary
              FROM conversations c
              ORDER BY CASE c.origin
-                        WHEN 'mail' THEN 2
-                        WHEN 'news' THEN 1
+                        WHEN 'mail' THEN 6
+                        WHEN 'news' THEN 5
+                        WHEN 'drives' THEN 4
+                        WHEN 'settings' THEN 3
+                        WHEN 'news_settings' THEN 2
+                        WHEN 'news_perspectives' THEN 1
                         ELSE 0
                       END DESC,
                       c.pinned DESC,
@@ -617,6 +638,30 @@ impl DbState {
 
     pub fn ensure_news_conversation(&self) -> SqlResult<Conversation> {
         self.ensure_pinned_origin_conversation("news", "conv-news", "news")
+    }
+
+    pub fn ensure_drives_conversation(&self) -> SqlResult<Conversation> {
+        self.ensure_pinned_origin_conversation("drives", "conv-drives", "Drives")
+    }
+
+    pub fn ensure_settings_conversation(&self) -> SqlResult<Conversation> {
+        self.ensure_pinned_origin_conversation("settings", "conv-settings", "Settings")
+    }
+
+    pub fn ensure_news_settings_conversation(&self) -> SqlResult<Conversation> {
+        self.ensure_pinned_origin_conversation(
+            "news_settings",
+            "conv-news-settings",
+            "News Settings",
+        )
+    }
+
+    pub fn ensure_news_perspectives_conversation(&self) -> SqlResult<Conversation> {
+        self.ensure_pinned_origin_conversation(
+            "news_perspectives",
+            "conv-news-perspectives",
+            "Perspectives",
+        )
     }
 
     pub fn get_conversation(&self, conversation_id: &str) -> SqlResult<ConversationDetail> {
@@ -801,7 +846,7 @@ impl DbState {
         {
             let conn = self.conn.lock().unwrap();
             conn.execute(
-                "UPDATE conversations SET pinned = CASE WHEN origin IN ('mail', 'news') THEN 1 WHEN pinned = 1 THEN 0 ELSE 1 END WHERE id = ?1",
+                "UPDATE conversations SET pinned = CASE WHEN origin IN ('mail', 'news', 'drives', 'settings', 'news_settings', 'news_perspectives') THEN 1 WHEN pinned = 1 THEN 0 ELSE 1 END WHERE id = ?1",
                 params![conversation_id],
             )?;
         }
@@ -817,7 +862,7 @@ impl DbState {
         {
             let conn = self.conn.lock().unwrap();
             conn.execute(
-                "UPDATE conversations SET status = CASE WHEN origin IN ('mail', 'news') THEN 'active' ELSE ?2 END WHERE id = ?1",
+                "UPDATE conversations SET status = CASE WHEN origin IN ('mail', 'news', 'drives', 'settings', 'news_settings', 'news_perspectives') THEN 'active' ELSE ?2 END WHERE id = ?1",
                 params![conversation_id, status],
             )?;
         }
@@ -833,13 +878,21 @@ impl DbState {
                 |r| r.get(0),
             )
             .optional()?;
-        if matches!(origin.as_deref(), Some("mail") | Some("news")) {
+        if matches!(
+            origin.as_deref(),
+            Some("mail")
+                | Some("news")
+                | Some("drives")
+                | Some("settings")
+                | Some("news_settings")
+                | Some("news_perspectives")
+        ) {
             return Err(rusqlite::Error::InvalidParameterName(
                 "Pinned system conversation cannot be deleted".to_string(),
             ));
         }
         conn.execute(
-            "DELETE FROM conversations WHERE id = ?1 AND origin NOT IN ('mail', 'news')",
+            "DELETE FROM conversations WHERE id = ?1 AND origin NOT IN ('mail', 'news', 'drives', 'settings', 'news_settings', 'news_perspectives')",
             params![conversation_id],
         )?;
         Ok(())
@@ -1242,6 +1295,30 @@ impl DbState {
         Ok(Some((updated_tab, None)))
     }
 
+    pub fn get_tab(&self, tab_id: &str) -> SqlResult<Option<BrowserTab>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, conversation_id, position, url, title, is_open, created_at, kind
+             FROM tabs
+             WHERE id = ?1",
+            params![tab_id],
+            |row| {
+                let is_open_int: i32 = row.get(5)?;
+                Ok(BrowserTab {
+                    id: row.get(0)?,
+                    conversation_id: row.get(1)?,
+                    position: row.get(2)?,
+                    url: row.get(3)?,
+                    title: row.get(4)?,
+                    is_open: is_open_int != 0,
+                    created_at: row.get(6)?,
+                    kind: row.get::<_, Option<String>>(7)?.unwrap_or_else(default_tab_kind),
+                })
+            },
+        )
+        .optional()
+    }
+
     pub fn get_latest_source_for_tab(&self, tab_id: &str) -> SqlResult<Option<SourceItem>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
@@ -1387,7 +1464,7 @@ impl DbState {
     pub fn list_bookmarks(&self) -> SqlResult<Vec<BookmarkItem>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, title, url, position, created_at
+            "SELECT id, title, url, position, created_at, favicon_url
              FROM bookmarks
              ORDER BY position ASC, created_at ASC",
         )?;
@@ -1398,15 +1475,29 @@ impl DbState {
                 url: row.get(2)?,
                 position: row.get(3)?,
                 created_at: row.get(4)?,
+                favicon_url: row.get(5)?,
             })
         })?;
         rows.collect()
     }
 
     pub fn add_bookmark(&self, title: &str, url: &str) -> SqlResult<BookmarkItem> {
+        self.add_bookmark_with_favicon(title, url, None)
+    }
+
+    pub fn add_bookmark_with_favicon(
+        &self,
+        title: &str,
+        url: &str,
+        favicon_url: Option<&str>,
+    ) -> SqlResult<BookmarkItem> {
         let conn = self.conn.lock().unwrap();
         let id = gen_id("bm");
         let ts = now_epoch_secs_str();
+        let clean_favicon = favicon_url
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
         let next_pos: i32 = conn
             .query_row(
                 "SELECT COALESCE(MAX(position) + 1, 0) FROM bookmarks",
@@ -1415,9 +1506,9 @@ impl DbState {
             )
             .unwrap_or(0);
         conn.execute(
-            "INSERT INTO bookmarks (id, title, url, position, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, title, url, next_pos, ts],
+            "INSERT INTO bookmarks (id, title, url, position, created_at, favicon_url)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, title, url, next_pos, ts, clean_favicon],
         )?;
         Ok(BookmarkItem {
             id,
@@ -1425,7 +1516,19 @@ impl DbState {
             url: url.to_string(),
             position: next_pos,
             created_at: ts,
+            favicon_url: clean_favicon,
         })
+    }
+
+    pub fn set_bookmark_favicon(&self, bookmark_id: &str, favicon_url: &str) -> SqlResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let trimmed = favicon_url.trim();
+        let val: Option<&str> = if trimmed.is_empty() { None } else { Some(trimmed) };
+        conn.execute(
+            "UPDATE bookmarks SET favicon_url = ?1 WHERE id = ?2",
+            params![val, bookmark_id],
+        )?;
+        Ok(())
     }
 
     pub fn remove_bookmark(&self, bookmark_id: &str) -> SqlResult<()> {
@@ -1598,6 +1701,27 @@ mod tests {
         assert_eq!(bms.len(), 0);
         let added = state.add_bookmark("Rust Docs", "https://doc.rust-lang.org").unwrap();
         assert_eq!(state.list_bookmarks().unwrap().len(), 1);
+        assert_eq!(added.favicon_url, None);
+        state
+            .set_bookmark_favicon(&added.id, "data:image/png;base64,AAAA")
+            .unwrap();
+        let updated_bms = state.list_bookmarks().unwrap();
+        assert_eq!(
+            updated_bms[0].favicon_url.as_deref(),
+            Some("data:image/png;base64,AAAA")
+        );
+        let added_with_icon = state
+            .add_bookmark_with_favicon(
+                "WaniKani",
+                "https://www.wanikani.com/dashboard",
+                Some("https://www.wanikani.com/favicon.ico"),
+            )
+            .unwrap();
+        assert_eq!(
+            added_with_icon.favicon_url.as_deref(),
+            Some("https://www.wanikani.com/favicon.ico")
+        );
+        state.remove_bookmark(&added_with_icon.id).unwrap();
         state.remove_bookmark(&added.id).unwrap();
         assert_eq!(state.list_bookmarks().unwrap().len(), 0);
 
@@ -1878,5 +2002,113 @@ mod tests {
         assert!(list.len() >= 3);
         assert_eq!(list[0].origin, "mail");
         assert_eq!(list[1].origin, "news");
+    }
+
+    #[test]
+    fn test_pinned_settings_conversation_ordering_and_protections() {
+        let conn = Connection::open_in_memory().unwrap();
+        DbState::init_connection(&conn).unwrap();
+        let state = DbState {
+            conn: Mutex::new(conn),
+            db_path: PathBuf::from(":memory:"),
+        };
+
+        let _chat = state.create_conversation("General chat", "chat").unwrap();
+        let settings_conv = state.ensure_settings_conversation().unwrap();
+        assert_eq!(settings_conv.id, "conv-settings");
+        assert_eq!(settings_conv.origin, "settings");
+        assert!(settings_conv.pinned);
+        assert_eq!(settings_conv.status, "active");
+
+        let news_conv = state.ensure_news_conversation().unwrap();
+        let mail_conv = state.ensure_mail_conversation().unwrap();
+        assert_eq!(news_conv.origin, "news");
+        assert_eq!(mail_conv.origin, "mail");
+
+        let after_unpin = state.pin_conversation(&settings_conv.id).unwrap();
+        assert!(after_unpin.pinned, "Settings conversation must stay pinned");
+
+        let after_archive = state.archive_conversation(&settings_conv.id, true).unwrap();
+        assert_eq!(
+            after_archive.status, "active",
+            "Settings conversation cannot be archived"
+        );
+
+        assert!(
+            state.delete_conversation(&settings_conv.id).is_err(),
+            "Settings conversation cannot be deleted"
+        );
+
+        let list = state.list_conversations().unwrap();
+        assert!(list.len() >= 4);
+        assert_eq!(list[0].origin, "mail");
+        assert_eq!(list[1].origin, "news");
+        assert_eq!(list[2].origin, "settings");
+    }
+
+    #[test]
+    fn test_pinned_drives_conversation_ordering_and_protections() {
+        let conn = Connection::open_in_memory().unwrap();
+        DbState::init_connection(&conn).unwrap();
+        let state = DbState {
+            conn: Mutex::new(conn),
+            db_path: PathBuf::from(":memory:"),
+        };
+
+        let _chat = state.create_conversation("General chat", "chat").unwrap();
+        let drives_conv = state.ensure_drives_conversation().unwrap();
+        assert_eq!(drives_conv.id, "conv-drives");
+        assert_eq!(drives_conv.origin, "drives");
+        assert!(drives_conv.pinned);
+        assert_eq!(drives_conv.status, "active");
+
+        let settings_conv = state.ensure_settings_conversation().unwrap();
+        let news_conv = state.ensure_news_conversation().unwrap();
+        let mail_conv = state.ensure_mail_conversation().unwrap();
+        assert_eq!(settings_conv.origin, "settings");
+        assert_eq!(news_conv.origin, "news");
+        assert_eq!(mail_conv.origin, "mail");
+
+        let after_unpin = state.pin_conversation(&drives_conv.id).unwrap();
+        assert!(after_unpin.pinned, "Drives conversation must stay pinned");
+
+        let after_archive = state.archive_conversation(&drives_conv.id, true).unwrap();
+        assert_eq!(
+            after_archive.status, "active",
+            "Drives conversation cannot be archived"
+        );
+
+        assert!(
+            state.delete_conversation(&drives_conv.id).is_err(),
+            "Drives conversation cannot be deleted"
+        );
+
+        let list = state.list_conversations().unwrap();
+        assert!(list.len() >= 5);
+        assert_eq!(list[0].origin, "mail");
+        assert_eq!(list[1].origin, "news");
+        assert_eq!(list[2].origin, "drives");
+        assert_eq!(list[3].origin, "settings");
+    }
+
+    #[test]
+    fn test_news_settings_and_perspectives_conversations_protected() {
+        let conn = Connection::open_in_memory().unwrap();
+        DbState::init_connection(&conn).unwrap();
+        let state = DbState {
+            conn: Mutex::new(conn),
+            db_path: PathBuf::from(":memory:"),
+        };
+
+        let ns = state.ensure_news_settings_conversation().unwrap();
+        let np = state.ensure_news_perspectives_conversation().unwrap();
+        assert_eq!(ns.id, "conv-news-settings");
+        assert_eq!(ns.origin, "news_settings");
+        assert_eq!(np.id, "conv-news-perspectives");
+        assert_eq!(np.origin, "news_perspectives");
+        assert!(state.delete_conversation(&ns.id).is_err());
+        assert!(state.delete_conversation(&np.id).is_err());
+        assert_eq!(state.archive_conversation(&ns.id, true).unwrap().status, "active");
+        assert_eq!(state.archive_conversation(&np.id, true).unwrap().status, "active");
     }
 }

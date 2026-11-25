@@ -73,21 +73,36 @@ ORDER_NUMBER_PATTERNS = [
     re.compile(r"order\s*#?\s*([A-Z0-9]*\d[A-Z0-9-]{2,})", re.IGNORECASE),
     re.compile(r"order\s+number[:\s#]*([A-Z0-9]*\d[A-Z0-9-]{2,})", re.IGNORECASE),
     re.compile(r"#?(\d{3}-\d{7}-\d{7})"),  # Amazon
-    re.compile(r"confirmation\s*#?\s*([A-Z0-9]{6,})", re.IGNORECASE),
-    re.compile(r"receipt\s+#?\s*([A-Z0-9-]{6,})", re.IGNORECASE),
-    re.compile(r"bestell(?:nummer|nr\.?)[:\s#]*([A-Z0-9-]{5,})", re.IGNORECASE),  # German
-    re.compile(r"auftrags(?:nummer|nr\.?)[:\s#]*([A-Z0-9-]{5,})", re.IGNORECASE),  # German
+    re.compile(r"confirmation\s*#?\s*:?\s*(?=[A-Z0-9-]{6,}\b)([A-Z0-9]*\d[A-Z0-9-]{3,})", re.IGNORECASE),
+    re.compile(r"receipt\s+#?\s*(?=[A-Z0-9-]{6,}\b)([A-Z0-9]*\d[A-Z0-9-]{3,})", re.IGNORECASE),
+    re.compile(r"bestell(?:nummer|nr\.?)[:\s#]*(?=[A-Z0-9-]{5,}\b)([A-Z0-9]*\d[A-Z0-9-]{3,})", re.IGNORECASE),  # German
+    re.compile(r"auftrags(?:nummer|nr\.?)[:\s#]*(?=[A-Z0-9-]{5,}\b)([A-Z0-9]*\d[A-Z0-9-]{3,})", re.IGNORECASE),  # German
 ]
 
-TRACKING_NUMBER_PATTERNS = [
+EXPLICIT_TRACKING_PATTERNS = [
     re.compile(r"(1Z[A-Z0-9]{16})"),  # UPS (case-sensitive)
     re.compile(r"(JJD\d{18})", re.IGNORECASE),  # DHL
-    re.compile(r"tracking\s*#?\s*:?\s*([A-Z0-9]{10,})", re.IGNORECASE),
-    re.compile(r"track(?:ing)?\s+number[:\s#]*([A-Z0-9]{10,})", re.IGNORECASE),
-    re.compile(r"sendungsnummer[:\s#]*([A-Z0-9]{10,})", re.IGNORECASE),  # German
-    re.compile(r"\b(\d{20,22})\b"),
-    re.compile(r"\b(\d{12,15})\b"),
+    re.compile(r"tracking\s*#?\s*:?\s*(?=[A-Z0-9]{10,}\b)([A-Z0-9]*\d[A-Z0-9]*)", re.IGNORECASE),
+    re.compile(r"track(?:ing)?\s+number[:\s#]*(?=[A-Z0-9]{10,}\b)([A-Z0-9]*\d[A-Z0-9]*)", re.IGNORECASE),
+    re.compile(r"sendungsnummer[:\s#]*(?=[A-Z0-9]{10,}\b)([A-Z0-9]*\d[A-Z0-9]*)", re.IGNORECASE),  # German
 ]
+
+BARE_DIGIT_TRACKING_PATTERNS = [
+    re.compile(r"(?<![+\d-])\b(\d{20,22})\b(?![\d-])"),
+    re.compile(r"(?<![+\d-])\b(\d{12,15})\b(?![\d-])"),
+]
+
+TRACKING_NUMBER_PATTERNS = EXPLICIT_TRACKING_PATTERNS + BARE_DIGIT_TRACKING_PATTERNS
+
+SHIPPING_CONTEXT_RE = re.compile(
+    r"\b(?:dhl|ups|fedex|hermes|dpd|gls|parcel|paket|delivery|shipment|shipped|order|bestellung|lieferung|sendung|tracking|zugestellt|versandt)\b",
+    re.IGNORECASE,
+)
+
+PHONE_OR_MEETING_PREFIX_RE = re.compile(
+    r"(?:tel|phone|telefon|fax|mobil|mobile|call|dial[\s-]?in|meeting\s+id|conference\s+id|passcode|pin)\s*[:#]?\s*\+?\s*$",
+    re.IGNORECASE,
+)
 
 TRACKING_URL_PATTERNS = [
     re.compile(r"(https?://\S*(?:track|sendungsverfolgung|piececode|dhl\.de|ups\.com|fedex\.com|myhermes\.de|dpd\.de)\S*)", re.IGNORECASE),
@@ -272,6 +287,117 @@ def match_ping_platform(from_addr: str) -> str | None:
         if parent in PING_PLATFORM_MAP:
             return PING_PLATFORM_MAP[parent]
     return None
+
+
+CALENDAR_SUBJECT_PREFIX_RE = re.compile(
+    r"^\s*(?:(?:re|fw|fwd|aw|wg)\s*:\s*)*"
+    r"(?:"
+    r"(?:updated\s+)?invitation(?:\s+with\s+note)?|"
+    r"canceled\s+event(?:\s+with\s+note)?|cancelled\s+event(?:\s+with\s+note)?|"
+    r"(?:accepted|declined|tentative|tentatively\s+accepted|proposed\s+new\s+time)(?:\s+with\s+note)?|"
+    r"(?:aktualisierte\s+)?einladung(?:\s+mit\s+hinweis)?|"
+    r"abgesagter\s+termin(?:\s+mit\s+hinweis)?|"
+    r"angenommen|abgelehnt|vorl[äa]ufig|unter\s+vorbehalt|besprechungseinladung"
+    r")\s*:\s*",
+    re.IGNORECASE,
+)
+
+CALENDAR_RSVP_SUBJECT_PREFIX_RE = re.compile(
+    r"^\s*(?:(?:re|fw|fwd|aw|wg)\s*:\s*)*"
+    r"(?:accepted|declined|tentative|tentatively\s+accepted|proposed\s+new\s+time|angenommen|abgelehnt|vorl[äa]ufig|unter\s+vorbehalt)\s*:\s*",
+    re.IGNORECASE,
+)
+
+CALENDAR_SUBJECT_AT_RE = re.compile(
+    r"@\s*(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|Mo|Di|Mi|Do|Fr|Sa|So)\b",
+    re.IGNORECASE,
+)
+
+CALENDAR_SENDER_RE = re.compile(
+    r"(?:calendar-notification@google\.com|(?:^|[<\s])(?:calendar|calendar-noreply|noreply-calendar|termine|invites?)@|@calendar\.google\.com)",
+    re.IGNORECASE,
+)
+
+CALENDAR_BODY_STRONG_RE = re.compile(
+    r"(?:"
+    r"calendar\.google\.com/calendar|"
+    r"invitation\s+from\s+google\s+calendar|"
+    r"this\s+event\s+has\s+been\s+(?:updated|canceled|cancelled)|"
+    r"you\s+have\s+been\s+invited\s+to\s+the\s+following\s+event|"
+    r"has\s+(?:accepted|declined|tentatively\s+accepted)\s+this\s+invitation|"
+    r"hat\s+diese\s+einladung\s+(?:angenommen|abgelehnt|vorl[äa]ufig\s+zugesagt)|"
+    r"view\s+all\s+guest\s+info|"
+    r"going\?\s*(?:yes|no|maybe)"
+    r")",
+    re.IGNORECASE,
+)
+
+CALENDAR_BODY_SUPPORT_RE = re.compile(
+    r"(?:"
+    r"(?:^|\n)\s*(?:when|where|organizer|who|required|optional|wann|wo|organisator|erforderlich)\s*:\s*\S|"
+    r"meet\.google\.com/|teams\.microsoft\.com/l/meetup-join|zoom\.us/j/|"
+    r"more\s+options|changed\s*:\s*(?:time|location|title|guests|description)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def detect_calendar_notification(
+    from_addr: str = "",
+    subject: str = "",
+    body_text: str = "",
+    *,
+    sender_header: str = "",
+    has_calendar_part: bool = False,
+    is_calendar_mime: bool = False,
+) -> str | None:
+    """
+    Detects calendar invites, updates, cancellations, and RSVPs (Google Calendar,
+    Outlook/Exchange, Apple Calendar) even when `From:` carries the organizer or
+    attendee's email address rather than `calendar-notification@google.com`.
+    Returns a ping platform name (`"Google Calendar"`, `"Microsoft Calendar"`, or
+    `"Calendar"`), or `None` when not a calendar notification.
+    """
+    hdr_str = f"{from_addr or ''} {sender_header or ''}".strip().lower()
+    subj_str = (subject or "").strip()
+    body_snip = (body_text or "")[:3000]
+    body_low = body_snip.lower()
+
+    is_cal = False
+    if is_calendar_mime or CALENDAR_SENDER_RE.search(hdr_str):
+        is_cal = True
+    elif CALENDAR_BODY_STRONG_RE.search(body_snip):
+        is_cal = True
+    elif has_calendar_part and (
+        CALENDAR_SUBJECT_PREFIX_RE.match(subj_str)
+        or CALENDAR_BODY_SUPPORT_RE.search(body_snip)
+        or not body_snip.strip()
+    ):
+        is_cal = True
+    elif CALENDAR_SUBJECT_PREFIX_RE.match(subj_str) and (
+        CALENDAR_SUBJECT_AT_RE.search(subj_str)
+        or CALENDAR_BODY_SUPPORT_RE.search(body_snip)
+        or (CALENDAR_RSVP_SUBJECT_PREFIX_RE.match(subj_str) and not body_snip.strip())
+        or any(
+            d in hdr_str
+            for d in ("google.com", "outlook.com", "microsoft.com", "office365.com", "icloud.com", "calendly.com")
+        )
+    ):
+        is_cal = True
+
+    if not is_cal:
+        return None
+
+    if (
+        "google.com" in hdr_str
+        or "calendar.google.com" in body_low
+        or "google calendar" in body_low
+        or CALENDAR_SUBJECT_AT_RE.search(subj_str)
+    ):
+        return "Google Calendar"
+    if any(k in hdr_str or k in body_low for k in ("outlook.com", "microsoft.com", "office365.com", "teams.microsoft.com")):
+        return "Microsoft Calendar"
+    return "Calendar"
 
 
 # ── Section 4.5.2: Split into `new`, `quote`, `signature`, `footer` (EN & DE) ──
@@ -609,7 +735,7 @@ def extract_information_fields(
             break
 
     # 2. Tracking number
-    for pat in TRACKING_NUMBER_PATTERNS:
+    for pat in EXPLICIT_TRACKING_PATTERNS:
         for m in pat.finditer(combined):
             cand = m.group(1).strip().strip(".,;:!?)(")
             if is_valid_extracted_code(cand) and cand != out.get("order_number", ("", "", 0.0))[0]:
@@ -617,6 +743,19 @@ def extract_information_fields(
                 break
         if "tracking_number" in out:
             break
+    if "tracking_number" not in out:
+        for pat in BARE_DIGIT_TRACKING_PATTERNS:
+            for m in pat.finditer(combined):
+                line_start = combined.rfind("\n", 0, m.start()) + 1
+                prefix = combined[line_start : m.start()]
+                if PHONE_OR_MEETING_PREFIX_RE.search(prefix):
+                    continue
+                cand = m.group(1).strip().strip(".,;:!?)(")
+                if is_valid_extracted_code(cand) and cand != out.get("order_number", ("", "", 0.0))[0]:
+                    out["tracking_number"] = (cand, "rule", 1.0)
+                    break
+            if "tracking_number" in out:
+                break
 
     # 3. Tracking URL
     for pat in TRACKING_URL_PATTERNS:
@@ -825,16 +964,21 @@ class SatzMailPipeline:
 
         self.lock = threading.RLock()
         self._queue: list[str] = []
+        self._translation_queue: list[dict[str, Any]] = []
         self._wake_event = threading.Event()
         self.processing_done = 0
         self.processing_total = 0
+        self.translating_done = 0
+        self.translating_total = 0
         self.is_processing = False
         self.model_version = "cold"
         self.last_retrain_at = 0.0
 
         self._distilbert_tok: Any = None
         self._distilbert_model: Any = None
-        self._load_active_model_if_exists()
+        self._loaded_model_dir: Path | None = None
+        self._model_load_lock = threading.Lock()
+        self._load_active_model_if_exists(load_weights=False)
 
         self._stop_event = threading.Event()
         self._worker_thread: threading.Thread | None = None
@@ -857,34 +1001,57 @@ class SatzMailPipeline:
         db_path = self.mail._current_mail_db_path()
         return db_path.parent / "mail_model" / "active"
 
-    def _load_active_model_if_exists(self) -> None:
+    def _load_active_model_if_exists(self, load_weights: bool = False) -> None:
         mdir = self._active_model_dir()
+        if self._loaded_model_dir is not None and self._loaded_model_dir != mdir:
+            self._distilbert_tok = None
+            self._distilbert_model = None
+            self._loaded_model_dir = None
+
         vfile = mdir / "version.txt"
         if vfile.exists():
             try:
                 self.model_version = vfile.read_text(encoding="utf-8").strip() or "v1"
             except Exception:
                 self.model_version = "v1"
-            if (mdir / "config.json").exists():
-                try:
-                    from transformers import AutoModelForSequenceClassification, AutoTokenizer
-
-                    self._distilbert_tok = AutoTokenizer.from_pretrained(str(mdir))
-                    self._distilbert_model = AutoModelForSequenceClassification.from_pretrained(str(mdir))
-                    self._distilbert_model.to("cpu")
-                    self._distilbert_model.eval()
-                except Exception:
-                    pass
+            if load_weights:
+                self._ensure_active_model_loaded()
         else:
             self.model_version = "cold"
             self._distilbert_tok = None
             self._distilbert_model = None
+            self._loaded_model_dir = None
+
+    def _ensure_active_model_loaded(self) -> None:
+        """Lazily loads DistilBERT classifier weights onto CPU on first inference."""
+        mdir = self._active_model_dir()
+        with self._model_load_lock:
+            if (
+                self._loaded_model_dir == mdir
+                and self._distilbert_model is not None
+                and self._distilbert_tok is not None
+            ):
+                return
+            if not (mdir / "version.txt").exists() or not (mdir / "config.json").exists():
+                return
+            try:
+                from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+                self._distilbert_tok = AutoTokenizer.from_pretrained(str(mdir))
+                self._distilbert_model = AutoModelForSequenceClassification.from_pretrained(str(mdir))
+                self._distilbert_model.to("cpu")
+                self._distilbert_model.eval()
+                self._loaded_model_dir = mdir
+            except Exception:
+                pass
 
     def get_status(self) -> dict[str, Any]:
         with self.lock:
             return {
                 "processing_done": self.processing_done,
                 "processing_total": self.processing_total,
+                "translating_done": self.translating_done,
+                "translating_total": self.translating_total,
                 "is_processing": self.is_processing,
                 "model_version": self.model_version,
                 "last_retrain_at": self.last_retrain_at,
@@ -936,30 +1103,193 @@ class SatzMailPipeline:
         if self.auto_wake:
             self._wake_event.set()
 
+    def _run_translation_job(self, job: dict[str, Any]) -> bool:
+        from contextlib import nullcontext
+
+        mid = str(job.get("message_id") or "")
+        pid = job.get("profile_id")
+        tgt = str(job.get("target_lang") or "")
+        pm = getattr(self.runtime, "passwords", None)
+        translator = getattr(self.runtime, "translator", None)
+        if not mid or pm is None or not pm.unlocked or translator is None:
+            return False
+        if pid is not None and pm.active_profile_id != pid:
+            return False
+        resolved = translator.resolve_translation_model()
+        is_mocked = "_complete_role_prompt" in getattr(self.runtime, "__dict__", {})
+        if not resolved.get("is_cloud") and getattr(self.runtime, "gemma_model", None) is None and not is_mocked:
+            return False
+        bg_scope_fn = getattr(self.runtime, "background_cloud_scope", None)
+        ctx = bg_scope_fn() if callable(bg_scope_fn) else nullcontext()
+        with ctx:
+            res = self.mail.translate_message(mid, target_lang=tgt, force=False)
+        return bool(res.get("ok") and not res.get("skipped_allowed"))
+
+    def _maybe_enqueue_message_translation(
+        self,
+        *,
+        msg: dict[str, Any],
+        label: str,
+        new_text: str,
+        profile_id: str | None,
+    ) -> bool:
+        translator = getattr(self.runtime, "translator", None)
+        pm = getattr(self.runtime, "passwords", None)
+        if translator is None or pm is None or not pm.unlocked:
+            return False
+        if profile_id is not None and pm.active_profile_id != profile_id:
+            return False
+        prefs = translator.get_preferences()
+        if not prefs.get("auto_translate_mail", True):
+            return False
+        if label not in ("email", "information") and not prefs.get("mail_include_promos_pings", False):
+            return False
+        max_age_secs = float(prefs.get("mail_max_age_days", 90)) * 86400.0
+        msg_ts = float(msg.get("date") or 0.0)
+        if msg_ts > 0 and (time.time() - msg_ts) > max_age_secs:
+            return False
+
+        from satz_translate import detect_language
+
+        subj = str(msg.get("subject") or "")
+        src_lang = detect_language(f"{subj}\n{new_text[:2000]}")
+        if translator.is_language_allowed(src_lang, prefs=prefs):
+            return False
+
+        mid = str(msg.get("id") or "")
+        tgt = prefs["primary_language"]
+        with self.mail.db_lock:
+            conn = self.mail._ensure_connection()
+            exists = conn.execute(
+                "SELECT 1 FROM message_translations WHERE message_id = ? AND target_lang = ?",
+                (mid, tgt),
+            ).fetchone()
+            if exists:
+                return False
+
+        with self.lock:
+            if any(j.get("message_id") == mid and j.get("target_lang") == tgt for j in self._translation_queue):
+                return False
+            self._translation_queue.append(
+                {
+                    "message_id": mid,
+                    "profile_id": profile_id or pm.active_profile_id,
+                    "target_lang": tgt,
+                    "date": msg_ts,
+                }
+            )
+            self._translation_queue.sort(key=lambda j: -float(j.get("date") or 0.0))
+            if len(self._translation_queue) > int(prefs.get("mail_max_recent", 200)):
+                self._translation_queue = self._translation_queue[: int(prefs.get("mail_max_recent", 200))]
+            self.translating_total += 1
+        if self.auto_wake:
+            self._wake_event.set()
+        return True
+
+    def enqueue_untranslated_recent(self, *, profile_id: str | None = None) -> int:
+        """Queues eligible recent non-allowed emails that lack a translation for the current primary language."""
+        pm = getattr(self.runtime, "passwords", None)
+        translator = getattr(self.runtime, "translator", None)
+        if pm is None or not pm.unlocked:
+            raise PermissionError("Unlock a profile with its 6-digit PIN before translating mail.")
+        if translator is None:
+            return 0
+        prefs = translator.get_preferences()
+        tgt = prefs["primary_language"]
+        cutoff = time.time() - float(prefs.get("mail_max_age_days", 90)) * 86400.0
+        lim = int(prefs.get("mail_max_recent", 200))
+        allowed_labels = ("email", "information", "ping", "promotion") if prefs.get("mail_include_promos_pings") else ("email", "information")
+        ph = ",".join("?" for _ in allowed_labels)
+
+        with self.mail.db_lock:
+            conn = self.mail._ensure_connection()
+            rows = conn.execute(
+                f"""
+                SELECT m.id, m.subject, m.body_text, m.date, COALESCE(p.text, '') AS new_text, COALESCE(l.label, 'email') AS label
+                FROM messages m
+                LEFT JOIN parts p ON p.message_id = m.id AND p.kind = 'new'
+                LEFT JOIN labels l ON l.message_id = m.id
+                LEFT JOIN message_translations mt ON mt.message_id = m.id AND mt.target_lang = ?
+                WHERE m.hidden = 0
+                  AND m.date >= ?
+                  AND COALESCE(l.label, 'email') IN ({ph})
+                  AND mt.message_id IS NULL
+                ORDER BY m.date DESC
+                LIMIT ?
+                """,
+                (tgt, cutoff, *allowed_labels, lim),
+            ).fetchall()
+
+        from satz_translate import detect_language
+
+        added = 0
+        eff_pid = profile_id or pm.active_profile_id
+        for r in rows:
+            txt = str(r["new_text"] or r["body_text"] or "")
+            src_lang = detect_language(f"{r['subject'] or ''}\n{txt[:2000]}")
+            if translator.is_language_allowed(src_lang, prefs=prefs):
+                continue
+            mid = str(r["id"])
+            with self.lock:
+                if any(j.get("message_id") == mid and j.get("target_lang") == tgt for j in self._translation_queue):
+                    continue
+                self._translation_queue.append(
+                    {
+                        "message_id": mid,
+                        "profile_id": eff_pid,
+                        "target_lang": tgt,
+                        "date": float(r["date"] or 0.0),
+                    }
+                )
+                self.translating_total += 1
+                added += 1
+        if added and self.auto_wake:
+            self._wake_event.set()
+        return added
+
     def process_all_queued_sync(self) -> int:
         """
-        Synchronously drains the current queue (used in deterministic tests and manual sync).
+        Synchronously drains the current classification + translation queues
+        (used in deterministic tests and manual sync).
         """
         processed = 0
         while True:
+            job = None
+            tr_job = None
             with self.lock:
-                if not self._queue:
+                if self._queue:
+                    job = self._queue.pop(0)
+                    self.is_processing = True
+                elif self._translation_queue:
+                    tr_job = self._translation_queue.pop(0)
+                    self.is_processing = True
+                else:
                     self.is_processing = False
                     break
-                job = self._queue.pop(0)
-                self.is_processing = True
-            try:
-                if isinstance(job, dict):
-                    res = self.process_single_message(job["message_id"], profile_id=job.get("profile_id"))
-                else:
-                    res = self.process_single_message(str(job))
-                if res is not None:
-                    processed += 1
-            finally:
-                with self.lock:
-                    self.processing_done += 1
-                    if not self._queue:
-                        self.is_processing = False
+            if job is not None:
+                try:
+                    if isinstance(job, dict):
+                        res = self.process_single_message(job["message_id"], profile_id=job.get("profile_id"))
+                    else:
+                        res = self.process_single_message(str(job))
+                    if res is not None:
+                        processed += 1
+                finally:
+                    with self.lock:
+                        self.processing_done += 1
+                        if not self._queue and not self._translation_queue:
+                            self.is_processing = False
+            elif tr_job is not None:
+                try:
+                    if self._run_translation_job(tr_job):
+                        processed += 1
+                except Exception as exc:
+                    self.runtime.record_error("mail_bg_translate", f"{tr_job.get('message_id')}: {exc}")
+                finally:
+                    with self.lock:
+                        self.translating_done += 1
+                        if not self._queue and not self._translation_queue:
+                            self.is_processing = False
         return processed
 
     def _pipeline_worker_loop(self) -> None:
@@ -969,23 +1299,67 @@ class SatzMailPipeline:
             if self._stop_event.is_set() or not self.auto_wake:
                 continue
             while not self._stop_event.is_set() and self.auto_wake:
+                job = None
+                tr_job = None
+                cooldown_wait = 0.0
                 with self.lock:
-                    if not self._queue:
+                    if self._queue:
+                        job = self._queue.pop(0)
+                        self.is_processing = True
+                    elif self._translation_queue:
+                        translator = getattr(self.runtime, "translator", None)
+                        cd_fn = getattr(self.runtime, "cloud_cooldown_remaining", None)
+                        is_mocked = "_complete_role_prompt" in getattr(self.runtime, "__dict__", {})
+                        if translator is not None and callable(cd_fn) and not is_mocked:
+                            try:
+                                res_m = translator.resolve_translation_model()
+                                if res_m.get("is_cloud"):
+                                    rem = float(cd_fn(str(res_m.get("provider") or "")) or 0.0)
+                                    if rem > 0.0:
+                                        cooldown_wait = min(rem, 15.0)
+                            except Exception:
+                                cooldown_wait = 0.0
+                        if cooldown_wait > 0.0:
+                            self.is_processing = False
+                        else:
+                            tr_job = self._translation_queue.pop(0)
+                            self.is_processing = True
+                    else:
                         self.is_processing = False
                         break
-                    job = self._queue.pop(0)
-                    self.is_processing = True
-                mid = job["message_id"] if isinstance(job, dict) else str(job)
-                pid = job.get("profile_id") if isinstance(job, dict) else None
-                try:
-                    self.process_single_message(mid, profile_id=pid)
-                except Exception as exc:
-                    self.runtime.record_error("mail_pipeline", f"{mid}: {exc}")
-                finally:
-                    with self.lock:
-                        self.processing_done += 1
-                        if not self._queue:
-                            self.is_processing = False
+                if cooldown_wait > 0.0:
+                    self._stop_event.wait(timeout=cooldown_wait)
+                    continue
+                if job is not None:
+                    mid = job["message_id"] if isinstance(job, dict) else str(job)
+                    pid = job.get("profile_id") if isinstance(job, dict) else None
+                    try:
+                        self.process_single_message(mid, profile_id=pid)
+                    except Exception as exc:
+                        self.runtime.record_error("mail_pipeline", f"{mid}: {exc}")
+                    finally:
+                        with self.lock:
+                            self.processing_done += 1
+                            if not self._queue and not self._translation_queue:
+                                self.is_processing = False
+                elif tr_job is not None:
+                    tr_was_cloud = False
+                    try:
+                        translator = getattr(self.runtime, "translator", None)
+                        is_mocked = "_complete_role_prompt" in getattr(self.runtime, "__dict__", {})
+                        if translator is not None and not is_mocked:
+                            tr_was_cloud = bool(translator.resolve_translation_model().get("is_cloud"))
+                        self._run_translation_job(tr_job)
+                    except Exception as exc:
+                        self.runtime.record_error("mail_bg_translate", f"{tr_job.get('message_id')}: {exc}")
+                    finally:
+                        with self.lock:
+                            self.translating_done += 1
+                            has_more_tr = bool(self._translation_queue) and not self._queue
+                            if not self._queue and not self._translation_queue:
+                                self.is_processing = False
+                    if tr_was_cloud and has_more_tr:
+                        self._stop_event.wait(timeout=1.5)
 
     def format_classifier_input(self, from_str: str, subject: str, new_text: str) -> str:
         return f"[FROM] {from_str} [SUBJECT] {subject} [BODY] {(new_text or '')[:1000]}"
@@ -993,6 +1367,7 @@ class SatzMailPipeline:
     def _predict_with_active_model(self, input_text: str) -> tuple[str, float] | None:
         if self.model_predict_fn is not None:
             return self.model_predict_fn(input_text)
+        self._ensure_active_model_loaded()
         if self._distilbert_model is not None and self._distilbert_tok is not None:
             import torch
 
@@ -1145,6 +1520,10 @@ class SatzMailPipeline:
         new_text: str,
         header_hints: str,
         full_body_text: str = "",
+        *,
+        sender_header: str = "",
+        has_calendar_part: bool = False,
+        is_calendar_mime: bool = False,
     ) -> tuple[str, float]:
         """
         Section 4.5.3 & M19 §5: Cold start or below threshold:
@@ -1171,10 +1550,21 @@ class SatzMailPipeline:
             word = re.sub(r"[^a-z]", "", word)
             return (word if word in LABELS else "email"), 0.85
 
-        # Deterministic cold-start rules (Promo heuristic >= 2 of 4 signals, Ping platform, Order patterns)
+        # Deterministic cold-start rules (Calendar invites/RSVPs -> ping, Ping platform, Promo heuristic, Order patterns)
         plat = match_ping_platform(from_str)
         if plat:
             return "ping", 0.92
+
+        cal_plat = detect_calendar_notification(
+            from_addr=from_str,
+            subject=subject,
+            body_text=body_for_rules,
+            sender_header=sender_header,
+            has_calendar_part=has_calendar_part,
+            is_calendar_mime=is_calendar_mime,
+        )
+        if cal_plat:
+            return "ping", 0.96
 
         comb_full = f"{subject}\n{body_for_rules[:2000]}"
         comb_low = comb_full.lower()
@@ -1188,11 +1578,25 @@ class SatzMailPipeline:
             "list-unsubscribe" in (header_hints or "").lower()
             or "precedence: bulk" in (header_hints or "").lower()
         )
-        has_order_pat = any(
-            m.search(comb_full) for m in (ORDER_NUMBER_PATTERNS + TRACKING_NUMBER_PATTERNS)
-        ) or any(
-            w in comb_low
-            for w in ("order confirmed", "bestellbestätigung", "versandt", "has shipped", "was delivered", "processing your order", "invoice", "rechnung")
+        has_order_pat = (
+            any(m.search(comb_full) for m in (ORDER_NUMBER_PATTERNS + EXPLICIT_TRACKING_PATTERNS))
+            or (
+                bool(SHIPPING_CONTEXT_RE.search(comb_full))
+                and any(m.search(comb_full) for m in BARE_DIGIT_TRACKING_PATTERNS)
+            )
+            or any(
+                w in comb_low
+                for w in (
+                    "order confirmed",
+                    "bestellbestätigung",
+                    "versandt",
+                    "has shipped",
+                    "was delivered",
+                    "processing your order",
+                    "invoice",
+                    "rechnung",
+                )
+            )
         )
 
         if not has_order_pat and (
@@ -1216,8 +1620,8 @@ class SatzMailPipeline:
                 prompt = (
                     "Classify this email into exactly one of these 4 labels:\n"
                     "- email: a real message from a person that may need attention\n"
-                    "- ping: a notification from a platform about activity (comments, mentions, invites, PR reviews)\n"
-                    "- information: orders, shipping, receipts, invoices, bookings, account or security notices\n"
+                    "- ping: a notification from a platform or calendar about activity (comments, mentions, invites, calendar responses, PR reviews)\n"
+                    "- information: orders, shipping, receipts, invoices, hotel/travel bookings, account or security notices\n"
                     "- promotion: marketing, newsletters, offers, discount codes\n\n"
                     f"Hints: {header_hints or 'none'}\n"
                     f"[FROM] {from_str}\n"
@@ -1248,6 +1652,10 @@ class SatzMailPipeline:
         new_text: str,
         list_unsubscribe: str = "",
         full_body_text: str = "",
+        *,
+        sender_header: str = "",
+        has_calendar_part: bool = False,
+        is_calendar_mime: bool = False,
     ) -> tuple[str, float, str, str]:
         """
         Returns `(label, confidence, source, model_version)`.
@@ -1261,6 +1669,16 @@ class SatzMailPipeline:
         plat = match_ping_platform(from_addr)
         if plat:
             hints.append(f"platform_domain={plat}")
+        cal_plat = detect_calendar_notification(
+            from_addr=from_addr,
+            subject=subject,
+            body_text=full_body_text or new_text,
+            sender_header=sender_header,
+            has_calendar_part=has_calendar_part,
+            is_calendar_mime=is_calendar_mime,
+        )
+        if cal_plat:
+            hints.append(f"calendar_platform={cal_plat}")
         sig_cnt, sig_names = self.count_promo_heuristic_signals(
             from_str=from_str,
             subject=subject,
@@ -1269,6 +1687,11 @@ class SatzMailPipeline:
         if sig_cnt >= 2:
             hints.append(f"promo_signals={','.join(sig_names)}")
         header_hints = ", ".join(hints)
+
+        # Calendar invites/updates/RSVPs always belong in `ping`, even when a trained model
+        # previously learned to route them to `information` or `From:` names a colleague.
+        if cal_plat and self.model_predict_fn is None and self.gemma_label_fn is None:
+            return "ping", 0.96, "rule", self.model_version
 
         pred = self._predict_with_active_model(input_text)
         if pred is not None and self.model_version != "cold":
@@ -1284,6 +1707,9 @@ class SatzMailPipeline:
             new_text,
             header_hints,
             full_body_text=full_body_text or new_text,
+            sender_header=sender_header,
+            has_calendar_part=has_calendar_part,
+            is_calendar_mime=is_calendar_mime,
         )
         return gemma_lbl, float(gemma_conf), "gemma", self.model_version
 
@@ -1395,6 +1821,7 @@ class SatzMailPipeline:
                     tok.save_pretrained(str(mdir))
                     self._distilbert_tok = tok
                     self._distilbert_model = model
+                    self._loaded_model_dir = mdir
                     trained_hf = True
                 except Exception:
                     trained_hf = False
@@ -1508,6 +1935,20 @@ class SatzMailPipeline:
                 "SELECT label, source FROM labels WHERE message_id = ?",
                 (message_id,),
             ).fetchone()
+            has_cal_att = conn.execute(
+                """
+                SELECT 1 FROM attachments
+                WHERE message_id = ?
+                  AND (LOWER(mime) IN ('text/calendar', 'application/ics') OR LOWER(filename) LIKE '%.ics')
+                LIMIT 1
+                """,
+                (message_id,),
+            ).fetchone()
+
+        sender_header = str(msg.get("sender_header") or "")
+        is_calendar_mime = bool(msg.get("is_calendar"))
+        has_calendar_part = is_calendar_mime or (has_cal_att is not None)
+        prev_label = str(existing_lbl["label"]).lower() if existing_lbl else ""
 
         html_path = self.mail._current_mail_html_dir() / f"{message_id}.html"
         raw_html = html_path.read_text(encoding="utf-8", errors="replace") if html_path.exists() else None
@@ -1532,6 +1973,9 @@ class SatzMailPipeline:
                 new_text=new_text,
                 list_unsubscribe=msg["list_unsubscribe"] or "",
                 full_body_text=full_body_for_extract,
+                sender_header=sender_header,
+                has_calendar_part=has_calendar_part,
+                is_calendar_mime=is_calendar_mime,
             )
 
         # 3. Extract per label
@@ -1539,7 +1983,18 @@ class SatzMailPipeline:
         action_data: dict[str, Any] | None = None
 
         if label == "ping":
-            plat = match_ping_platform(msg["from_addr"]) or "Other"
+            plat = (
+                detect_calendar_notification(
+                    from_addr=msg["from_addr"],
+                    subject=msg["subject"],
+                    body_text=full_body_for_extract,
+                    sender_header=sender_header,
+                    has_calendar_part=has_calendar_part,
+                    is_calendar_mime=is_calendar_mime,
+                )
+                or match_ping_platform(msg["from_addr"])
+                or "Other"
+            )
             extracts_map["platform"] = (plat, "rule", 1.0)
         elif label == "information":
             extracts_map = extract_information_fields(
@@ -1654,6 +2109,15 @@ class SatzMailPipeline:
             account_email=account_email,
             account_label=account_label,
             profile_id=bound_profile_id,
+            prev_label=prev_label,
+        )
+
+        # 6. Enqueue non-blocking background translation when unsupported language
+        self._maybe_enqueue_message_translation(
+            msg=msg,
+            label=label,
+            new_text=new_text,
+            profile_id=bound_profile_id,
         )
 
         return {
@@ -1674,6 +2138,7 @@ class SatzMailPipeline:
         account_email: str,
         account_label: str = "",
         profile_id: str | None = None,
+        prev_label: str = "",
     ) -> None:
         """
         Section 4.5.5 & M18 §4:
@@ -1924,6 +2389,25 @@ class SatzMailPipeline:
                     )
 
         # Knowledge store passages: ONLY for `email` and `information` new text (conversation_id = 'mail')
+        if prev_label == "information" and label != "information":
+            try:
+                brain.delete_entities_by_source({source_tag}, entity_type="order")
+            except Exception:
+                pass
+        if (
+            prev_label in ("email", "information")
+            and label in ("ping", "promotion")
+            and hasattr(self.runtime, "store")
+            and self.runtime.store is not None
+        ):
+            mail_url = f"satzmail://message/{message_id}"
+            with self.runtime.store_lock:
+                try:
+                    self.runtime.store.db.execute("DELETE FROM satz_sources WHERE source_id = ?", (source_tag,))
+                    self.runtime.store.db.execute("DELETE FROM local_passages WHERE url = ?", (mail_url,))
+                    self.runtime.store.db.commit()
+                except Exception:
+                    pass
         if label in ("email", "information") and new_text and len(new_text.strip()) >= 15:
             entity_name = person_created_name or org_name or from_name or from_addr or "mail"
             mail_url = f"satzmail://message/{message_id}"

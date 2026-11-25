@@ -15,9 +15,11 @@ use tauri::{
 };
 use tauri::{AppHandle, Manager, RunEvent, State};
 use webview_manager::{
-    autofill_tab_credentials_impl, capture_open_tabs_for_conversation, close_tab_webview,
-    control_tab_webview_impl, navigate_and_capture_tab_impl, navigate_tab_webview_impl,
-    sync_tab_webviews_impl, TabBoundsSpec, WebviewManagerState,
+    apply_tab_translation_segments_impl, autofill_tab_credentials_impl,
+    capture_open_tabs_for_conversation, close_tab_webview, control_tab_webview_impl,
+    extract_tab_translation_dom_impl, navigate_and_capture_tab_impl, navigate_tab_webview_impl,
+    run_tab_action_impl, run_tab_unsubscribe_actor_impl, start_webview_bridge,
+    sync_tab_webviews_impl, TabActionPayload, TabBoundsSpec, WebviewManagerState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +75,8 @@ pub struct SidecarState {
     pub settings: SatzSettings,
     pub token: String,
     pub base_url: String,
+    pub bridge_url: Option<String>,
+    pub bridge_token: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -187,6 +191,27 @@ fn ensure_news_conversation(db: State<'_, DbState>) -> Result<Conversation, Stri
 }
 
 #[tauri::command]
+fn ensure_drives_conversation(db: State<'_, DbState>) -> Result<Conversation, String> {
+    db.ensure_drives_conversation().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn ensure_settings_conversation(db: State<'_, DbState>) -> Result<Conversation, String> {
+    db.ensure_settings_conversation().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn ensure_news_settings_conversation(db: State<'_, DbState>) -> Result<Conversation, String> {
+    db.ensure_news_settings_conversation().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn ensure_news_perspectives_conversation(db: State<'_, DbState>) -> Result<Conversation, String> {
+    db.ensure_news_perspectives_conversation()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn open_tab(
     db: State<'_, DbState>,
     conversation_id: String,
@@ -263,6 +288,78 @@ async fn navigate_and_capture_tab(
         .map_err(|e| e.to_string())?;
     res.map(|(tab, _)| tab)
         .ok_or_else(|| "tab not found".to_string())
+}
+
+#[tauri::command]
+async fn execute_tab_unsubscribe_actor(
+    app: AppHandle,
+    tab_id: String,
+    url: String,
+    wait_ms: Option<u64>,
+    hint_selector: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let app_clone = app.clone();
+    let tid = tab_id.clone();
+    let target_url = url.clone();
+    let wait = wait_ms.unwrap_or(2600);
+    let hint_sel = hint_selector;
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = app_clone.state::<DbState>();
+        let wv = app_clone.state::<WebviewManagerState>();
+        run_tab_unsubscribe_actor_impl(&app_clone, &db, &wv, &tid, &target_url, wait, hint_sel.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn execute_tab_action(
+    app: AppHandle,
+    tab_id: String,
+    action: TabActionPayload,
+) -> Result<serde_json::Value, String> {
+    let app_clone = app.clone();
+    let tid = tab_id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = app_clone.state::<DbState>();
+        let wv = app_clone.state::<WebviewManagerState>();
+        run_tab_action_impl(&app_clone, &db, &wv, &tid, &action)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn extract_tab_translation_dom(
+    app: AppHandle,
+    tab_id: String,
+) -> Result<serde_json::Value, String> {
+    let app_clone = app.clone();
+    let tid = tab_id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = app_clone.state::<DbState>();
+        let wv = app_clone.state::<WebviewManagerState>();
+        extract_tab_translation_dom_impl(&app_clone, &db, &wv, &tid)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn apply_tab_translation_segments(
+    app: AppHandle,
+    tab_id: String,
+    mode: String,
+    translations: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let app_clone = app.clone();
+    let tid = tab_id.clone();
+    let m = mode.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        apply_tab_translation_segments_impl(&app_clone, &tid, &m, translations.as_ref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -355,8 +452,20 @@ fn add_bookmark(
     db: State<'_, DbState>,
     title: String,
     url: String,
+    favicon_url: Option<String>,
 ) -> Result<BookmarkItem, String> {
-    db.add_bookmark(&title, &url).map_err(|e| e.to_string())
+    db.add_bookmark_with_favicon(&title, &url, favicon_url.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_bookmark_favicon(
+    db: State<'_, DbState>,
+    bookmark_id: String,
+    favicon_url: String,
+) -> Result<(), String> {
+    db.set_bookmark_favicon(&bookmark_id, &favicon_url)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -532,7 +641,13 @@ fn kill_stale_sidecar_on_port(port: u16) {
     }
 }
 
-fn spawn_sidecar(settings: &SatzSettings, app_data_dir: &PathBuf, token: &str) -> Option<Child> {
+fn spawn_sidecar(
+    settings: &SatzSettings,
+    app_data_dir: &PathBuf,
+    token: &str,
+    bridge_url: Option<&str>,
+    bridge_token: &str,
+) -> Option<Child> {
     let repo_root = resolve_repo_root(Some(settings));
     let script_path = repo_root.join("sidecar").join("satz_models.py");
     if !script_path.exists() {
@@ -558,8 +673,12 @@ fn spawn_sidecar(settings: &SatzSettings, app_data_dir: &PathBuf, token: &str) -
         .env("PYTHONUNBUFFERED", "1")
         .env("PYTHONIOENCODING", "utf-8")
         .env("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-        .env("TQDM_DISABLE", "1")
-        .arg(&script_path)
+        .env("TQDM_DISABLE", "1");
+    if let Some(b_url) = bridge_url {
+        cmd.env("SATZ_WEBVIEW_BRIDGE_URL", b_url)
+            .env("SATZ_WEBVIEW_BRIDGE_TOKEN", bridge_token);
+    }
+    cmd.arg(&script_path)
         .arg("--sgs-root")
         .arg(sgs_root_str)
         .arg("--gemma-path")
@@ -869,23 +988,35 @@ pub fn run() {
             wv_manager.max_live_tabs = settings.max_live_tabs.max(1);
 
             let token = generate_sidecar_token();
+            let bridge_token = generate_sidecar_token();
             let base_url = format!("http://127.0.0.1:{}", settings.port);
-            let child_proc = spawn_sidecar(&settings, &app_data_dir, &token);
 
             app.manage(db_state);
             app.manage(wv_manager);
+
+            let bridge_url = start_webview_bridge(app.handle().clone(), bridge_token.clone());
+            let child_proc = spawn_sidecar(
+                &settings,
+                &app_data_dir,
+                &token,
+                bridge_url.as_deref(),
+                &bridge_token,
+            );
+
             app.manage(SidecarState {
                 child: Mutex::new(child_proc),
                 settings: settings.clone(),
                 token: token.clone(),
                 base_url,
+                bridge_url: bridge_url.clone(),
+                bridge_token: bridge_token.clone(),
             });
 
             // Auto-restart watchdog: if the Python sidecar ever exits unexpectedly, respawn it
             let app_handle_watchdog = app.handle().clone();
             let watchdog_data_dir = app_data_dir.clone();
             std::thread::spawn(move || loop {
-                std::thread::sleep( std::time::Duration::from_secs(3));
+                std::thread::sleep(std::time::Duration::from_secs(3));
                 if let Some(sc) = app_handle_watchdog.try_state::<SidecarState>() {
                     if let Ok(mut guard) = sc.child.lock() {
                         let exited = match guard.as_mut() {
@@ -893,7 +1024,13 @@ pub fn run() {
                             None => false,
                         };
                         if exited {
-                            *guard = spawn_sidecar(&sc.settings, &watchdog_data_dir, &sc.token);
+                            *guard = spawn_sidecar(
+                                &sc.settings,
+                                &watchdog_data_dir,
+                                &sc.token,
+                                sc.bridge_url.as_deref(),
+                                &sc.bridge_token,
+                            );
                         }
                     }
                 } else {
@@ -904,6 +1041,13 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             {
                 let _ = setup_app_menu_accelerators(app);
+            }
+
+            #[cfg(windows)]
+            {
+                if let Some(main_wv) = app.get_webview("main") {
+                    webview_manager::attach_webview_accelerators(app.handle().clone(), &main_wv);
+                }
             }
 
             if let Some(main_window) = app.get_window("main") {
@@ -920,6 +1064,10 @@ pub fn run() {
             create_conversation,
             ensure_mail_conversation,
             ensure_news_conversation,
+            ensure_drives_conversation,
+            ensure_settings_conversation,
+            ensure_news_settings_conversation,
+            ensure_news_perspectives_conversation,
             rename_conversation,
             pin_conversation,
             toggle_pin_conversation,
@@ -930,6 +1078,10 @@ pub fn run() {
             reorder_tabs,
             navigate_tab,
             navigate_and_capture_tab,
+            execute_tab_unsubscribe_actor,
+            execute_tab_action,
+            extract_tab_translation_dom,
+            apply_tab_translation_segments,
             control_tab,
             sync_tab_webviews,
             capture_open_tabs,
@@ -939,6 +1091,7 @@ pub fn run() {
             add_message,
             list_bookmarks,
             add_bookmark,
+            set_bookmark_favicon,
             remove_bookmark,
             get_db_path,
             get_sidecar_config,

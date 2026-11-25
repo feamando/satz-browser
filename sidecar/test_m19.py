@@ -236,6 +236,175 @@ class TestM19MailColdStart(unittest.TestCase):
         self.assertEqual(otto_codes[0]["code"], "OTTOWINTER30")
         self.assertIn("otto-promo-ottowinter30", self.rt.brain.get_cached_brain_md())
 
+    def test_calendar_responses_route_to_pings_never_orders_and_repair_existing_store(self):
+        # 1. Google Calendar update from colleague's From: address with phone/meeting digits & word 'confirmation details'
+        cal_update = EmailMessage()
+        cal_update["Message-ID"] = "<cal-upd-1@company.com>"
+        cal_update["From"] = "Beatrice Dimarucut <beatrice.dimarucut@company.com>"
+        cal_update["Sender"] = "Google Calendar <calendar-notification@google.com>"
+        cal_update["To"] = "nikita@satz.local"
+        cal_update["Subject"] = "Updated invitation: Sabbatical handover plan @ Wed Dec 2, 2026 2pm - 2:30pm (CET) (Nikita Gorshkov)"
+        cal_update["Date"] = "Wed, 25 Nov 2026 14:00:00 +0000"
+        cal_update.set_content(
+            "This event has been updated.\nChanged: time\nConfirmation details inside.\nJoin by phone: +49301234567890\nGoing? Yes - Maybe - No"
+        )
+        cal_update.add_alternative(
+            "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nSUMMARY:Sabbatical handover\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+            subtype="calendar",
+            params={"method": "REQUEST"},
+        )
+        mid_cal_upd = self.rt.mail._store_parsed_raw_email(
+            "acct-demo", "INBOX", "inbox", 4001, "", cal_update.as_bytes(), 0, 0, 0
+        )
+        assert mid_cal_upd is not None
+        res_upd = self.rt.mail.pipeline.process_single_message(mid_cal_upd)
+        assert res_upd is not None
+        self.assertEqual(res_upd["label"], "ping")
+        self.assertEqual(res_upd["extracts"].get("platform"), "Google Calendar")
+
+        # 2. Calendar RSVP Decline without explicit Sender: header (subject + Google Calendar body format only)
+        raw_declined = (
+            b"Message-ID: <cal-dec-2@company.com>\r\n"
+            b"From: Abdelrahman Hussein <abdelrahman@company.com>\r\n"
+            b"To: nikita@satz.local\r\n"
+            b"Subject: Declined: Item Based Pricing: Weekly Standup @ Mon Dec 7, 2026 4pm - 4:30pm (CET) (Nikita Gorshkov)\r\n"
+            b"Date: Wed, 25 Nov 2026 15:00:00 +0000\r\n\r\n"
+            b"Abdelrahman Hussein has declined this invitation.\r\n"
+        )
+        mid_cal_dec = self.rt.mail._store_parsed_raw_email(
+            "acct-demo", "INBOX", "inbox", 4002, "", raw_declined, 0, 0, 0
+        )
+        assert mid_cal_dec is not None
+        res_dec = self.rt.mail.pipeline.process_single_message(mid_cal_dec)
+        assert res_dec is not None
+        self.assertEqual(res_dec["label"], "ping")
+        self.assertEqual(res_dec["extracts"].get("platform"), "Google Calendar")
+
+        # 3. Colleague email mentioning 'confirmation details' + international phone number stays in Inbox (`email`)
+        raw_person = (
+            b"Message-ID: <colleague-conf-3@company.com>\r\n"
+            b"From: Alejandra Garcia <alejandra@company.com>\r\n"
+            b"To: nikita@satz.local\r\n"
+            b"Subject: Q4 Budget Alignment\r\n"
+            b"Date: Wed, 25 Nov 2026 15:30:00 +0000\r\n\r\n"
+            b"Hi Nikita, please review the confirmation details before Friday. Reach me on +49301234567890.\r\n"
+        )
+        mid_person = self.rt.mail._store_parsed_raw_email(
+            "acct-demo", "INBOX", "inbox", 4003, "", raw_person, 0, 0, 0
+        )
+        assert mid_person is not None
+        res_person = self.rt.mail.pipeline.process_single_message(mid_person)
+        assert res_person is not None
+        self.assertEqual(res_person["label"], "email")
+
+        # 4. Trained local token_weights model biased toward `information` still cannot divert calendar RSVP to Orders
+        mdir = self.rt.mail.pipeline._active_model_dir()
+        mdir.mkdir(parents=True, exist_ok=True)
+        (mdir / "token_weights.json").write_text(
+            json.dumps(
+                {
+                    "version": "v1",
+                    "samples": 60,
+                    "vocab": {
+                        "updated": {"information": 12.0},
+                        "invitation": {"information": 12.0},
+                        "accepted:": {"information": 12.0},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (mdir / "version.txt").write_text("v1\n", encoding="utf-8")
+        self.rt.mail.pipeline._load_active_model_if_exists(load_weights=False)
+
+        raw_acc = (
+            b"Message-ID: <cal-acc-4@company.com>\r\n"
+            b"From: Maya Chen <maya@company.com>\r\n"
+            b"To: nikita@satz.local\r\n"
+            b"Subject: Accepted: Design Sync @ Thu Dec 3, 2026 11am - 11:30am (CET)\r\n"
+            b"Date: Wed, 25 Nov 2026 16:00:00 +0000\r\n\r\n"
+            b"Maya Chen has accepted this invitation.\r\n"
+        )
+        mid_acc = self.rt.mail._store_parsed_raw_email(
+            "acct-demo", "INBOX", "inbox", 4004, "", raw_acc, 0, 0, 0
+        )
+        assert mid_acc is not None
+        res_acc = self.rt.mail.pipeline.process_single_message(mid_acc)
+        assert res_acc is not None
+        self.assertEqual(res_acc["label"], "ping")
+        self.assertEqual(self.rt.mail.get_lane("orders")["counts"]["orders"], 0)
+        self.assertEqual(self.rt.mail.get_lane("pings")["counts"]["pings"], 3)
+
+        # 5. Generic non-order `information` notice must not emit bogus `order ordered` triage cards
+        raw_notice = (
+            b"Message-ID: <sec-notice-5@bank.example>\r\n"
+            b"From: Security <security@bank.example>\r\n"
+            b"To: nikita@satz.local\r\n"
+            b"Subject: Password changed\r\n"
+            b"Date: Wed, 25 Nov 2026 16:10:00 +0000\r\n\r\n"
+            b"Your account password was changed just now.\r\n"
+        )
+        mid_notice = self.rt.mail._store_parsed_raw_email(
+            "acct-demo", "INBOX", "inbox", 4005, "", raw_notice, 0, 0, 0
+        )
+        assert mid_notice is not None
+        with self.rt.mail.db_lock:
+            conn = self.rt.mail._ensure_connection()
+            conn.execute(
+                "INSERT OR REPLACE INTO labels (message_id, label, confidence, source, model_version, at) VALUES (?, 'information', 0.9, 'gemma', 'v1', 1.0)",
+                (mid_notice,),
+            )
+            conn.commit()
+        triage = self.rt.mail.get_triage_set()
+        self.assertEqual(triage["order_updates"], [])
+
+        # 6. Existing-DB calendar repair migration fixes mislabeled `information` calendar rows while preserving user overrides
+        with self.rt.mail.db_lock:
+            conn = self.rt.mail._ensure_connection()
+            conn.execute(
+                "INSERT OR REPLACE INTO labels (message_id, label, confidence, source, model_version, at) VALUES (?, 'information', 0.9, 'gemma', 'v1', 1.0)",
+                (mid_cal_upd,),
+            )
+            conn.execute("DELETE FROM extracts WHERE message_id = ?", (mid_cal_upd,))
+            conn.execute(
+                "INSERT INTO extracts (message_id, field, value, source, confidence) VALUES (?, 'status', 'ordered', 'rule', 1.0)",
+                (mid_cal_upd,),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO actions (message_id, needs_reply, due_date, ask) VALUES (?, 1, NULL, 'Going?')",
+                (mid_cal_upd,),
+            )
+            # Explicit user override on `mid_acc` must be preserved
+            conn.execute(
+                "INSERT OR REPLACE INTO labels (message_id, label, confidence, source, model_version, at) VALUES (?, 'email', 1.0, 'user', 'v1', 2.0)",
+                (mid_acc,),
+            )
+            conn.execute("DELETE FROM mail_settings WHERE key = 'calendar_pings_repaired_v1'")
+            conn.commit()
+
+        self.rt.brain.upsert_entity(
+            entity_type="order",
+            name="Beatrice Dimarucut Order 49301234567890",
+            summary="Bogus calendar order",
+            attributes={"order_number": "", "tracking_number": "49301234567890", "$source": f"mail:{mid_cal_upd}"},
+            source_url=f"mail:{mid_cal_upd}",
+        )
+        repaired_cnt = self.rt.mail.repair_calendar_pings_if_needed()
+        self.assertGreaterEqual(repaired_cnt, 1)
+
+        with self.rt.mail.db_lock:
+            conn = self.rt.mail._ensure_connection()
+            lbl_upd = conn.execute("SELECT label FROM labels WHERE message_id = ?", (mid_cal_upd,)).fetchone()
+            lbl_acc = conn.execute("SELECT label, source FROM labels WHERE message_id = ?", (mid_acc,)).fetchone()
+            act_upd = conn.execute("SELECT 1 FROM actions WHERE message_id = ?", (mid_cal_upd,)).fetchone()
+            self.assertEqual(lbl_upd["label"], "ping")
+            self.assertEqual(lbl_acc["label"], "email")
+            self.assertEqual(lbl_acc["source"], "user")
+            self.assertIsNone(act_upd)
+
+        order_entities = [e for e in self.rt.brain.list_entities() if e.get("type") == "order"]
+        self.assertEqual(order_entities, [])
+
 
 if __name__ == "__main__":
     unittest.main()

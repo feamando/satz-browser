@@ -1,3 +1,4 @@
+import { applyUiLocalePreferences, formatLocaleRelativeTime, normalizeLangTag, t } from "./i18n";
 import type {
   AgentTaskCard,
   AnswerMeta,
@@ -7,17 +8,32 @@ import type {
   BrainSearchResponse,
   BrowserTab,
   ChatEmailCard,
+  ChatImageAttachment,
+  CitedSourcePreview,
   CommandBarActionId,
   CommandBarRoute,
+  ContentTranslationConfig,
   ConvStreamState,
   Conversation,
   ConversationDetail,
   DigestEntry,
   DoctorRoleEntry,
+  DriveBreadcrumb,
+  DriveCreateTarget,
+  DriveFileTypeFilter,
+  DriveItem,
+  DriveNavSnapshot,
+  DriveOwnerFacet,
+  DriveProviderFilter,
+  DrivesStatusResponse,
+  EvalSuiteRunSummary,
   FindingItem,
+  GoogleOAuthStatus,
+  I18nStatusResponse,
   KnowledgeSummary,
   LocalModelId,
   MailAccountItem,
+  MailComposeDraft,
   MailLaneCounts,
   MailPreset,
   ModelManagementConfig,
@@ -27,9 +43,16 @@ import type {
   NewsSourceEntry,
   NewsStoryCluster,
   NewsTopicItem,
+  ProviderRegistryState,
+  RoutingDecisionInfo,
+  SettingsLane,
+  SettingsUiCard,
+  StagedSettingsFile,
+  RoutingPolicySummary,
   SidecarErrorEntry,
   SidecarHealth,
   SourceStatEntry,
+  TabTranslationState,
   WatchItem,
 } from "./types";
 
@@ -155,11 +178,54 @@ export function applyUiPreferences(): void {
     root.removeAttribute("data-theme");
   }
   root.setAttribute("data-layout", layout);
+  applyUiLocalePreferences();
+}
+
+const FAVICONS_STORAGE_KEY = "satz.siteFavicons";
+
+function loadStoredSiteFavicons(): Record<string, string> {
+  try {
+    if (typeof window === "undefined") return {};
+    const raw = window.localStorage.getItem(FAVICONS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object") return {};
+    const clean: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (
+        typeof v === "string" &&
+        (v.startsWith("data:image/") ||
+          v.startsWith("https://") ||
+          v.startsWith("http://"))
+      ) {
+        clean[k] = v;
+      }
+    }
+    return clean;
+  } catch {
+    return {};
+  }
+}
+
+function persistStoredSiteFavicons(map: Record<string, string>): void {
+  try {
+    if (typeof window === "undefined") return;
+    const entries = Object.entries(map);
+    const trimmed =
+      entries.length > 200 ? entries.slice(entries.length - 200) : entries;
+    window.localStorage.setItem(
+      FAVICONS_STORAGE_KEY,
+      JSON.stringify(Object.fromEntries(trimmed))
+    );
+  } catch {
+    // Ignore storage quota or access errors
+  }
 }
 
 export const IS_MAC =
   typeof navigator !== "undefined" &&
-  /Mac|iPod|iPhone|iPad/.test(navigator.platform);
+  (/Mac|iPod|iPhone|iPad/i.test(navigator.platform) ||
+    /Macintosh|Mac OS/i.test(navigator.userAgent));
 
 export const MOD_LABEL = IS_MAC ? "cmd" : "ctrl";
 
@@ -193,8 +259,16 @@ export interface AppState {
   userOverrodeModelInSession: boolean;
   webSearchEnabled: boolean;
   mailContextEnabled: boolean;
+  drivesContextEnabled: boolean;
   streamsByConv: Record<string, ConvStreamState>;
   lastPromptByConv: Record<string, string>;
+  lastImagesByConv: Record<string, ChatImageAttachment[]>;
+  pendingChatImagesByConv: Record<string, ChatImageAttachment[]>;
+  pendingStagedFilesByConv: Record<string, StagedSettingsFile[]>;
+  messageUiCards: Record<string, SettingsUiCard[]>;
+  settingsActiveLane: SettingsLane;
+  chatImagePreview: ChatImageAttachment | null;
+  chatImageNotice: string;
   sidecar: SidecarHealth;
   doctorRoles: DoctorRoleEntry[];
   digestItems: DigestEntry[];
@@ -206,13 +280,13 @@ export interface AppState {
   profileStatusMessage: string;
   tabHasPasswordField: Record<string, boolean>;
   tabCanFillLogin: Record<string, boolean>;
+  siteFavicons: Record<string, string>;
+  failedFaviconSrcs: Record<string, true>;
   messageProposals: Record<string, BrainProposalItem[]>;
   messageFindings: Record<string, FindingItem[]>;
   messageBrainSources: Record<string, BrainCitationItem[]>;
-  messageCitedSources: Record<
-    string,
-    Array<{ url: string; title: string; domain?: string }>
-  >;
+  messageCitedSources: Record<string, CitedSourcePreview[]>;
+  urlPreviews: Record<string, CitedSourcePreview>;
   chatLastRenderedConvId: string | null;
   chatPinToBottom: boolean;
   expandedDebugMessages: Record<string, boolean>;
@@ -233,7 +307,17 @@ export interface AppState {
   mailSearchQuery: string;
   mailSearchRows: Array<Record<string, unknown>> | null;
   mailMessageDetails: Record<string, Record<string, unknown>>;
-  mailMessageHtml: Record<string, { html: string; csp: string }>;
+  mailMessageHtml: Record<
+    string,
+    {
+      html: string;
+      csp: string;
+      translated_html?: string;
+      translation_source_lang?: string;
+      translation_target_lang?: string;
+    }
+  >;
+  mailMessageShowOriginal: Record<string, boolean>;
   mailTriageOverview: string;
   mailTriageSources: Array<{
     id: string;
@@ -257,27 +341,10 @@ export interface AppState {
   };
   mailOnboardingCandidates: Array<Record<string, unknown>>;
   mailOnboardingOpen: boolean;
-  mailComposeDrafts: Record<
-    string,
-    {
-      account_id: string;
-      to: string;
-      cc: string;
-      bcc: string;
-      subject: string;
-      body: string;
-      in_reply_to: string;
-      references: string;
-      reply_to_message_id: string;
-      confirm_outbox_id?: string;
-      confirm_token?: string;
-      confirm_line?: string;
-      new_recipients?: string[];
-      queued_outbox_id?: string;
-      undo_until?: number;
-      status_msg?: string;
-    }
-  >;
+  mailComposeDrafts: Record<string, MailComposeDraft>;
+  mailComposeModalOpen: boolean;
+  mailComposeModalDraft: MailComposeDraft | null;
+  inlineChatDrafts: Record<string, MailComposeDraft>;
   conversationTasks: Record<string, AgentTaskCard[]>;
   watches: WatchItem[];
   watchBadgeConvIds: string[];
@@ -289,14 +356,42 @@ export interface AppState {
     { filename: string; mime: string; data_url: string; size: number }
   >;
   settingsAccordionOpen: Record<string, boolean>;
+  googleOAuthStatus: GoogleOAuthStatus | null;
+  googleOAuthSessionId: string | null;
+  googleOAuthMessage: string;
   modelConfig: ModelManagementConfig | null;
   modelConfigStatusMsg: string;
+  providerRegistry: ProviderRegistryState | null;
+  providerStatusMsg: string;
+  providerFilterGroup: "all" | "search" | "maps" | "commerce" | "custom";
+  providerExpandedCategoryId: string;
+  providerCredOpenId: string;
+  providerInferredDraft: Record<
+    string,
+    {
+      display_name: string;
+      domains: string[];
+      url_template: string;
+      mode: "search_api" | "web_account";
+      api_driver: string;
+      vault_service: string;
+      auth_status: string;
+      masked_auth_label: string;
+      auth_ready: boolean;
+    }
+  >;
   profilePromptOpen: boolean;
   profilePromptDismissed: boolean;
+  profileUnlocking: boolean;
+  profileUnlockLabel: string;
+  postUnlockLoading: boolean;
+  postUnlockLabel: string;
   newsActiveLane: NewsLane;
   newsStories: NewsStoryCluster[];
-  newsForYouStories: NewsStoryCluster[];
   newsPerspectivesStories: NewsStoryCluster[];
+  newsPerspectivesDetail: ConversationDetail | null;
+  newsPerspectivesStream: ConvStreamState | null;
+  newsSettingsManualAcc: { topics: boolean; sources: boolean };
   newsSelectedClusterId: string | null;
   newsPerspectiveMatrix: NewsPerspectiveMatrix | null;
   newsSources: NewsSourceEntry[];
@@ -313,10 +408,49 @@ export interface AppState {
   newsStatusMessage: string;
   newsReaderArticleId: string | null;
   newsReaderShowOriginal: boolean;
+  newsStoryShowOriginal: Record<string, boolean>;
   newsStoryMenuId: string | null;
+  contentTranslationConfig: ContentTranslationConfig | null;
+  contentTranslationStatusMsg: string;
+  tabTranslationState: Record<string, TabTranslationState>;
   messageAnswerMeta: Record<string, AnswerMeta>;
   expandedExplainMessages: Record<string, boolean>;
   expandedInDepthMessages: Record<string, boolean>;
+  routingPolicy: RoutingPolicySummary | null;
+  routingNotice: string;
+  savedEvalByMsgId: Record<string, string>;
+  evalSuiteRun: EvalSuiteRunSummary | null;
+  evalRunning: boolean;
+  evalStatusMsg: string;
+  redteamAuditSummary: string;
+  i18nStatus: I18nStatusResponse | null;
+  i18nTranslating: boolean;
+  i18nTranslateCompleted: number;
+  i18nTranslateTotal: number;
+  i18nStatusMsg: string;
+  i18nCustomEditorOpen: boolean;
+  i18nOverrideFilter: string;
+  drivesStatus: DrivesStatusResponse | null;
+  drivesFolderKey: string;
+  drivesParentKey: string | null;
+  drivesBreadcrumbs: DriveBreadcrumb[];
+  drivesItems: DriveItem[];
+  drivesProviderFilter: DriveProviderFilter;
+  drivesFileTypeFilter: DriveFileTypeFilter;
+  drivesOwnerFilter: string;
+  drivesSearchQuery: string;
+  drivesScope: "folder" | "search" | "filtered" | "locked";
+  drivesFacets: {
+    providers: Array<{ id: string; count: number }>;
+    file_types: Record<string, number>;
+    owners: DriveOwnerFacet[];
+  };
+  drivesCreateTargets: DriveCreateTarget[];
+  drivesCreateMenuOpen: boolean;
+  drivesAccountsOpen: boolean;
+  drivesNavStack: DriveNavSnapshot[];
+  drivesLoading: boolean;
+  drivesStatusMessage: string;
 }
 
 export const state: AppState = {
@@ -349,8 +483,18 @@ export const state: AppState = {
   userOverrodeModelInSession: false,
   webSearchEnabled: false,
   mailContextEnabled: false,
+  drivesContextEnabled: false,
   streamsByConv: {},
   lastPromptByConv: {},
+  lastImagesByConv: {},
+  pendingChatImagesByConv: {},
+  pendingStagedFilesByConv: {},
+  messageUiCards: {},
+  settingsActiveLane: "profiles",
+  chatImagePreview: null,
+  chatImageNotice: "",
+  siteFavicons: loadStoredSiteFavicons(),
+  failedFaviconSrcs: {},
   sidecar: {
     online: false,
     models: [
@@ -377,12 +521,19 @@ export const state: AppState = {
   },
   bookmarkTooltipNotice: "",
   profileStatusMessage: "",
+  profilePromptOpen: false,
+  profilePromptDismissed: false,
+  profileUnlocking: false,
+  profileUnlockLabel: "",
+  postUnlockLoading: false,
+  postUnlockLabel: "",
   tabHasPasswordField: {},
   tabCanFillLogin: {},
   messageProposals: {},
   messageFindings: {},
   messageBrainSources: {},
   messageCitedSources: {},
+  urlPreviews: {},
   chatLastRenderedConvId: null,
   chatPinToBottom: true,
   expandedDebugMessages: {},
@@ -404,6 +555,7 @@ export const state: AppState = {
   mailSearchRows: null,
   mailMessageDetails: {},
   mailMessageHtml: {},
+  mailMessageShowOriginal: {},
   mailTriageOverview: "",
   mailTriageSources: [],
   siteTabPromoCodes: {},
@@ -422,6 +574,9 @@ export const state: AppState = {
   mailOnboardingCandidates: [],
   mailOnboardingOpen: false,
   mailComposeDrafts: {},
+  mailComposeModalOpen: false,
+  mailComposeModalDraft: null,
+  inlineChatDrafts: {},
   conversationTasks: {},
   watches: [],
   watchBadgeConvIds: [],
@@ -433,17 +588,31 @@ export const state: AppState = {
     models: true,
     profiles: false,
     vault: false,
+    providers: false,
     mail: false,
+    drives: false,
     indexing: false,
+    translation: false,
   },
+  contentTranslationConfig: null,
+  contentTranslationStatusMsg: "",
+  tabTranslationState: {},
   modelConfig: null,
   modelConfigStatusMsg: "",
-  profilePromptOpen: false,
-  profilePromptDismissed: false,
+  providerRegistry: null,
+  providerStatusMsg: "",
+  providerFilterGroup: "all",
+  providerExpandedCategoryId: "",
+  providerCredOpenId: "",
+  providerInferredDraft: {},
+  routingPolicy: null,
+  routingNotice: "",
   newsActiveLane: "stories",
   newsStories: [],
-  newsForYouStories: [],
   newsPerspectivesStories: [],
+  newsPerspectivesDetail: null,
+  newsPerspectivesStream: null,
+  newsSettingsManualAcc: { topics: true, sources: true },
   newsSelectedClusterId: null,
   newsPerspectiveMatrix: null,
   newsSources: [],
@@ -460,10 +629,43 @@ export const state: AppState = {
   newsStatusMessage: "",
   newsReaderArticleId: null,
   newsReaderShowOriginal: false,
+  newsStoryShowOriginal: {},
   newsStoryMenuId: null,
+  googleOAuthStatus: null,
+  googleOAuthSessionId: null,
+  googleOAuthMessage: "",
   messageAnswerMeta: {},
   expandedExplainMessages: {},
   expandedInDepthMessages: {},
+  savedEvalByMsgId: {},
+  evalSuiteRun: null,
+  evalRunning: false,
+  evalStatusMsg: "",
+  redteamAuditSummary: "",
+  i18nStatus: null,
+  i18nTranslating: false,
+  i18nTranslateCompleted: 0,
+  i18nTranslateTotal: 0,
+  i18nStatusMsg: "",
+  i18nCustomEditorOpen: false,
+  i18nOverrideFilter: "",
+  drivesStatus: null,
+  drivesFolderKey: "",
+  drivesParentKey: null,
+  drivesBreadcrumbs: [{ key: "", name: "Drives" }],
+  drivesItems: [],
+  drivesProviderFilter: "all",
+  drivesFileTypeFilter: "all",
+  drivesOwnerFilter: "all",
+  drivesSearchQuery: "",
+  drivesScope: "folder",
+  drivesFacets: { providers: [], file_types: {}, owners: [] },
+  drivesCreateTargets: [],
+  drivesCreateMenuOpen: false,
+  drivesAccountsOpen: false,
+  drivesNavStack: [],
+  drivesLoading: false,
+  drivesStatusMessage: "",
 };
 
 export function escapeHtml(str: string): string {
@@ -580,6 +782,119 @@ const COMMAND_ALIASES: Record<string, CommandBarActionId> = {
 const QUESTION_LEAD_RE =
   /^(?:what|who|where|when|why|how|which|can|could|should|would|does|do|did|is|are|was|were|will|explain|summarize|tell|describe|list|write|draft|compare|give|show)\b/i;
 
+export function classifyQueryTypeClient(
+  prompt: string,
+  sourceCount = 0,
+  webEnabled = false,
+  mailEnabled = false
+): string {
+  const low = (prompt || "").trim().toLowerCase();
+  if (/^(?:https?:\/\/)?[a-z0-9.-]+\.[a-z]{2,}(?:\/|\s|$)/i.test(low)) {
+    return "url_or_navigation";
+  }
+  if (
+    /\b(email|emails|mail|mails|inbox|unread|outbox|reply\s+to|sender|newsletter|unsubscribe|order|tracking|paket|bestellung|voucher)\b/.test(
+      low
+    ) ||
+    (mailEnabled && !webEnabled && sourceCount === 0)
+  ) {
+    return "mail_query";
+  }
+  if (
+    /\b(compare|comparison|versus|vs\.?|pros\s+and\s+cons|trade-?off|research|deep\s+dive|synthesize|difference\s+between|across\s+all|multi-?source)\b/.test(
+      low
+    ) ||
+    sourceCount >= 4
+  ) {
+    return "comparison_research";
+  }
+  if (
+    /\b(code|bug|debug|traceback|stack\s*trace|typescript|python|rust|sql|regex|function|compile|refactor|api|json|error|exception|syntax)\b/.test(
+      low
+    )
+  ) {
+    return "coding_technical";
+  }
+  if (
+    webEnabled ||
+    /\b(today|latest|current|recent|news|price|cost|weather|stock|exchange\s+rate|score|schedule|release\s+date|202\d|online|web\s+search)\b/.test(
+      low
+    )
+  ) {
+    return "factual_web";
+  }
+  if (
+    sourceCount > 0 ||
+    /\b(this\s+page|this\s+tab|this\s+article|this\s+site|summarize|summary|tldr)\b/.test(
+      low
+    )
+  ) {
+    return "tab_qa";
+  }
+  return "general_chat";
+}
+
+export function resolveLearnedRouteForPrompt(
+  prompt: string,
+  selectedModel: LocalModelId,
+  webEnabled: boolean,
+  mailEnabled: boolean,
+  sourceCount = 0,
+  userOverrodeModel = false
+): RoutingDecisionInfo {
+  const queryType = classifyQueryTypeClient(
+    prompt,
+    sourceCount,
+    webEnabled,
+    mailEnabled
+  );
+  const rule = state.routingPolicy?.by_query_type?.[queryType];
+  let effModel: LocalModelId = selectedModel || "gemma-4-e4b";
+  let effWeb = Boolean(webEnabled);
+  let effMail = Boolean(mailEnabled);
+  let escalated = false;
+  let reason = "";
+
+  const isLocal =
+    effModel === "gemma-4-e4b" ||
+    effModel === "hertz (reader)" ||
+    effModel === "planck (reader)";
+
+  if (rule) {
+    if (!userOverrodeModel && isLocal && rule.escalated && rule.recommended_model) {
+      const available = getAvailableModelsForPicker();
+      const cand = rule.recommended_model as LocalModelId;
+      if (
+        cand === "planck3 (web)" ||
+        available.some((m) => m.id === cand)
+      ) {
+        effModel = cand;
+        escalated = true;
+      }
+    }
+    if (rule.auto_web && !effWeb) {
+      effWeb = true;
+      escalated = true;
+    }
+    if (rule.auto_mail && !effMail) {
+      effMail = true;
+      escalated = true;
+    }
+      if (escalated) {
+        reason = rule.reason || t("cmd.learned_policy", { queryType });
+      }
+  }
+
+  return {
+    query_type: queryType,
+    model: effModel,
+    web_enabled: effWeb,
+    mail_enabled: effMail,
+    escalated,
+    reason,
+  };
+}
+
 export function rankCommandBarRoutes(
   raw: string,
   opts?: {
@@ -590,81 +905,137 @@ export function rankCommandBarRoutes(
   }
 ): CommandBarRoute[] {
   const trimmed = raw.trim();
-  const webEnabled = Boolean(opts?.webSearchEnabled ?? state.webSearchEnabled);
-  const model = opts?.selectedModel ?? state.selectedModel;
+  const baseWeb = Boolean(opts?.webSearchEnabled ?? state.webSearchEnabled);
+  const baseModel = opts?.selectedModel ?? state.selectedModel;
+  const activeTabCount = getActiveTabSources(state.activeDetail).length;
+  const learned = trimmed
+    ? resolveLearnedRouteForPrompt(
+        trimmed,
+        baseModel,
+        baseWeb,
+        state.mailContextEnabled,
+        activeTabCount,
+        state.userOverrodeModelInSession
+      )
+    : null;
+  const model = learned?.model ?? baseModel;
+  const webEnabled = learned?.web_enabled ?? baseWeb;
+  const mailAutoEnabled = Boolean(learned?.mail_enabled ?? false);
+  const isEscalated = Boolean(learned?.escalated);
+  const escReason = learned?.reason ?? "";
+  const isCloud =
+    model.startsWith("gemini:") ||
+    model.startsWith("anthropic:") ||
+    model.startsWith("openai:") ||
+    model.startsWith("mistral:");
   const usesWeb = webEnabled || model === "planck3 (web)";
-  const modelPrivacy = usesWeb ? "web search · duckduckgo" : "local only";
+  const leavesMachine = isCloud || usesWeb;
+  const modelPrivacy = isCloud
+    ? usesWeb
+      ? t("privacy.cloud_web")
+      : t("privacy.cloud_provider", { provider: model.split(":")[0] })
+    : usesWeb
+      ? t("privacy.web_ddg")
+      : t("privacy.local_only");
 
   if (!trimmed) {
     return [
       {
         kind: "run_command",
-        label: "run command · new conversation",
-        destination: "command: new_conversation",
-        privacy: "local only",
+        label: t("cmd.run_new_conv"),
+        destination: t("cmd.dest_cmd", { id: "new_conversation" }),
+        privacy: t("privacy.local_only"),
         leaves_machine: false,
         command_id: "new_conversation",
       },
       {
         kind: "search_brain",
-        label: "open brain · entities, passages & domain trust",
-        destination: "satz brain",
-        privacy: "local only",
+        label: t("cmd.open_brain"),
+        destination: t("cmd.dest_brain"),
+        privacy: t("privacy.local_only"),
         leaves_machine: false,
         query: "",
       },
       {
         kind: "search_mail",
-        label: "open mail · inbox, pings, orders & promos",
-        destination: "satz mail",
-        privacy: "local only",
+        label: t("cmd.open_mail"),
+        destination: t("cmd.dest_mail"),
+        privacy: t("privacy.local_only"),
         leaves_machine: false,
         query: "",
       },
       {
         kind: "run_command",
-        label: "run command · lock",
-        destination: "command: lock",
-        privacy: "local only",
+        label: t("cmd.run_lock"),
+        destination: t("cmd.dest_cmd", { id: "lock" }),
+        privacy: t("privacy.local_only"),
         leaves_machine: false,
         command_id: "lock",
       },
     ];
   }
 
-  const makeAskRoute = (q: string): CommandBarRoute => ({
-    kind: "ask_model",
-    label: `ask ${model} · "${q}"`,
-    destination: `chat (${model})`,
-    privacy: modelPrivacy,
-    leaves_machine: usesWeb,
-    question: q,
-  });
+  const makeAskRoute = (q: string): CommandBarRoute => {
+    const label =
+      isEscalated && escReason
+        ? t("cmd.ask_model_auto", { model, query: q, reason: escReason })
+        : t("cmd.ask_model", { model, query: q });
+    const route: CommandBarRoute = {
+      kind: "ask_model",
+      label,
+      destination: t("cmd.dest_chat", { model }),
+      privacy: modelPrivacy,
+      leaves_machine: leavesMachine,
+      question: q,
+    };
+    if (
+      isEscalated ||
+      model !== baseModel ||
+      webEnabled !== baseWeb ||
+      mailAutoEnabled
+    ) {
+      route.model = model;
+      route.auto_web = webEnabled;
+      route.auto_mail = mailAutoEnabled;
+      route.escalated = isEscalated;
+      route.escalation_reason = escReason;
+    }
+    return route;
+  };
 
   const makeBrainRoute = (q: string): CommandBarRoute => ({
     kind: "search_brain",
-    label: `search brain · "${q}"`,
-    destination: "brain (entities, passages, mail)",
-    privacy: "local only",
+    label: t("cmd.search_brain", { query: q }),
+    destination: t("cmd.dest_brain_full"),
+    privacy: t("privacy.local_only"),
     leaves_machine: false,
     query: q,
   });
 
   const makeMailRoute = (q: string): CommandBarRoute => ({
     kind: "search_mail",
-    label: `search mail · "${q}"`,
-    destination: "mail (FTS5)",
-    privacy: "local only",
+    label: t("cmd.search_mail", { query: q }),
+    destination: t("cmd.dest_mail_fts"),
+    privacy: t("privacy.local_only"),
     leaves_machine: false,
     query: q,
   });
 
   const makeNewsRoute = (q: string): CommandBarRoute => ({
     kind: "search_news",
-    label: `news intelligence · "${q}"`,
+    label: t("cmd.news_intel", { query: q }),
     destination: "satz news (read -> weigh -> write)",
-    privacy: usesWeb ? "brave + trusted sources" : "local news cache + feeds",
+    privacy: usesWeb ? t("privacy.news_web") : t("privacy.news_local"),
     leaves_machine: usesWeb,
+    query: q,
+  });
+
+  const makeDrivesRoute = (q: string): CommandBarRoute => ({
+    kind: "search_drives",
+    label: q ? t("cmd.search_drives", { query: q }) : t("cmd.open_drives"),
+    destination: t("cmd.dest_drives"),
+    privacy: t("privacy.local_only"),
+    leaves_machine: false,
     query: q,
   });
 
@@ -675,9 +1046,9 @@ export function rankCommandBarRoutes(
     return [
       {
         kind: "run_command",
-        label: `run command · ${cmdNorm}`,
-        destination: `command: ${matchedCmd}`,
-        privacy: "local only",
+        label: t("cmd.run_cmd_name", { cmd: cmdNorm }),
+        destination: t("cmd.dest_cmd", { id: matchedCmd }),
+        privacy: t("privacy.local_only"),
         leaves_machine: false,
         command_id: matchedCmd,
       },
@@ -694,9 +1065,9 @@ export function rankCommandBarRoutes(
     return [
       {
         kind: "open_url",
-        label: `open url · ${parsed.url}`,
+        label: t("cmd.open_url", { url: parsed.url }),
         destination: dom,
-        privacy: `loads ${dom}`,
+        privacy: t("privacy.loads_domain", { domain: dom }),
         leaves_machine: true,
         url: parsed.url,
       },
@@ -709,12 +1080,16 @@ export function rankCommandBarRoutes(
   if (parsed.kind === "url_and_text" && parsed.url && parsed.question) {
     const dom = extractDomain(parsed.url);
     const priv = usesWeb
-      ? `loads ${dom} · web search · duckduckgo`
-      : `loads ${dom} · local model`;
+      ? t("privacy.loads_domain_web", { domain: dom })
+      : t("privacy.loads_domain_local", { domain: dom });
     return [
       {
         kind: "url_and_question",
-        label: `open ${dom} + ask ${model} · "${parsed.question}"`,
+        label: t("cmd.open_and_ask", {
+          domain: dom,
+          model,
+          question: parsed.question,
+        }),
         destination: `${dom} + ${model}`,
         privacy: priv,
         leaves_machine: true,
@@ -723,9 +1098,9 @@ export function rankCommandBarRoutes(
       },
       {
         kind: "open_url",
-        label: `open url · ${parsed.url}`,
+        label: t("cmd.open_url", { url: parsed.url }),
         destination: dom,
-        privacy: `loads ${dom}`,
+        privacy: t("privacy.loads_domain", { domain: dom }),
         leaves_machine: true,
         url: parsed.url,
       },
@@ -741,6 +1116,18 @@ export function rankCommandBarRoutes(
   if (newsPrefixMatch) {
     const q = newsPrefixMatch[1].trim();
     return [makeNewsRoute(q), makeAskRoute(trimmed), makeBrainRoute(q)];
+  }
+
+  // 3b. Explicit drives prefix (`drive: ...`, `drives: ...`, `files: ...`, `search drives ...`)
+  const drivesPrefixMatch = trimmed.match(
+    /^(?:(?:drive|drives|files)\s*:\s*|search\s+(?:drives?|files)\s+(?:for\s+)?|in\s+(?:drives?|files)\s+)(.+)$/i
+  );
+  if (drivesPrefixMatch) {
+    const q = drivesPrefixMatch[1].trim();
+    return [makeDrivesRoute(q), makeBrainRoute(q), makeAskRoute(trimmed)];
+  }
+  if (/^(?:open\s+)?(?:drives?|my\s+files|google\s+drive|onedrive)$/i.test(trimmed)) {
+    return [makeDrivesRoute(""), makeBrainRoute(trimmed), makeAskRoute(trimmed)];
   }
 
   // 4. Explicit mail prefix (`mail: ...`, `from: ...`, `inbox: ...`, `search mail ...`)
@@ -814,6 +1201,14 @@ export function rankCommandBarRoutes(
     if (isMailTerm) {
       return [makeMailRoute(trimmed), makeBrainRoute(trimmed), makeAskRoute(trimmed)];
     }
+    if (state.activeDetail?.conversation.origin === "drives") {
+      return [
+        makeDrivesRoute(trimmed),
+        makeAskRoute(trimmed),
+        makeBrainRoute(trimmed),
+        makeMailRoute(trimmed),
+      ];
+    }
   }
 
   // 6. Default: Question / prompt to model
@@ -825,22 +1220,7 @@ export function rankCommandBarRoutes(
 }
 
 export function formatRelativeTime(isoOrEpoch: string): string {
-  if (!isoOrEpoch) return "now";
-  const num = Number(isoOrEpoch);
-  const ms = !Number.isNaN(num)
-    ? num < 1e12
-      ? num * 1000
-      : num
-    : Date.parse(isoOrEpoch);
-  if (Number.isNaN(ms)) return isoOrEpoch.slice(0, 10);
-  const diffSec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
-  if (diffSec < 60) return `${diffSec}s ago`;
-  const diffMin = Math.floor(diffSec / 60);
-  if (diffMin < 60) return `${diffMin}m ago`;
-  const diffHr = Math.floor(diffMin / 60);
-  if (diffHr < 24) return `${diffHr}h ago`;
-  const diffDays = Math.floor(diffHr / 24);
-  return `${diffDays}d ago`;
+  return formatLocaleRelativeTime(isoOrEpoch);
 }
 
 export interface ActiveTabSource {
@@ -909,7 +1289,7 @@ export function formatPlainErrorMessage(raw: string): {
   const lower = cleanRaw.toLowerCase();
   if (lower.includes("stopped responding after 30 s")) {
     return {
-      summary: "gemma stopped responding after 30 s.",
+      summary: t("err.gemma_timeout"),
       rawDetail: cleanRaw,
     };
   }
@@ -918,13 +1298,13 @@ export function formatPlainErrorMessage(raw: string): {
     (lower.includes("gemma") || lower.includes("checkpoint") || lower.includes("model"))
   ) {
     return {
-      summary: "gemma is not downloaded [how to install]",
+      summary: t("err.gemma_missing"),
       rawDetail: cleanRaw,
     };
   }
   if (lower.includes("401") || lower.includes("403") || lower.includes("forbidden")) {
     return {
-      summary: "the site refused the background fetch (401/403).",
+      summary: t("err.fetch_forbidden"),
       rawDetail: cleanRaw,
     };
   }
@@ -935,7 +1315,7 @@ export function formatPlainErrorMessage(raw: string): {
     lower.includes("offline")
   ) {
     return {
-      summary: "could not reach the local model service.",
+      summary: t("err.sidecar_unreachable"),
       rawDetail: cleanRaw,
     };
   }
@@ -952,12 +1332,119 @@ export interface LiveNavigationTarget {
   label: string;
 }
 
-function getOriginFromUrl(rawUrl: string): string {
+export function getOriginFromUrl(rawUrl: string): string {
   try {
     const u = new URL(normalizeUrl(rawUrl));
+    if (u.protocol !== "http:" && u.protocol !== "https:") return "";
     return u.origin;
   } catch {
     return "";
+  }
+}
+
+export function isSafeFaviconSrc(src: string | null | undefined): src is string {
+  if (!src) return false;
+  const s = src.trim();
+  return (
+    s.startsWith("data:image/") ||
+    s.startsWith("https://") ||
+    s.startsWith("http://")
+  );
+}
+
+export function cacheSiteFavicon(rawUrl: string, faviconUrl: string): boolean {
+  if (!isSafeFaviconSrc(faviconUrl)) return false;
+  const cleanUrl = (rawUrl || "").trim();
+  const origin = getOriginFromUrl(cleanUrl);
+  let changed = false;
+  if (cleanUrl && state.siteFavicons[cleanUrl] !== faviconUrl) {
+    state.siteFavicons[cleanUrl] = faviconUrl;
+    changed = true;
+  }
+  if (origin) {
+    const existingOrigin = state.siteFavicons[origin] ?? "";
+    if (
+      !existingOrigin ||
+      faviconUrl.startsWith("data:image/") ||
+      !existingOrigin.startsWith("data:image/")
+    ) {
+      if (existingOrigin !== faviconUrl) {
+        state.siteFavicons[origin] = faviconUrl;
+        changed = true;
+      }
+    }
+  }
+  if (changed) {
+    persistStoredSiteFavicons(state.siteFavicons);
+  }
+  return changed;
+}
+
+export function getFaviconDisplaySrc(
+  rawUrl: string,
+  explicitFaviconUrl?: string | null
+): string | null {
+  const low = (rawUrl || "").trim().toLowerCase();
+  if (
+    !low ||
+    low === "about:blank" ||
+    low.startsWith("satzmail:") ||
+    low.startsWith("javascript:") ||
+    low.startsWith("file:")
+  ) {
+    return null;
+  }
+  const origin = getOriginFromUrl(rawUrl);
+  const candidates = [
+    explicitFaviconUrl,
+    state.siteFavicons[rawUrl],
+    origin ? state.siteFavicons[origin] : null,
+    origin ? `${origin}/favicon.ico` : null,
+  ];
+  for (const cand of candidates) {
+    if (isSafeFaviconSrc(cand) && !state.failedFaviconSrcs[cand.trim()]) {
+      return cand.trim();
+    }
+  }
+  return null;
+}
+
+export function normalizePreviewUrlKey(rawUrl: string): string {
+  const clean = (rawUrl || "").trim();
+  if (!/^https?:\/\//i.test(clean)) return clean;
+  try {
+    const u = new URL(clean);
+    u.hash = "";
+    const out = u.toString();
+    return out.length > 8 && out.endsWith("/") && u.pathname !== "/" ? out.slice(0, -1) : out;
+  } catch {
+    return clean;
+  }
+}
+
+export function getCachedUrlPreview(rawUrl: string): CitedSourcePreview | undefined {
+  const clean = (rawUrl || "").trim();
+  if (!clean) return undefined;
+  return state.urlPreviews[clean] ?? state.urlPreviews[normalizePreviewUrlKey(clean)];
+}
+
+export function cacheUrlPreviews(items: Array<Partial<CitedSourcePreview> & { url?: string }>): void {
+  for (const it of items) {
+    const u = String(it?.url ?? "").trim();
+    if (!u) continue;
+    const norm = normalizePreviewUrlKey(u);
+    const prev = state.urlPreviews[u] ?? state.urlPreviews[norm];
+    const merged: CitedSourcePreview = {
+      url: u,
+      title: (it.title && it.title !== u ? it.title : prev?.title) || it.title || u,
+      domain: it.domain || prev?.domain,
+      snippet: it.snippet || prev?.snippet,
+      image_url: it.image_url || prev?.image_url,
+      favicon_url: it.favicon_url || prev?.favicon_url,
+      trust: typeof it.trust === "number" ? it.trust : prev?.trust ?? null,
+    };
+    state.urlPreviews[u] = merged;
+    if (norm) state.urlPreviews[norm] = merged;
   }
 }
 
@@ -1225,6 +1712,33 @@ export function getAvailableModelsForPicker(): Array<{
   return base;
 }
 
+const NON_GENERATIVE_COMPOSE_MODELS = new Set<string>([
+  "planck3 (web)",
+  "hertz (reader)",
+  "planck (reader)",
+]);
+
+export function getComposeModelsForPicker(): Array<{
+  id: LocalModelId;
+  label: string;
+}> {
+  const models = getAvailableModelsForPicker().filter(
+    (m) => !NON_GENERATIVE_COMPOSE_MODELS.has(m.id)
+  );
+  if (models.length === 0) {
+    return [{ id: "gemma-4-e4b", label: "gemma-4-e4b (local)" }];
+  }
+  return models;
+}
+
+export function getDefaultComposeModelId(): LocalModelId {
+  const allowed = getComposeModelsForPicker();
+  if (allowed.some((m) => m.id === state.selectedModel)) {
+    return state.selectedModel;
+  }
+  return allowed[0]?.id ?? "gemma-4-e4b";
+}
+
 /**
  * Syncs `state.selectedModel` to Settings' configured `roles.chat` unless the user
  * manually picked a different model for the current chat session (`force = true`
@@ -1270,19 +1784,33 @@ export function hasAnyActiveStream(): boolean {
 export function getModelPrivacySummary(modelId: string): string {
   const m = (modelId || "").toLowerCase();
   if (m.startsWith("gemini:") || m.startsWith("gemini-")) {
-    return "[cloud · sends context to google gemini api]";
+    return t("privacy.badge.cloud_gemini");
   }
   if (m.startsWith("anthropic:") || m.startsWith("claude-")) {
-    return "[cloud · sends context to anthropic api]";
+    return t("privacy.badge.cloud_anthropic");
   }
   if (m.startsWith("openai:") || m.startsWith("gpt-") || m.startsWith("o1") || m.startsWith("o3") || m.startsWith("o4")) {
-    return "[cloud · sends context to openai api]";
+    return t("privacy.badge.cloud_openai");
   }
   if (m.startsWith("mistral:")) {
-    return "[cloud · sends context to mistral api]";
+    return t("privacy.badge.cloud_mistral");
   }
   if (m.includes("cloud")) {
-    return "[cloud · sends context to external api]";
+    return t("privacy.badge.cloud_generic");
   }
-  return "[local only]";
+  return t("privacy.badge.local_only");
+}
+
+export function isContentLanguageAllowed(langCode: string | null | undefined): boolean {
+  const norm = normalizeLangTag((langCode || "").trim());
+  if (!norm) return true;
+  const known = state.contentTranslationConfig?.known_languages;
+  if (!known || !known.length) {
+    return norm === "en";
+  }
+  const base = norm.split("-")[0];
+  return known.some((k) => {
+    const kn = normalizeLangTag(k);
+    return kn === norm || kn.split("-")[0] === base;
+  });
 }

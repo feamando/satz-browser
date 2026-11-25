@@ -6,6 +6,7 @@ export interface ShortcutHandlers {
   onFilterConversations: () => void;
   onNewTab: () => void;
   onCloseTab: () => void;
+  onArchiveConversation?: () => void;
   onSelectTabByNumber: (num: number) => void;
   onFocusAddressBar: () => void;
   onFillLogin?: () => void;
@@ -44,6 +45,13 @@ export function bindKeyboardShortcuts(handlers: ShortcutHandlers): void {
       return;
     }
 
+    if (e.shiftKey && (key === "w" || e.code === "KeyW")) {
+      e.preventDefault();
+      e.stopPropagation();
+      handlers.onArchiveConversation?.();
+      return;
+    }
+
     // Leave Mod+F untouched for native find-in-page
     if (key === "f") {
       return;
@@ -67,8 +75,9 @@ export function bindKeyboardShortcuts(handlers: ShortcutHandlers): void {
       return;
     }
 
-    if (key === "w") {
+    if (key === "w" || e.code === "KeyW") {
       e.preventDefault();
+      e.stopPropagation();
       handlers.onCloseTab();
       return;
     }
@@ -107,5 +116,5 @@ export function bindKeyboardShortcuts(handlers: ShortcutHandlers): void {
       e.preventDefault();
       handlers.onSelectTabByNumber(Number(key));
     }
-  });
+  }, true);
 }

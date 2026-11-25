@@ -111,6 +111,19 @@ class TestM21CommandBar(unittest.TestCase):
             self.assertEqual(r_cmd[0]["privacy"], "local only")
             self.assertFalse(r_cmd[0]["leaves_machine"])
 
+    def test_drives_command_bar_prefixes_route_to_search_drives(self) -> None:
+        for line, expected_q in (
+            ("drive: AHM", "AHM"),
+            ("files: budget", "budget"),
+            ("search drives Q4", "Q4"),
+            ("open drives", ""),
+        ):
+            routes = self.runtime.rank_command_bar_routes(line, web_enabled=False)
+            self.assertEqual(routes[0]["kind"], "search_drives", f"Failed on {line!r}")
+            self.assertEqual(routes[0]["query"], expected_q)
+            self.assertEqual(routes[0]["privacy"], "local only")
+            self.assertFalse(routes[0]["leaves_machine"])
+
 
 if __name__ == "__main__":
     unittest.main()

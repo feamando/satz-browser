@@ -1,4 +1,5 @@
 import { sidecarClearErrors } from "./api";
+import { t, tCount } from "./i18n";
 import { escapeHtml, getActiveTabSources, state } from "./state";
 
 const CONTEXT_CHAR_BUDGET = 24000;
@@ -46,38 +47,40 @@ export function renderStatusLine(): void {
           ? "warn"
           : "good";
       const statusLabel = !state.sidecar.online
-        ? "Offline"
+        ? t("common.offline")
         : errCount > 0
-          ? `${errCount} notice${errCount === 1 ? "" : "s"}`
-          : "Online";
-      const learningLabel = state.knowledge.pause_learning ? "Paused" : "Learning";
+          ? tCount("status.notice_count", errCount)
+          : t("common.online");
+      const learningLabel = state.knowledge.pause_learning
+        ? t("status.paused")
+        : t("status.learning");
 
       telemetryRegion.innerHTML = `
-        <div class="telemetry-pop" id="telemetry-popover" role="dialog" aria-label="Model and context telemetry">
+        <div class="telemetry-pop" id="telemetry-popover" role="dialog" aria-label="${escapeHtml(t("status.telemetry_aria"))}">
           <div class="telemetry-pop-head">
-            <span class="label">Telemetry</span>
+            <span class="label">${escapeHtml(t("status.telemetry"))}</span>
             <span class="badge ${statusBadgeClass}">${escapeHtml(statusLabel)}</span>
           </div>
           <div class="kv">
-            <span>Model</span>
+            <span>${escapeHtml(t("status.model"))}</span>
             <strong class="truncate" title="${escapeHtml(activeModel)}">${escapeHtml(activeModel)}</strong>
-            <span>Runtime</span>
-            <span>${readyCount} / ${totalCount} ready</span>
-            <span>Context</span>
-            <span>${checkedCount} open (${totalCharsSent.toLocaleString()} / ${CONTEXT_CHAR_BUDGET.toLocaleString()})</span>
-            <span>Queue</span>
-            <span>${queueLen} pending</span>
-            <span>Memory</span>
-            <span>${learningLabel}</span>
+            <span>${escapeHtml(t("status.runtime"))}</span>
+            <span>${escapeHtml(t("status.ready_frac", { ready: readyCount, total: totalCount }))}</span>
+            <span>${escapeHtml(t("status.context"))}</span>
+            <span>${escapeHtml(t("status.open_chars", { open: checkedCount, sent: totalCharsSent.toLocaleString(), budget: CONTEXT_CHAR_BUDGET.toLocaleString() }))}</span>
+            <span>${escapeHtml(t("status.queue"))}</span>
+            <span>${escapeHtml(t("status.pending_n", { count: queueLen }))}</span>
+            <span>${escapeHtml(t("status.memory"))}</span>
+            <span>${escapeHtml(learningLabel)}</span>
           </div>
-          <div class="meter" title="${pct}% of 24,000 char context budget used">
+          <div class="meter" title="${escapeHtml(t("status.budget_title", { pct, budget: CONTEXT_CHAR_BUDGET.toLocaleString() }))}">
             <i style="width:${pct}%"></i>
           </div>
           <div class="telemetry-pop-foot">
             <button id="status-error-log-btn" class="btn-text" type="button">
-              Logs (${errCount})
+              ${escapeHtml(t("status.logs_n", { count: errCount }))}
             </button>
-            <button id="telemetry-close-btn" class="btn-text" type="button">Close</button>
+            <button id="telemetry-close-btn" class="btn-text" type="button">${escapeHtml(t("common.close"))}</button>
           </div>
         </div>
       `;
@@ -121,15 +124,15 @@ export function renderErrorLogOverlay(): void {
 
   const itemsHtml =
     allErrors.length === 0
-      ? `<div class="muted">No logged errors.</div>`
+      ? `<div class="muted">${escapeHtml(t("status.no_errors"))}</div>`
       : allErrors
           .slice(-40)
           .reverse()
           .map((e) => {
-            const t = new Date(e.ts * 1000).toTimeString().slice(0, 8);
+            const tm = new Date(e.ts * 1000).toTimeString().slice(0, 8);
             return `
               <div class="row">
-                <span class="row-meta">${escapeHtml(t)}</span>
+                <span class="row-meta">${escapeHtml(tm)}</span>
                 <span class="badge">${escapeHtml(e.scope)}</span>
                 <span class="row-title" title="${escapeHtml(e.message)}">${escapeHtml(e.message)}</span>
               </div>
@@ -139,10 +142,10 @@ export function renderErrorLogOverlay(): void {
 
   overlay.innerHTML = `
     <div class="err-log-pop-head">
-      <span class="label">Diagnostic logs (${allErrors.length})</span>
+      <span class="label">${escapeHtml(t("status.diag_logs_n", { count: allErrors.length }))}</span>
       <div class="err-log-pop-actions">
-        <button id="error-log-clear-btn" class="btn" type="button">Clear</button>
-        <button id="error-log-close-btn" class="btn" type="button">Close</button>
+        <button id="error-log-clear-btn" class="btn" type="button">${escapeHtml(t("common.clear"))}</button>
+        <button id="error-log-close-btn" class="btn" type="button">${escapeHtml(t("common.close"))}</button>
       </div>
     </div>
     <div class="log-list">

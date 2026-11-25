@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "eval_id": "eval_20261120_idealo_unsubscribe_action",
+  "created_at": "2026-11-20T12:17:00Z",
+  "title": "Idealo unsubscribe creates gated Actor Task Card (never manual scroll advice)",
+  "notes": "Baseline regression captured from idealo screenshot failure where assistant instructed user to scroll to footer instead of calling propose_mail_unsubscribe.",
+  "model_id": "gemini:gemini-4-hydrogen (cloud)",
+  "mode": {
+    "web_enabled": false,
+    "mail_enabled": false
+  },
+  "user_msg": "Yeah, could you please unsubscrbe me from idealo?",
+  "prior_messages": [],
+  "bad_assistant_answer": "To unsubscribe from idealo, open your idealo Black Week email, scroll to the very bottom of the message, and click the unsubscribe link provided in their footer.",
+  "sources": [
+    {
+      "id": "mail:eval-msg-1",
+      "url": "satzmail://message/eval-msg-1",
+      "title": "idealo Black Week",
+      "domain": "mail",
+      "is_open_tab": true,
+      "text": "Entdecke aktuelle Deals und finde deine Favoriten zum passenden Preis.",
+      "mail_fixture": {
+        "from_addr": "idealo <sender-1@idealo.de>",
+        "subject": "idealo Black Week",
+        "list_unsub": "<https://clicks.news.idealo.com/footer-unsub?u=[REDACTED]&tok=[REDACTED]>",
+        "list_unsub_post": "List-Unsubscribe=One-Click",
+        "html_body": "<p>Entdecke aktuelle Deals und finde deine Favoriten zum passenden Preis.</p><a href='https://clicks.news.idealo.com/footer-unsub?u=[REDACTED]&tok=[REDACTED]'>Abmelden</a>",
+        "plain_body": "Entdecke aktuelle Deals und finde deine Favoriten zum passenden Preis."
+      }
+    }
+  ],
+  "expected": {
+    "expected_tools": [
+      "propose_mail_unsubscribe"
+    ],
+    "expected_task_agent": "actor",
+    "require_send_gate": true,
+    "min_citations": 0,
+    "max_flagged_citations": 0,
+    "must_contain": [
+      "Confirm"
+    ],
+    "forbidden_substrings": [
+      "scroll to the very bottom",
+      "click the unsubscribe link provided in their footer"
+    ],
+    "min_answer_chars": 15
+  }
+}

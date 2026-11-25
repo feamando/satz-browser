@@ -1,5 +1,7 @@
 import { drawWordmark, fontsReady } from "./design-system/brand";
 import { icon } from "./design-system/icons";
+import { bindFaviconFallbacks, renderSiteFaviconHtml } from "./favicon";
+import { t } from "./i18n";
 import {
   escapeHtml,
   extractDomain,
@@ -24,6 +26,7 @@ export interface RailActions {
   onToggleArchive: (id: string, archived: boolean) => void;
   onDeleteConversation: (id: string) => void;
   onOpenBookmark: (url: string) => void;
+  onOpenBookmarkInNewTab?: (url: string, title: string) => void;
   onBookmarkCurrent: () => void;
   onRemoveBookmark: (id: string) => void;
   onOpenKnowledgeView: () => void;
@@ -57,6 +60,14 @@ export function renderRail(actions: RailActions): void {
 
   const q = state.railFilter.trim().toLowerCase();
   const visibleConvs = state.conversations.filter((c) => {
+    // Settings & sub-workspaces are opened from dedicated buttons rather than duplicating in the rail.
+    if (
+      c.origin === "settings" ||
+      c.origin === "news_settings" ||
+      c.origin === "news_perspectives"
+    ) {
+      return false;
+    }
     if (!q) return true;
     return (
       c.title.toLowerCase().includes(q) ||
@@ -66,10 +77,10 @@ export function renderRail(actions: RailActions): void {
 
   const pinned = visibleConvs.filter((c) => c.pinned && c.status === "active");
   const systemPinned = pinned.filter(
-    (c) => c.origin === "mail" || c.origin === "news"
+    (c) => c.origin === "mail" || c.origin === "news" || c.origin === "drives"
   );
   const userPinned = pinned.filter(
-    (c) => c.origin !== "mail" && c.origin !== "news"
+    (c) => c.origin !== "mail" && c.origin !== "news" && c.origin !== "drives"
   );
   const recent = visibleConvs.filter((c) => !c.pinned && c.status === "active");
   const archived = visibleConvs.filter((c) => c.status === "archived");
@@ -82,15 +93,15 @@ export function renderRail(actions: RailActions): void {
   const profile = state.knowledge.profile;
   const isUnlocked = Boolean(profile?.unlocked && profile?.active_profile);
   const profileName = isUnlocked
-    ? profile?.active_profile?.name || "Profile"
-    : "Locked";
+    ? profile?.active_profile?.name || t("rail.profile_title", { name: "" }).trim()
+    : t("rail.locked");
   const avatarInitial = isUnlocked
     ? (profileName.trim()[0] || "S").toUpperCase()
     : "L";
 
   container.innerHTML = `
     <div class="brand">
-      <button id="rail-brand-home-btn" class="brand-btn" type="button" title="Home (${MOD_LABEL}+Shift+H)">
+      <button id="rail-brand-home-btn" class="brand-btn" type="button" title="${escapeHtml(t("rail.home_title", { mod: MOD_LABEL }))}">
         <canvas id="rail-wordmark-canvas" aria-label="satz"></canvas>
       </button>
     </div>
@@ -100,28 +111,28 @@ export function renderRail(actions: RailActions): void {
         id="rail-home-btn"
         class="icon-btn quick-btn ${isHomeActive ? "active" : ""}"
         type="button"
-        title="Home / Start Screen (${MOD_LABEL}+Shift+H)"
+        title="${escapeHtml(t("rail.home_title", { mod: MOD_LABEL }))}"
       >
         ${icon("home", "ico-sm")}
-        <span>Home</span>
+        <span>${escapeHtml(t("rail.home"))}</span>
       </button>
       <button
         id="rail-open-command-bar-btn"
         class="icon-btn quick-btn"
         type="button"
-        title="Command Bar (${MOD_LABEL}+K)"
+        title="${escapeHtml(t("rail.cmd_title", { mod: MOD_LABEL }))}"
       >
         ${icon("cmd", "ico-sm")}
-        <span>Search</span>
+        <span>${escapeHtml(t("common.search"))}</span>
       </button>
       <button
         id="rail-new-conv-btn"
         class="icon-btn quick-btn"
         type="button"
-        title="New Conversation (${MOD_LABEL}+N)"
+        title="${escapeHtml(t("rail.new_title", { mod: MOD_LABEL }))}"
       >
         ${icon("compose", "ico-sm")}
-        <span>New</span>
+        <span>${escapeHtml(t("rail.new"))}</span>
       </button>
     </div>
 
@@ -133,7 +144,7 @@ export function renderRail(actions: RailActions): void {
         spellcheck="false"
         autocorrect="off"
         autocapitalize="off"
-        placeholder="Filter..."
+        placeholder="${escapeHtml(t("rail.filter_placeholder"))}"
         value="${escapeHtml(state.railFilter)}"
       />
     </div>
@@ -142,15 +153,24 @@ export function renderRail(actions: RailActions): void {
       <section class="acc ${acc.pinned ? "" : "closed"}" data-acc="pinned">
         <button class="acc-h" type="button" data-acc-toggle="pinned" aria-expanded="${acc.pinned ? "true" : "false"}">
           <span class="rail-acc-chevron">${icon("chev", "ico-sm")}</span>
-          <span class="label">Pinned</span>
+          <span class="label">${escapeHtml(t("rail.pinned"))}</span>
           <span class="acc-count">${pinned.length}</span>
         </button>
         <div class="acc-body">
           ${
             pinned.length === 0
-              ? `<div class="muted" id="rail-empty-pinned">None</div>`
+              ? `<div class="muted" id="rail-empty-pinned">${escapeHtml(t("common.none"))}</div>`
               : `
-                ${systemPinned.map((c) => renderConversationRow(c, c.id === activeId)).join("")}
+                ${systemPinned
+                  .map((c) => {
+                    const activeOrigin = state.conversations.find((x) => x.id === activeId)?.origin;
+                    const rowActive =
+                      c.id === activeId ||
+                      (c.origin === "news" &&
+                        (activeOrigin === "news_settings" || activeOrigin === "news_perspectives"));
+                    return renderConversationRow(c, rowActive);
+                  })
+                  .join("")}
                 ${systemPinned.length > 0 && userPinned.length > 0 ? `<div class="sep"></div>` : ""}
                 ${userPinned.map((c) => renderConversationRow(c, c.id === activeId)).join("")}
               `
@@ -158,31 +178,16 @@ export function renderRail(actions: RailActions): void {
         </div>
       </section>
 
-      <section class="acc ${acc.conversations ? "" : "closed"}" data-acc="conversations">
-        <button class="acc-h" type="button" data-acc-toggle="conversations" aria-expanded="${acc.conversations ? "true" : "false"}">
-          <span class="rail-acc-chevron">${icon("chev", "ico-sm")}</span>
-          <span class="label">Conversations</span>
-          <span class="acc-count">${recent.length}</span>
-        </button>
-        <div class="acc-body">
-          ${
-            recent.length === 0
-              ? `<div class="muted" id="rail-empty-recent">None</div>`
-              : recent.map((c) => renderConversationRow(c, c.id === activeId)).join("")
-          }
-        </div>
-      </section>
-
       <section class="acc ${acc.sources ? "" : "closed"}" data-acc="sources">
-        <button class="acc-h" type="button" data-acc-toggle="sources" aria-expanded="${acc.sources ? "true" : "false"}" title="Bookmarked sources stay indexed in your local Brain">
+        <button class="acc-h" type="button" data-acc-toggle="sources" aria-expanded="${acc.sources ? "true" : "false"}" title="${escapeHtml(t("rail.bookmarks_title"))}">
           <span class="rail-acc-chevron">${icon("chev", "ico-sm")}</span>
-          <span class="label">Sources</span>
+          <span class="label">${escapeHtml(t("rail.bookmarks"))}</span>
           <span class="acc-count">${state.bookmarks.length}</span>
         </button>
         <div class="acc-body">
           ${
             state.bookmarks.length === 0
-              ? `<div class="muted">No saved bookmarks</div>`
+              ? `<div class="muted">${escapeHtml(t("rail.no_bookmarks"))}</div>`
               : state.bookmarks
                   .map((b) => {
                     const idxEntry = state.knowledge.bookmarks_indexed?.find(
@@ -193,12 +198,12 @@ export function renderRail(actions: RailActions): void {
                       <div
                         class="row"
                         data-bookmark-url="${escapeHtml(b.url)}"
-                        title="${escapeHtml(b.url)} — Auto-indexed into local Brain"
+                        title="${escapeHtml(t("rail.bookmark_url_title", { url: b.url }))}"
                       >
-                        ${icon("globe", "ico-sm")}
+                        ${renderSiteFaviconHtml(b.url, b.favicon_url, "globe")}
                         <span class="row-title">${escapeHtml(b.title || extractDomain(b.url))}</span>
-                        <span class="row-meta">${synced ? "Synced" : "Index"}</span>
-                        <button class="row-menu" type="button" data-remove-bookmark="${escapeHtml(b.id)}" title="Remove bookmark">
+                        <span class="row-meta">${escapeHtml(synced ? t("rail.synced") : t("rail.index"))}</span>
+                        <button class="row-menu" type="button" data-remove-bookmark="${escapeHtml(b.id)}" title="${escapeHtml(t("rail.remove_bookmark"))}">
                           ${icon("x", "ico-sm")}
                         </button>
                       </div>
@@ -210,10 +215,10 @@ export function renderRail(actions: RailActions): void {
             id="rail-bookmark-current-btn"
             class="btn rail-bm-action"
             type="button"
-            title="Index the active tab continuously in your local Brain (${MOD_LABEL}+D)"
+            title="${escapeHtml(t("rail.bookmark_current_title", { mod: MOD_LABEL }))}"
           >
             ${icon("plus", "ico-sm")}
-            <span>Bookmark current</span>
+            <span>${escapeHtml(t("rail.bookmark_current"))}</span>
           </button>
           ${
             state.bookmarkTooltipNotice
@@ -223,16 +228,31 @@ export function renderRail(actions: RailActions): void {
         </div>
       </section>
 
+      <section class="acc ${acc.conversations ? "" : "closed"}" data-acc="conversations">
+        <button class="acc-h" type="button" data-acc-toggle="conversations" aria-expanded="${acc.conversations ? "true" : "false"}">
+          <span class="rail-acc-chevron">${icon("chev", "ico-sm")}</span>
+          <span class="label">${escapeHtml(t("rail.conversations"))}</span>
+          <span class="acc-count">${recent.length}</span>
+        </button>
+        <div class="acc-body">
+          ${
+            recent.length === 0
+              ? `<div class="muted" id="rail-empty-recent">${escapeHtml(t("common.none"))}</div>`
+              : recent.map((c) => renderConversationRow(c, c.id === activeId)).join("")
+          }
+        </div>
+      </section>
+
       <section class="acc ${acc.archived ? "" : "closed"}" data-acc="archived">
         <button class="acc-h" id="rail-toggle-archived" type="button" data-acc-toggle="archived" aria-expanded="${acc.archived ? "true" : "false"}">
           <span class="rail-acc-chevron">${icon("chev", "ico-sm")}</span>
-          <span class="label">Archived</span>
+          <span class="label">${escapeHtml(t("rail.archived"))}</span>
           <span class="acc-count">${archived.length}</span>
         </button>
         <div class="acc-body">
           ${
             archived.length === 0
-              ? `<div class="muted">None</div>`
+              ? `<div class="muted">${escapeHtml(t("common.none"))}</div>`
               : archived.map((c) => renderConversationRow(c, c.id === activeId)).join("")
           }
         </div>
@@ -245,16 +265,20 @@ export function renderRail(actions: RailActions): void {
           <div class="menu prof-menu" id="rail-profile-menu" role="menu">
             <div class="row">
               <span class="row-title">${escapeHtml(profileName)}</span>
-              <span class="badge ${isUnlocked ? "good" : "warn"}">${isUnlocked ? "Unlocked" : "Locked"}</span>
+              ${
+                state.profileUnlocking
+                  ? `<span class="badge soft"><span class="satz-spinner" aria-hidden="true"></span><span>${escapeHtml(t("profile.unlocking_short"))}</span></span>`
+                  : `<span class="badge ${isUnlocked ? "good" : "warn"}">${escapeHtml(isUnlocked ? t("rail.unlocked") : t("rail.locked"))}</span>`
+              }
             </div>
             <div class="sep"></div>
             <button class="menu-item" type="button" data-prof-action="settings">
               ${icon("settings", "ico-sm")}
-              <span>Settings &amp; Appearance</span>
+              <span>${escapeHtml(t("rail.settings_appearance"))}</span>
             </button>
-            <button class="menu-item" type="button" data-prof-action="toggle-lock">
+            <button class="menu-item" type="button" data-prof-action="toggle-lock" ${state.profileUnlocking ? "disabled" : ""}>
               ${icon("lock", "ico-sm")}
-              <span>${isUnlocked ? "Lock profile" : "Unlock profile"}</span>
+              <span>${escapeHtml(state.profileUnlocking ? t("profile.unlocking_short") : isUnlocked ? t("rail.lock_profile") : t("rail.unlock_profile"))}</span>
             </button>
           </div>
         `
@@ -265,25 +289,25 @@ export function renderRail(actions: RailActions): void {
       <div class="foot-actions">
         <button
           id="rail-open-brain-btn"
-          class="icon-btn ${state.showBrainView ? "active" : ""}"
+          class="icon-btn ${state.showBrainView ? "active on" : ""}"
           type="button"
-          title="Satz Brain (${MOD_LABEL}+B)"
+          title="${escapeHtml(t("rail.brain_title", { mod: MOD_LABEL }))}"
         >
           ${icon("brain")}
         </button>
         <button
           id="rail-open-knowledge-btn"
-          class="icon-btn ${state.showKnowledgeView ? "active" : ""}"
+          class="icon-btn ${state.showKnowledgeView || state.activeDetail?.conversation.origin === "settings" ? "active on" : ""}"
           type="button"
-          title="Settings &amp; Models"
+          title="${escapeHtml(t("rail.settings_title"))}"
         >
           ${icon("settings")}
         </button>
         <button
           id="rail-telemetry-btn"
-          class="icon-btn ${state.telemetryOpen ? "active" : ""}"
+          class="icon-btn ${state.telemetryOpen ? "active on" : ""}"
           type="button"
-          title="Model, context &amp; logs"
+          title="${escapeHtml(t("rail.telemetry_title"))}"
           aria-expanded="${state.telemetryOpen ? "true" : "false"}"
         >
           ${icon("pulse")}
@@ -292,13 +316,13 @@ export function renderRail(actions: RailActions): void {
       </div>
       <button
         id="rail-profile-btn"
-        class="prof"
+        class="prof ${state.profileUnlocking ? "unlocking" : ""}"
         type="button"
-        title="Profile (${escapeHtml(profileName)})"
+        title="${escapeHtml(state.profileUnlocking ? (state.profileUnlockLabel || t("profile.unlocking_progress")) : t("rail.profile_title", { name: profileName }))}"
         aria-expanded="${state.profileMenuOpen ? "true" : "false"}"
       >
-        <span class="avatar">${escapeHtml(avatarInitial)}</span>
-        <span class="truncate">${escapeHtml(profileName)}</span>
+        ${state.profileUnlocking ? `<span class="satz-spinner" aria-hidden="true"></span>` : `<span class="avatar">${escapeHtml(avatarInitial)}</span>`}
+        <span class="truncate">${escapeHtml(state.profileUnlocking ? t("profile.unlocking_short") : profileName)}</span>
       </button>
     </div>
 
@@ -313,7 +337,9 @@ export function renderRail(actions: RailActions): void {
 function renderConversationRow(c: Conversation, isActive: boolean): string {
   const isMail = c.origin === "mail";
   const isNews = c.origin === "news";
-  const isPinnedSystem = isMail || isNews;
+  const isDrives = c.origin === "drives";
+  const isSettings = c.origin === "settings";
+  const isPinnedSystem = isMail || isNews || isDrives || isSettings;
   const srcCount = c.source_count ?? 0;
   const relTime = formatRelativeTime(c.last_active_at || c.created_at);
   const menuOpen = !isPinnedSystem && state.openMenuConvId === c.id;
@@ -328,22 +354,37 @@ function renderConversationRow(c: Conversation, isActive: boolean): string {
       : state.mailCounts.inbox_unread || state.sidecar.mail?.inbox_unread || 0;
   const newsCount =
     state.newsStories.length || state.sidecar.news?.clusters || 0;
+  const drivesCount =
+    state.drivesStatus?.total_files ?? state.sidecar.drives?.total_files ?? 0;
+  const settingsUnlocked = Boolean(
+    state.knowledge.profile?.unlocked && state.knowledge.profile?.active_profile
+  );
 
   const displayTitle = isMail
     ? state.mailAccounts.length > 0
-      ? "All mail"
-      : "Mail"
+      ? t("rail.all_mail")
+      : t("common.mail")
     : isNews
-      ? "News"
-      : c.title;
+      ? t("common.news")
+      : isDrives
+        ? t("common.drives")
+        : isSettings
+          ? t("common.settings")
+          : c.title;
 
   const countLabel = isMail
     ? String(totalUnread)
     : isNews
       ? String(newsCount)
-      : srcCount > 0
-        ? `${srcCount} src`
-        : relTime;
+      : isDrives
+        ? String(drivesCount)
+        : isSettings
+          ? settingsUnlocked
+            ? state.knowledge.profile?.active_profile?.name || t("rail.unlocked")
+            : t("rail.locked")
+          : srcCount > 0
+            ? t("rail.src_count", { count: srcCount })
+            : relTime;
 
   const hasWatchBadge =
     state.watchBadgeConvIds.includes(c.id) ||
@@ -363,7 +404,11 @@ function renderConversationRow(c: Conversation, isActive: boolean): string {
     ? icon("mail", "ico-sm")
     : isNews
       ? icon("news", "ico-sm")
-      : "";
+      : isDrives
+        ? icon("drive", "ico-sm")
+        : isSettings
+          ? icon("settings", "ico-sm")
+          : "";
 
   const mailAccountSubrowsHtml =
     isMail && state.mailAccounts.length > 0
@@ -381,7 +426,7 @@ function renderConversationRow(c: Conversation, isActive: boolean): string {
                 class="row sub ${acctActive ? "active" : ""}"
                 data-mail-rail-conv="${escapeHtml(c.id)}"
                 data-mail-rail-acct="${escapeHtml(acct.id)}"
-                title="${escapeHtml(acctName)} (${acct.message_count ?? 0} messages)"
+                title="${escapeHtml(t("rail.messages_count_title", { name: acctName, count: acct.message_count ?? 0 }))}"
               >
                 <span class="row-title">${escapeHtml(acctName)}</span>
                 <span class="row-meta">${acctUnread > 0 ? acctUnread : acct.message_count ?? 0}</span>
@@ -400,8 +445,9 @@ function renderConversationRow(c: Conversation, isActive: boolean): string {
         title="${escapeHtml(displayTitle)}"
       >
         ${leadIcon}
-        ${convRunning ? `<i class="dot live" title="Generation in progress"></i>` : ""}
-        ${hasWatchBadge ? `<i class="dot warn" title="Watched page changed"></i>` : ""}
+        ${convRunning ? `<i class="dot live" title="${escapeHtml(t("rail.generating"))}"></i>` : ""}
+        ${hasWatchBadge ? `<i class="dot warn" title="${escapeHtml(t("rail.watched_changed"))}"></i>` : ""}
+        ${isSettings && !settingsUnlocked ? `<i class="dot warn" title="${escapeHtml(t("rail.locked"))}"></i>` : ""}
         ${
           isRenaming
             ? `<input id="rail-rename-input-${escapeHtml(c.id)}" class="input row-rename-input" type="text" value="${escapeHtml(c.title)}" />`
@@ -411,17 +457,17 @@ function renderConversationRow(c: Conversation, isActive: boolean): string {
         ${
           isPinnedSystem
             ? ""
-            : `<button class="row-menu" type="button" data-menu-conv-id="${escapeHtml(c.id)}" title="Actions">${icon("more", "ico-sm")}</button>`
+            : `<button class="row-menu" type="button" data-menu-conv-id="${escapeHtml(c.id)}" title="${escapeHtml(t("rail.actions"))}">${icon("more", "ico-sm")}</button>`
         }
       </div>
       ${
         menuOpen
           ? `
             <div class="menu row-menu-pop">
-              <button class="menu-item" type="button" data-action-pin="${escapeHtml(c.id)}">${c.pinned ? "Unpin" : "Pin"}</button>
-              <button class="menu-item" type="button" data-action-rename="${escapeHtml(c.id)}">Rename</button>
-              <button class="menu-item" type="button" data-action-archive="${escapeHtml(c.id)}" data-archived="${c.status === "archived" ? "1" : "0"}">${c.status === "archived" ? "Restore" : "Archive"}</button>
-              <button class="menu-item" type="button" data-action-delete="${escapeHtml(c.id)}">Delete</button>
+              <button class="menu-item" type="button" data-action-pin="${escapeHtml(c.id)}">${escapeHtml(c.pinned ? t("common.unpin") : t("common.pin"))}</button>
+              <button class="menu-item" type="button" data-action-rename="${escapeHtml(c.id)}">${escapeHtml(t("common.rename"))}</button>
+              <button class="menu-item" type="button" data-action-archive="${escapeHtml(c.id)}" data-archived="${c.status === "archived" ? "1" : "0"}" title="${escapeHtml(c.status === "archived" ? t("rail.restore_title") : t("rail.archive_title", { mod: MOD_LABEL.toUpperCase() }))}"><span>${escapeHtml(c.status === "archived" ? t("common.restore") : t("common.archive"))}</span>${c.status === "archived" ? "" : `<span class="end">${escapeHtml(MOD_LABEL.toUpperCase())}+W</span>`}</button>
+              <button class="menu-item" type="button" data-action-delete="${escapeHtml(c.id)}">${escapeHtml(t("common.delete"))}</button>
             </div>
           `
           : ""
@@ -432,6 +478,7 @@ function renderConversationRow(c: Conversation, isActive: boolean): string {
 }
 
 function bindRailEvents(container: HTMLElement, actions: RailActions): void {
+  bindFaviconFallbacks(container);
   const filterInput = container.querySelector(
     "#rail-filter-input"
   ) as HTMLInputElement | null;
@@ -530,11 +577,7 @@ function bindRailEvents(container: HTMLElement, actions: RailActions): void {
       const action = (btn as HTMLElement).getAttribute("data-prof-action");
       state.profileMenuOpen = false;
       if (action === "settings") {
-        if (!state.showKnowledgeView) {
-          actions.onOpenKnowledgeView();
-        } else {
-          renderRail(actions);
-        }
+        actions.onOpenKnowledgeView();
       } else if (action === "toggle-lock") {
         const isUnlocked = Boolean(
           state.knowledge.profile?.unlocked && state.knowledge.profile?.active_profile
@@ -681,6 +724,28 @@ function bindRailEvents(container: HTMLElement, actions: RailActions): void {
       if (target.closest("[data-remove-bookmark]")) return;
       const url = (row as HTMLElement).getAttribute("data-bookmark-url");
       if (url) actions.onOpenBookmark(url);
+    });
+    row.addEventListener("mousedown", (e) => {
+      if ((e as MouseEvent).button === 1) e.preventDefault();
+    });
+    row.addEventListener("auxclick", (e) => {
+      const me = e as MouseEvent;
+      if (me.button !== 1) return;
+      const target = e.target as HTMLElement;
+      if (target.closest("[data-remove-bookmark]")) return;
+      me.preventDefault();
+      me.stopPropagation();
+      const el = row as HTMLElement;
+      const url = el.getAttribute("data-bookmark-url");
+      const title =
+        el.querySelector(".row-title")?.textContent?.trim() ?? "";
+      if (url) {
+        if (actions.onOpenBookmarkInNewTab) {
+          actions.onOpenBookmarkInNewTab(url, title);
+        } else {
+          actions.onOpenBookmark(url);
+        }
+      }
     });
   });
 
