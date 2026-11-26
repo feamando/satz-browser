@@ -4,7 +4,14 @@
 
 Built on **Tauri v2** (`WebView2` on Windows 11, `WKWebView` on macOS) with a modular **TypeScript** frontend, **Rust** backend, and local **Python** AI sidecar bundling **Planck 3.0** (`planck_vendor/` + sharded `planck13` encoder and `xreader_planck` reader weights), **Gemma / Qwen / HuggingFace** local models (`satz_local_models.py`), and a local **DistilBERT** 4-label mail classifier, Satz turns browsed pages, synced emails, news clusters, cloud drive metadata, and Brain entities into grounded sources cited inline with `[1]`, `[2]` and `[B1]`, `[B2]`.
 
-![Satz Shell](docs/screenshots/m1.png)
+![Satz Home & Command Bar](docs/screenshots/m1.png)
+
+<details>
+<summary>Satz News: Corroborated clusters, pinned Stories, Perspectives & News Settings</summary>
+
+![Satz News](docs/screenshots/news_preview.png)
+
+</details>
 
 ---
 
@@ -106,6 +113,7 @@ satz-browser/
 │   ├── NOTES_v0.3.md .. NOTES_v0.9.md
 │   ├── design/DESIGN_SYSTEM.md       # UI tokens, typography, layout & hygiene rules
 │   ├── evals/                        # Replayable harness & prompt-injection evals
+│   ├── screenshots/                  # Current shell & News screenshots (`m1.png`, `news_preview.png`)
 │   └── smoke/                        # Fixtures & verification captures
 ├── scripts/
 │   ├── prepare_sidecar_bundle.py     # Stages sidecar, shipped Planck models & Python runtime for release bundles
