@@ -19,6 +19,10 @@ import {
   renderMailAccountsSectionHtml,
 } from "./mail";
 import {
+  bindProfileUploadSectionEvents,
+  renderProfileUploadSectionHtml,
+} from "./profile_prompt";
+import {
   escapeHtml,
   formatRelativeTime,
   getUiLayoutPref,
@@ -43,6 +47,8 @@ import type {
 
 export interface KnowledgeActions {
   onChangeAppearance?: () => void;
+  onCheckAppUpdate?: () => Promise<void>;
+  onInstallAppUpdate?: () => Promise<void>;
   onOpenSettingsChat?: () => void;
   onTogglePauseLearning: (paused: boolean) => void;
   onDeletePassage: (passageId: string) => void;
@@ -64,6 +70,8 @@ export interface KnowledgeActions {
   onUnlockProfileKeychain?: (profileId: string) => void;
   onLockProfile?: () => void;
   onDeleteProfile?: (profileId: string, pin: string) => void;
+  onExportProfile?: (profileId: string, pin?: string) => void | Promise<void>;
+  onImportProfileFile?: (bundleB64: string, pin: string, localPin?: string) => void | Promise<void>;
   onUpsertPassword?: (payload: {
     service: string;
     username: string;
@@ -107,6 +115,28 @@ export interface KnowledgeActions {
   onDisconnectDriveProvider?: (provider: "gdrive" | "onedrive") => Promise<void> | void;
   onMailChanged?: () => Promise<void>;
   onSaveModelConfig?: (payload: Record<string, unknown>) => Promise<void>;
+  onSearchHfModels?: (query: string) => Promise<void>;
+  onInspectHfRepo?: (repoId: string, token?: string) => Promise<void>;
+  onStartHfDownload?: (payload: {
+    repo_id: string;
+    token?: string;
+    target_dir?: string;
+    use_as_chat?: boolean;
+  }) => Promise<void>;
+  onCancelHfDownload?: (downloadId: string) => Promise<void>;
+  onPointLocalModel?: (payload: {
+    role_slot: string;
+    path: string;
+    label?: string;
+    set_active?: boolean;
+  }) => Promise<void>;
+  onRemoveLocalModel?: (payload: {
+    model_id?: string;
+    role_slot?: string;
+    delete_files?: boolean;
+  }) => Promise<void>;
+  onSaveHfToken?: (token: string, clear?: boolean) => Promise<void>;
+  onBrowseLocalModelPath?: (mode: "directory" | "file", title?: string) => Promise<string | null>;
   onResetRoutingTelemetry?: (queryType?: string) => Promise<void>;
   onInferProvider?: (input: string, categoryId: string) => Promise<void>;
   onUpsertProvider?: (payload: {
@@ -974,6 +1004,43 @@ export function renderKnowledgeView(
       ? t("settings.cloud_summary", { items: configuredCloudProviders.map((p) => `${p.id} (${(p.models ?? []).length})`).join(" · ") })
       : t("settings.local_only_summary");
 
+  const localSnap = modelCfg?.local_models ?? null;
+  const gemmaReady = localSnap
+    ? Boolean(localSnap.gemma_ready)
+    : doctorRoles.find((d) => d.role === "chat")?.state !== "missing";
+  const customLocalLlms = localSnap?.custom_llms ?? [];
+  const hfCatalog = localSnap?.hf_catalog ?? [];
+  const hfDownloads =
+    state.hfDownloads.length > 0 ? state.hfDownloads : (localSnap?.downloads ?? []);
+  const slotOverrideMap = localSnap?.overrides ?? {};
+  const selectedSlotHasOverride = Boolean(
+    (state.localModelSlotDraft === "chat_llm" || state.localModelSlotDraft === "gemma_override")
+      ? slotOverrideMap.chat_llm_path
+      : state.localModelSlotDraft === "reader_hertz"
+        ? slotOverrideMap.hertz_reader_path
+        : state.localModelSlotDraft === "reader_planck"
+          ? slotOverrideMap.planck_reader_path
+          : state.localModelSlotDraft === "brain_encoder"
+            ? slotOverrideMap.planck13_encoder_path
+            : ""
+  );
+  const fmtBytes = (bytes?: number) => {
+    const b = Number(bytes ?? 0);
+    if (!b || b <= 0) return "";
+    if (b >= 1024 ** 3) return `${(b / 1024 ** 3).toFixed(2)} GB`;
+    if (b >= 1024 ** 2) return `${(b / 1024 ** 2).toFixed(1)} MB`;
+    return `${Math.round(b / 1024)} KB`;
+  };
+  const renderLocalLlmOptionsHtml = (selectedRoleVal: string) =>
+    customLocalLlms
+      .map(
+        (lm) =>
+          `<option value="${escapeHtml(lm.id)}" ${selectedRoleVal === lm.id ? "selected" : ""}>${escapeHtml(lm.label)} (local${lm.ready ? "" : " · invalid"})</option>`
+      )
+      .join("");
+  const gemmaOptionLabel = gemmaReady
+    ? "gemma-4-e4b (local · default)"
+    : "gemma-4-e4b (local · not installed)";
   const renderCloudOptionsHtml = (selectedRoleVal: string) =>
     discoveredCloudModels
       .map(
@@ -1005,7 +1072,8 @@ export function renderKnowledgeView(
                 <div class="kb-form-field">
                   <label for="kb-role-chat-select">${escapeHtml(t("settings.role_chat"))}</label>
                   <select id="kb-role-chat-select" class="select">
-                    <option value="gemma-4-e4b" ${roleChat === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local · default)</option>
+                    <option value="gemma-4-e4b" ${roleChat === "gemma-4-e4b" ? "selected" : ""}>${escapeHtml(gemmaOptionLabel)}</option>
+                    ${renderLocalLlmOptionsHtml(roleChat)}
                     ${renderCloudOptionsHtml(roleChat)}
                   </select>
                 </div>
@@ -1020,8 +1088,9 @@ export function renderKnowledgeView(
                   <label for="kb-role-reader-select">${escapeHtml(t("settings.role_reader"))}</label>
                   <select id="kb-role-reader-select" class="select">
                     <option value="hertz (reader)" ${roleReader === "hertz (reader)" ? "selected" : ""}>hertz 1.2 (local extractive)</option>
-                    <option value="planck (reader)" ${roleReader === "planck (reader)" ? "selected" : ""}>planck (local extractive)</option>
-                    <option value="gemma-4-e4b" ${roleReader === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local generative)</option>
+                    <option value="planck (reader)" ${roleReader === "planck (reader)" ? "selected" : ""}>planck (local extractive · shipped)</option>
+                    <option value="gemma-4-e4b" ${roleReader === "gemma-4-e4b" ? "selected" : ""}>${escapeHtml(gemmaOptionLabel)}</option>
+                    ${renderLocalLlmOptionsHtml(roleReader)}
                     ${renderCloudOptionsHtml(roleReader)}
                   </select>
                 </div>
@@ -1030,14 +1099,16 @@ export function renderKnowledgeView(
                 <div class="kb-form-field">
                   <label for="kb-role-news-planner-select">${escapeHtml(t("settings.role_news_planner"))}</label>
                   <select id="kb-role-news-planner-select" class="select">
-                    <option value="gemma-4-e4b" ${roleNewsPlanner === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local · default)</option>
+                    <option value="gemma-4-e4b" ${roleNewsPlanner === "gemma-4-e4b" ? "selected" : ""}>${escapeHtml(gemmaOptionLabel)}</option>
+                    ${renderLocalLlmOptionsHtml(roleNewsPlanner)}
                     ${renderCloudOptionsHtml(roleNewsPlanner)}
                   </select>
                 </div>
                 <div class="kb-form-field">
                   <label for="kb-role-news-capture-select">${escapeHtml(t("settings.role_news_translate"))}</label>
                   <select id="kb-role-news-capture-select" class="select">
-                    <option value="gemma-4-e4b" ${roleNewsCapture === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local · default)</option>
+                    <option value="gemma-4-e4b" ${roleNewsCapture === "gemma-4-e4b" ? "selected" : ""}>${escapeHtml(gemmaOptionLabel)}</option>
+                    ${renderLocalLlmOptionsHtml(roleNewsCapture)}
                     ${renderCloudOptionsHtml(roleNewsCapture)}
                   </select>
                 </div>
@@ -1045,16 +1116,18 @@ export function renderKnowledgeView(
                   <label for="kb-role-news-reader-select">${escapeHtml(t("settings.role_news_reader"))}</label>
                   <select id="kb-role-news-reader-select" class="select">
                     <option value="hertz (reader)" ${roleNewsReader === "hertz (reader)" ? "selected" : ""}>hertz 1.2 (local int8)</option>
-                    <option value="planck (reader)" ${roleNewsReader === "planck (reader)" ? "selected" : ""}>planck (local reader)</option>
+                    <option value="planck (reader)" ${roleNewsReader === "planck (reader)" ? "selected" : ""}>planck (local reader · shipped)</option>
                     <option value="heuristic" ${roleNewsReader === "heuristic" ? "selected" : ""}>heuristic lexical</option>
-                    <option value="gemma-4-e4b" ${roleNewsReader === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local)</option>
+                    <option value="gemma-4-e4b" ${roleNewsReader === "gemma-4-e4b" ? "selected" : ""}>${escapeHtml(gemmaOptionLabel)}</option>
+                    ${renderLocalLlmOptionsHtml(roleNewsReader)}
                     ${renderCloudOptionsHtml(roleNewsReader)}
                   </select>
                 </div>
                 <div class="kb-form-field">
                   <label for="kb-role-news-analyzer-select">${escapeHtml(t("settings.role_news_analyzer"))}</label>
                   <select id="kb-role-news-analyzer-select" class="select">
-                    <option value="gemma-4-e4b" ${roleNewsAnalyzer === "gemma-4-e4b" ? "selected" : ""}>gemma-4-e4b (local)</option>
+                    <option value="gemma-4-e4b" ${roleNewsAnalyzer === "gemma-4-e4b" ? "selected" : ""}>${escapeHtml(gemmaOptionLabel)}</option>
+                    ${renderLocalLlmOptionsHtml(roleNewsAnalyzer)}
                     <option value="template" ${roleNewsAnalyzer === "template" ? "selected" : ""}>template extractive</option>
                     ${renderCloudOptionsHtml(roleNewsAnalyzer)}
                   </select>
@@ -1064,6 +1137,195 @@ export function renderKnowledgeView(
             </div>
 
             ${state.modelConfigStatusMsg ? renderKbBannerHtml(state.modelConfigStatusMsg) : ""}
+
+            <div class="label">${escapeHtml(t("settings.lm_packaging_label"))}</div>
+            <div class="card inset lm-subcard">
+              <div class="card-h">
+                <b>${escapeHtml(t("settings.lm_hf_title"))}</b>
+                <span class="end badge soft">${escapeHtml(
+                  t("settings.lm_shipped_ok", {
+                    reader: `planck:${localSnap?.planck_reader_source ?? "shipped"}`,
+                    encoder: `planck13:${localSnap?.planck13_source ?? "shipped"}`,
+                  })
+                )}</span>
+              </div>
+              ${
+                localSnap?.models_dir
+                  ? `<div class="lm-inline-meta">${escapeHtml(t("settings.lm_hf_sub", { dir: localSnap.models_dir }))}</div>`
+                  : ""
+              }
+              <div class="form-row">
+                <input
+                  id="kb-hf-search-input"
+                  class="input"
+                  type="text"
+                  value="${escapeHtml(state.hfSearchQuery)}"
+                  placeholder="${escapeHtml(t("settings.lm_hf_search_ph"))}"
+                />
+                <button id="kb-hf-search-btn" type="button" class="btn">${escapeHtml(t("settings.lm_hf_search_btn"))}</button>
+              </div>
+              ${
+                state.hfSearchResults.length > 0
+                  ? `<div class="lm-chip-row">${state.hfSearchResults
+                      .map(
+                        (r) =>
+                          `<button type="button" class="btn" data-hf-pick-repo="${escapeHtml(r.repo_id)}" title="${escapeHtml(r.notes ?? "")}">${escapeHtml(r.repo_id)}${r.gated ? " (gated)" : ""}</button>`
+                      )
+                      .join("")}</div>`
+                  : hfCatalog.length > 0
+                    ? `<div>
+                         <div class="muted">${escapeHtml(t("settings.lm_hf_presets"))}</div>
+                         <div class="lm-chip-row">${hfCatalog
+                           .map(
+                             (c) =>
+                               `<button type="button" class="btn" data-hf-pick-repo="${escapeHtml(c.repo_id)}" title="${escapeHtml(c.notes)}">${escapeHtml(c.label)} · ${escapeHtml(c.approx_size)}${c.gated ? " (gated)" : ""}</button>`
+                           )
+                           .join("")}</div>
+                       </div>`
+                    : ""
+              }
+              <div class="form-row">
+                <input
+                  id="kb-hf-repo-input"
+                  class="input"
+                  type="text"
+                  spellcheck="false"
+                  value="${escapeHtml(state.hfRepoDraft)}"
+                  placeholder="${escapeHtml(t("settings.lm_hf_repo_ph"))}"
+                />
+                <button id="kb-hf-inspect-btn" type="button" class="btn">${escapeHtml(t("settings.lm_hf_inspect_btn"))}</button>
+                <button id="kb-hf-download-btn" type="button" class="btn primary">${escapeHtml(t("settings.lm_hf_download_btn"))}</button>
+              </div>
+              ${
+                state.hfInspectResult
+                  ? state.hfInspectResult.error
+                    ? `<div class="muted">${escapeHtml(state.hfInspectResult.error)}</div>`
+                    : `<div class="muted">${escapeHtml(
+                        t("settings.lm_hf_inspect_summary", {
+                          repo: state.hfInspectResult.repo_id,
+                          count: state.hfInspectResult.file_count ?? 0,
+                          size: fmtBytes(state.hfInspectResult.total_bytes) || "unknown size",
+                          gated: state.hfInspectResult.gated ? t("settings.lm_hf_gated_tag") : "",
+                        })
+                      )}</div>`
+                  : ""
+              }
+              <div class="form-row">
+                <input
+                  id="kb-hf-token-input"
+                  class="input"
+                  type="password"
+                  spellcheck="false"
+                  placeholder="${escapeHtml(t("settings.lm_hf_token_ph"))}"
+                />
+                <button id="kb-hf-token-save-btn" type="button" class="btn">${escapeHtml(t("settings.lm_hf_token_save_btn"))}</button>
+                ${
+                  localSnap?.hf_token_configured
+                    ? `<span class="badge soft">${escapeHtml(t("settings.lm_hf_token_saved", { masked: localSnap.hf_token_masked || "***" }))}</span>
+                       <button id="kb-hf-token-clear-btn" type="button" class="btn danger">${escapeHtml(t("settings.lm_hf_token_clear_btn"))}</button>`
+                    : ""
+                }
+              </div>
+              ${
+                hfDownloads.length > 0
+                  ? `<div>
+                       <div class="muted">${escapeHtml(t("settings.lm_hf_downloads_title"))}</div>
+                       ${hfDownloads
+                         .slice(0, 6)
+                         .map((dl) => {
+                           const isActive = dl.state === "queued" || dl.state === "downloading";
+                           const pct = Math.max(0, Math.min(100, Number(dl.pct ?? 0)));
+                           return `
+                             <div class="source-row">
+                               <div class="source-row-top">
+                                 <span>${escapeHtml(
+                                   t("settings.lm_hf_dl_progress", {
+                                     repo: dl.repo_id,
+                                     state: dl.state,
+                                     pct: pct.toFixed(1),
+                                     done: dl.files_done,
+                                     total: dl.files_total,
+                                     file: dl.current_file || (dl.error ? dl.error : fmtBytes(dl.downloaded_bytes) || dl.state),
+                                   })
+                                 )}</span>
+                                 ${
+                                   isActive
+                                     ? `<button type="button" class="btn danger" data-hf-cancel-dl="${escapeHtml(dl.download_id)}">${escapeHtml(t("settings.lm_hf_cancel_btn"))}</button>`
+                                     : ""
+                                 }
+                               </div>
+                               <div class="lm-progress-track"><div class="lm-progress-fill" style="width:${pct}%"></div></div>
+                             </div>
+                           `;
+                         })
+                         .join("")}
+                     </div>`
+                  : ""
+              }
+            </div>
+
+            <div class="card inset lm-subcard">
+              <div class="card-h">
+                <b>${escapeHtml(t("settings.lm_point_title"))}</b>
+                <span class="end muted">${escapeHtml(t("settings.lm_point_sub"))}</span>
+              </div>
+              <div class="form-row">
+                <select id="kb-local-slot-select" class="select">
+                  <option value="chat_llm" ${state.localModelSlotDraft === "chat_llm" ? "selected" : ""}>${escapeHtml(t("settings.lm_slot_chat"))}</option>
+                  <option value="gemma_override" ${state.localModelSlotDraft === "gemma_override" ? "selected" : ""}>${escapeHtml(t("settings.lm_slot_gemma"))}</option>
+                  <option value="reader_hertz" ${state.localModelSlotDraft === "reader_hertz" ? "selected" : ""}>${escapeHtml(t("settings.lm_slot_hertz"))}</option>
+                  <option value="reader_planck" ${state.localModelSlotDraft === "reader_planck" ? "selected" : ""}>${escapeHtml(t("settings.lm_slot_planck"))}</option>
+                  <option value="brain_encoder" ${state.localModelSlotDraft === "brain_encoder" ? "selected" : ""}>${escapeHtml(t("settings.lm_slot_brain"))}</option>
+                </select>
+                <input
+                  id="kb-local-path-input"
+                  class="input"
+                  type="text"
+                  spellcheck="false"
+                  value="${escapeHtml(state.localModelPathDraft)}"
+                  placeholder="${escapeHtml(t("settings.lm_path_ph"))}"
+                />
+                <button id="kb-local-browse-btn" type="button" class="btn">${escapeHtml(t("settings.lm_browse_btn"))}</button>
+                <button id="kb-local-link-btn" type="button" class="btn primary">${escapeHtml(t("settings.lm_link_btn"))}</button>
+                ${
+                  selectedSlotHasOverride
+                    ? `<button id="kb-local-reset-slot-btn" type="button" class="btn danger">${escapeHtml(t("settings.lm_reset_slot_btn"))}</button>`
+                    : ""
+                }
+              </div>
+
+              <div class="muted">${escapeHtml(t("settings.lm_installed_title", { count: customLocalLlms.length }))}</div>
+              ${
+                customLocalLlms.length === 0
+                  ? `<div class="muted">${escapeHtml(t("settings.lm_installed_empty"))}</div>`
+                  : customLocalLlms
+                      .map((lm) => {
+                        const szStr = fmtBytes(lm.size_bytes);
+                        return `
+                          <div class="source-row">
+                            <div class="source-row-top">
+                              <b>${escapeHtml(lm.label)} · <span class="muted">${escapeHtml(lm.id)}</span></b>
+                              <span class="end">
+                                ${
+                                  lm.ready
+                                    ? `<button type="button" class="btn" data-local-use-chat="${escapeHtml(lm.id)}">${escapeHtml(t("settings.lm_use_for_chat"))}</button>`
+                                    : ""
+                                }
+                                <button type="button" class="btn danger" data-local-remove="${escapeHtml(lm.id)}">${escapeHtml(t("settings.lm_remove_btn"))}</button>
+                                ${
+                                  lm.source === "huggingface"
+                                    ? `<button type="button" class="btn danger" data-local-delete-files="${escapeHtml(lm.id)}">${escapeHtml(t("settings.lm_remove_files_btn"))}</button>`
+                                    : ""
+                                }
+                              </span>
+                            </div>
+                            <div class="lm-inline-meta">${escapeHtml(lm.path)}${szStr ? ` · ${escapeHtml(szStr)}` : ""}${lm.error ? ` · ${escapeHtml(lm.error)}` : ""}</div>
+                          </div>
+                        `;
+                      })
+                      .join("")
+              }
+            </div>
 
             <div class="label">${escapeHtml(t("settings.cloud_providers_label"))}</div>
             ${cloudProviders
@@ -1301,6 +1563,32 @@ export function renderKnowledgeView(
             </div>
           </div>
           ${renderAppLanguageSectionHtml()}
+          <div class="form-row">
+            <span class="muted">${escapeHtml(t("settings.app_updates_title"))}</span>
+            <span class="badge soft">${escapeHtml(t("settings.app_version_label", { version: state.appUpdateStatus.currentVersion || "0.5.0" }))}</span>
+            <button id="kb-check-update-btn" type="button" class="btn" ${state.appUpdateStatus.checking || state.appUpdateStatus.installing ? "disabled" : ""}>${escapeHtml(state.appUpdateStatus.checking ? t("settings.app_checking_update") : t("settings.app_check_update_btn"))}</button>
+            ${
+              state.appUpdateStatus.availableVersion
+                ? `<button id="kb-install-update-btn" type="button" class="btn primary" ${state.appUpdateStatus.installing ? "disabled" : ""}>${escapeHtml(
+                    state.appUpdateStatus.installing
+                      ? t("settings.app_updating_progress", { pct: state.appUpdateStatus.progressPct })
+                      : t("settings.app_install_update_btn", { version: state.appUpdateStatus.availableVersion })
+                  )}</button>`
+                : ""
+            }
+            ${
+              state.appUpdateStatus.error
+                ? `<span class="muted">${escapeHtml(state.appUpdateStatus.error)}</span>`
+                : state.appUpdateStatus.message
+                  ? `<span class="muted">${escapeHtml(state.appUpdateStatus.message)}</span>`
+                  : ""
+            }
+          </div>
+          ${
+            state.appUpdateStatus.installing
+              ? `<div class="lm-progress-track"><div class="lm-progress-fill" style="width:${Math.max(0, Math.min(100, state.appUpdateStatus.progressPct))}%"></div></div>`
+              : ""
+          }
         </div>
         <div class="label">${escapeHtml(isUnlocked && activeProfile ? t("settings.profile_scope_unlocked", { name: activeProfile.name }) : t("settings.profile_scope_locked"))}</div>
         `
@@ -1358,6 +1646,7 @@ export function renderKnowledgeView(
               />
               <button id="kb-create-profile-btn" type="button" class="btn primary" ${state.profileUnlocking ? "disabled" : ""}>${icon("plus", "ico-sm")}<span>${escapeHtml(state.profileUnlocking ? t("profile.creating") : t("settings.create_profile_btn"))}</span></button>
             </div>
+            ${renderProfileUploadSectionHtml("kb")}
             ${
               profilesList.length === 0
                 ? `<div class="muted">${escapeHtml(t("settings.no_profiles"))}</div>`
@@ -1391,6 +1680,7 @@ export function renderKnowledgeView(
                         <button type="button" class="btn" data-unlock-touchid="${escapeHtml(p.id)}" ${state.profileUnlocking ? "disabled" : ""}>${escapeHtml(IS_MAC ? t("settings.touch_id") : t("settings.quick_unlock"))}</button>
                       `
                       }
+                      <button type="button" class="btn" data-export-profile="${escapeHtml(p.id)}" title="${escapeHtml(t("profile.export_title"))}" ${(state.profileUnlocking || state.profileExportBusyId === p.id) ? "disabled" : ""}>${escapeHtml(state.profileExportBusyId === p.id ? t("profile.exporting_short") : t("profile.export_btn"))}</button>
                       <button type="button" class="btn-text" data-delete-profile="${escapeHtml(p.id)}" title="${escapeHtml(t("settings.delete_profile_title"))}" ${state.profileUnlocking ? "disabled" : ""}>${escapeHtml(t("common.delete"))}</button>
                     </div>
                   </div>
@@ -1769,6 +2059,130 @@ export function renderKnowledgeView(
     });
   });
 
+  const hfSearchInput = container.querySelector("#kb-hf-search-input") as HTMLInputElement | null;
+  const hfRepoInput = container.querySelector("#kb-hf-repo-input") as HTMLInputElement | null;
+  const hfTokenInput = container.querySelector("#kb-hf-token-input") as HTMLInputElement | null;
+  const localSlotSelect = container.querySelector("#kb-local-slot-select") as HTMLSelectElement | null;
+  const localPathInput = container.querySelector("#kb-local-path-input") as HTMLInputElement | null;
+
+  hfSearchInput?.addEventListener("input", () => {
+    state.hfSearchQuery = hfSearchInput.value;
+  });
+  hfSearchInput?.addEventListener("keydown", (e) => {
+    if ((e as KeyboardEvent).key === "Enter" && actions.onSearchHfModels) {
+      e.preventDefault();
+      state.hfSearchQuery = hfSearchInput.value.trim();
+      void actions.onSearchHfModels(state.hfSearchQuery);
+    }
+  });
+  container.querySelector("#kb-hf-search-btn")?.addEventListener("click", () => {
+    if (!actions.onSearchHfModels) return;
+    state.hfSearchQuery = (hfSearchInput?.value ?? "").trim();
+    void actions.onSearchHfModels(state.hfSearchQuery);
+  });
+  hfRepoInput?.addEventListener("input", () => {
+    state.hfRepoDraft = hfRepoInput.value;
+  });
+  container.querySelectorAll<HTMLButtonElement>("[data-hf-pick-repo]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const repoId = btn.getAttribute("data-hf-pick-repo") ?? "";
+      if (!repoId) return;
+      state.hfRepoDraft = repoId;
+      if (hfRepoInput) hfRepoInput.value = repoId;
+      if (actions.onInspectHfRepo) {
+        void actions.onInspectHfRepo(repoId, hfTokenInput?.value.trim() ?? "");
+      }
+    });
+  });
+  container.querySelector("#kb-hf-inspect-btn")?.addEventListener("click", () => {
+    if (!actions.onInspectHfRepo) return;
+    const repoId = (hfRepoInput?.value ?? state.hfRepoDraft).trim();
+    state.hfRepoDraft = repoId;
+    void actions.onInspectHfRepo(repoId, hfTokenInput?.value.trim() ?? "");
+  });
+  container.querySelector("#kb-hf-download-btn")?.addEventListener("click", () => {
+    if (!actions.onStartHfDownload) return;
+    const repoId = (hfRepoInput?.value ?? state.hfRepoDraft).trim();
+    state.hfRepoDraft = repoId;
+    void actions.onStartHfDownload({
+      repo_id: repoId,
+      token: hfTokenInput?.value.trim() ?? "",
+      use_as_chat: true,
+    });
+  });
+  container.querySelector("#kb-hf-token-save-btn")?.addEventListener("click", () => {
+    if (!actions.onSaveHfToken) return;
+    const tok = hfTokenInput?.value.trim() ?? "";
+    void actions.onSaveHfToken(tok, false);
+  });
+  container.querySelector("#kb-hf-token-clear-btn")?.addEventListener("click", () => {
+    if (!actions.onSaveHfToken) return;
+    void actions.onSaveHfToken("", true);
+  });
+  container.querySelectorAll<HTMLButtonElement>("[data-hf-cancel-dl]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (!actions.onCancelHfDownload) return;
+      const dlId = btn.getAttribute("data-hf-cancel-dl") ?? "";
+      if (dlId) void actions.onCancelHfDownload(dlId);
+    });
+  });
+
+  localSlotSelect?.addEventListener("change", () => {
+    state.localModelSlotDraft = localSlotSelect.value || "chat_llm";
+    renderKnowledgeView(container, actions, laneFilter, isEmbedded);
+  });
+  localPathInput?.addEventListener("input", () => {
+    state.localModelPathDraft = localPathInput.value;
+  });
+  container.querySelector("#kb-local-browse-btn")?.addEventListener("click", async () => {
+    if (!actions.onBrowseLocalModelPath) return;
+    const slot = localSlotSelect?.value || state.localModelSlotDraft || "chat_llm";
+    const mode = slot === "chat_llm" || slot === "gemma_override" ? "directory" : "file";
+    const picked = await actions.onBrowseLocalModelPath(mode, t("settings.lm_point_title"));
+    if (picked) {
+      state.localModelPathDraft = picked;
+      if (localPathInput) localPathInput.value = picked;
+    }
+  });
+  container.querySelector("#kb-local-link-btn")?.addEventListener("click", () => {
+    if (!actions.onPointLocalModel) return;
+    const slot = localSlotSelect?.value || state.localModelSlotDraft || "chat_llm";
+    const pVal = (localPathInput?.value ?? state.localModelPathDraft).trim();
+    state.localModelSlotDraft = slot;
+    state.localModelPathDraft = pVal;
+    void actions.onPointLocalModel({
+      role_slot: slot,
+      path: pVal,
+      set_active: slot === "chat_llm" || slot === "gemma_override",
+    });
+  });
+  container.querySelector("#kb-local-reset-slot-btn")?.addEventListener("click", () => {
+    if (!actions.onRemoveLocalModel) return;
+    const slot = localSlotSelect?.value || state.localModelSlotDraft || "chat_llm";
+    void actions.onRemoveLocalModel({ role_slot: slot });
+  });
+  container.querySelectorAll<HTMLButtonElement>("[data-local-use-chat]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (!actions.onSaveModelConfig) return;
+      const mid = btn.getAttribute("data-local-use-chat") ?? "";
+      if (mid) void actions.onSaveModelConfig({ role_chat: mid });
+    });
+  });
+  container.querySelectorAll<HTMLButtonElement>("[data-local-remove]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (!actions.onRemoveLocalModel) return;
+      const mid = btn.getAttribute("data-local-remove") ?? "";
+      if (mid) void actions.onRemoveLocalModel({ model_id: mid, delete_files: false });
+    });
+  });
+  container.querySelectorAll<HTMLButtonElement>("[data-local-delete-files]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (!actions.onRemoveLocalModel) return;
+      const mid = btn.getAttribute("data-local-delete-files") ?? "";
+      if (mid) void actions.onRemoveLocalModel({ model_id: mid, delete_files: true });
+    });
+  });
+
   container.querySelectorAll<HTMLButtonElement>("[data-cloud-toggle-vis]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const pid = btn.getAttribute("data-cloud-toggle-vis") ?? "";
@@ -1866,6 +2280,18 @@ export function renderKnowledgeView(
     }
   });
 
+  container.querySelector("#kb-check-update-btn")?.addEventListener("click", () => {
+    if (actions.onCheckAppUpdate) {
+      void actions.onCheckAppUpdate();
+    }
+  });
+
+  container.querySelector("#kb-install-update-btn")?.addEventListener("click", () => {
+    if (actions.onInstallAppUpdate) {
+      void actions.onInstallAppUpdate();
+    }
+  });
+
   container.querySelector("#kb-open-brain-btn")?.addEventListener("click", () => {
     if (actions.onSwitchToBrain) {
       actions.onSwitchToBrain();
@@ -1929,6 +2355,20 @@ export function renderKnowledgeView(
       }
     });
   });
+
+  container.querySelectorAll("[data-export-profile]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const pid = (btn as HTMLElement).getAttribute("data-export-profile");
+      if (!pid || !actions.onExportProfile) return;
+      const pinInput = container.querySelector(
+        `[data-profile-pin-input="${pid}"]`
+      ) as HTMLInputElement | null;
+      const pin = pinInput?.value.trim() || undefined;
+      void actions.onExportProfile(pid, pin);
+    });
+  });
+
+  bindProfileUploadSectionEvents(container, "kb", actions.onImportProfileFile);
 
   container.querySelectorAll("[data-delete-profile]").forEach((btn) => {
     btn.addEventListener("click", () => {

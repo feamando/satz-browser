@@ -578,6 +578,49 @@ class SatzNewsEngine:
                 updated_at REAL NOT NULL DEFAULT 0.0,
                 PRIMARY KEY (article_id, target_lang)
             );
+
+            CREATE TABLE IF NOT EXISTS satz_news_followed_stories (
+                story_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                summary_overview TEXT NOT NULL DEFAULT '',
+                summary_model TEXT NOT NULL DEFAULT '',
+                keywords_json TEXT NOT NULL DEFAULT '[]',
+                seed_cluster_id TEXT,
+                anchor_domain TEXT,
+                lead_image TEXT,
+                confidence10 REAL NOT NULL DEFAULT 5.0,
+                band TEXT NOT NULL DEFAULT 'good',
+                independent_families INTEGER NOT NULL DEFAULT 1,
+                update_count INTEGER NOT NULL DEFAULT 0,
+                unread_updates INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                last_synthesized_at REAL NOT NULL DEFAULT 0.0
+            );
+
+            CREATE TABLE IF NOT EXISTS satz_news_followed_story_updates (
+                story_id TEXT NOT NULL,
+                article_id TEXT NOT NULL,
+                url TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                family TEXT NOT NULL,
+                title TEXT NOT NULL,
+                snippet TEXT NOT NULL DEFAULT '',
+                language TEXT NOT NULL DEFAULT 'en',
+                image_url TEXT NOT NULL DEFAULT '',
+                published_at REAL NOT NULL,
+                added_at REAL NOT NULL,
+                trust_system REAL NOT NULL,
+                trust_effective REAL NOT NULL,
+                conflict INTEGER NOT NULL DEFAULT 0,
+                match_score REAL NOT NULL DEFAULT 0.0,
+                is_seed INTEGER NOT NULL DEFAULT 0,
+                is_new INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (story_id, article_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_news_followed_upd_story
+                ON satz_news_followed_story_updates(story_id, published_at DESC);
             CREATE INDEX IF NOT EXISTS idx_news_tr_lang ON satz_news_translations(target_lang, updated_at DESC);
             """
         )
@@ -596,6 +639,48 @@ class SatzNewsEngine:
             db_conn.execute("ALTER TABLE satz_news_clusters ADD COLUMN brain_slug TEXT")
         if "brain_synced_at" not in cl_cols:
             db_conn.execute("ALTER TABLE satz_news_clusters ADD COLUMN brain_synced_at REAL DEFAULT 0.0")
+        if "updated_at" not in feed_cols:
+            db_conn.execute("ALTER TABLE satz_news_feeds ADD COLUMN updated_at REAL NOT NULL DEFAULT 0.0")
+        topic_cols = {
+            r[1] for r in db_conn.execute("PRAGMA table_info('satz_news_topics')").fetchall()
+        }
+        if "updated_at" not in topic_cols:
+            db_conn.execute("ALTER TABLE satz_news_topics ADD COLUMN updated_at REAL NOT NULL DEFAULT 0.0")
+            db_conn.execute(
+                "UPDATE satz_news_topics SET updated_at = COALESCE(created_at, 0.0) WHERE updated_at = 0.0"
+            )
+        db_conn.executescript(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_news_topics_ai_ts AFTER INSERT ON satz_news_topics
+            WHEN COALESCE(NEW.updated_at, 0.0) <= 0.0
+            BEGIN
+                UPDATE satz_news_topics
+                SET updated_at = (julianday('now') - 2440587.5) * 86400.0
+                WHERE topic_id = NEW.topic_id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_news_topics_au_ts AFTER UPDATE OF name, keywords_json, suppressed, watch_id ON satz_news_topics
+            WHEN COALESCE(NEW.updated_at, 0.0) <= COALESCE(OLD.updated_at, 0.0)
+            BEGIN
+                UPDATE satz_news_topics
+                SET updated_at = (julianday('now') - 2440587.5) * 86400.0
+                WHERE topic_id = NEW.topic_id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_news_feeds_ai_ts AFTER INSERT ON satz_news_feeds
+            WHEN COALESCE(NEW.updated_at, 0.0) <= 0.0
+            BEGIN
+                UPDATE satz_news_feeds
+                SET updated_at = (julianday('now') - 2440587.5) * 86400.0
+                WHERE feed_id = NEW.feed_id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_news_feeds_au_ts AFTER UPDATE OF domain, feed_url, title, category, language, enabled ON satz_news_feeds
+            WHEN COALESCE(NEW.updated_at, 0.0) <= COALESCE(OLD.updated_at, 0.0)
+            BEGIN
+                UPDATE satz_news_feeds
+                SET updated_at = (julianday('now') - 2440587.5) * 86400.0
+                WHERE feed_id = NEW.feed_id;
+            END;
+            """
+        )
         db_conn.commit()
 
     def seed_starter_feeds(self, db_conn: sqlite3.Connection | None = None) -> None:
@@ -603,8 +688,24 @@ class SatzNewsEngine:
         if not feeds:
             return
         conn = db_conn or self.runtime.store.db
+        deleted_ids: set[str] = set()
+        try:
+            tb_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='satz_sync_tombstones'"
+            ).fetchone()
+            if tb_exists:
+                deleted_ids = {
+                    str(r[0])
+                    for r in conn.execute(
+                        "SELECT row_key FROM satz_sync_tombstones WHERE table_name = 'satz_news_feeds'"
+                    ).fetchall()
+                }
+        except Exception:
+            deleted_ids = set()
         for f in feeds:
             fid = str(f.get("feed_id") or slugify(str(f.get("feed_url") or "")))
+            if fid in deleted_ids:
+                continue
             conn.execute(
                 """
                 INSERT OR IGNORE INTO satz_news_feeds
@@ -1586,8 +1687,18 @@ class SatzNewsEngine:
         return signals[:24]
 
     def _build_scrubbed_topic_queries(self, limit: int = 4) -> list[str]:
-        signals = self.build_local_interest_signals()
         queries: list[str] = []
+        with self.runtime.store_lock:
+            frows = self.runtime.store.db.execute(
+                "SELECT title FROM satz_news_followed_stories WHERE status = 'active' ORDER BY updated_at DESC LIMIT 2"
+            ).fetchall()
+        for fr in frows:
+            cleaned = self.runtime.brain.scrub_pii_for_external_query(str(fr["title"] or ""))
+            if len(cleaned) >= 4:
+                q = f"{cleaned[:72]} update news"
+                if q not in queries:
+                    queries.append(q)
+        signals = self.build_local_interest_signals()
         for s in signals:
             cleaned = self.runtime.brain.scrub_pii_for_external_query(s["term"])
             if len(cleaned) >= 4:
@@ -1596,7 +1707,7 @@ class SatzNewsEngine:
                     queries.append(q)
             if len(queries) >= limit:
                 break
-        return queries
+        return queries[:limit]
 
     # ── M28: Story Clustering, Confidence Scoring & "For You" Matching ──────
     def recluster_and_rank(self) -> int:
@@ -1776,6 +1887,10 @@ class SatzNewsEngine:
                         (cid, a["trust_effective"], a["trust_system"], a["article_id"]),
                     )
             self.runtime.store.db.commit()
+        try:
+            self.sync_followed_stories(synthesize_new=True, allow_llm_in_bg=False)
+        except Exception:
+            pass
         return len(clusters)
 
     def get_stories(
@@ -2333,26 +2448,60 @@ class SatzNewsEngine:
         self,
         topic: str,
         cluster_id: str = "",
+        followed_story_id: str = "",
         limit_families: int = 8,
     ) -> dict[str, Any]:
-        """Finds matching articles across independent news source families for a topic or cluster."""
+        """Finds matching articles across independent news source families for a topic, cluster, or followed story."""
         from src.planck3.web import domain_of
 
         clean_topic = (topic or "").strip()
         cid = (cluster_id or "").strip()
+        fsid = (followed_story_id or "").strip()
         t_target = self._primary_translation_target()
         topic_keywords: list[str] = []
         cluster_headline = ""
         seed_rows: list[dict[str, Any]] = []
 
         with self.runtime.store_lock:
+            if fsid:
+                fsr = self.runtime.store.db.execute(
+                    "SELECT * FROM satz_news_followed_stories WHERE story_id = ?",
+                    (fsid,),
+                ).fetchone()
+                if fsr:
+                    cluster_headline = str(fsr["title"] or "").strip()
+                    if not cid and fsr["seed_cluster_id"]:
+                        cid = str(fsr["seed_cluster_id"])
+                    try:
+                        topic_keywords.extend(str(k).lower() for k in json.loads(fsr["keywords_json"] or "[]"))
+                    except Exception:
+                        pass
+                    urows = self.runtime.store.db.execute(
+                        """
+                        SELECT u.article_id, u.url, u.domain, u.family, u.title, u.snippet, u.language,
+                               u.image_url, u.published_at,
+                               COALESCE(a.body_text, u.snippet) AS body_text,
+                               COALESCE(nt.title_tr, '') AS title_tr,
+                               COALESCE(nt.snippet_tr, '') AS snippet_tr,
+                               COALESCE(nt.body_tr, '') AS body_tr
+                        FROM satz_news_followed_story_updates u
+                        LEFT JOIN satz_news_articles a ON a.article_id = u.article_id
+                        LEFT JOIN satz_news_translations nt ON nt.article_id = u.article_id AND nt.target_lang = ?
+                        WHERE u.story_id = ?
+                        ORDER BY u.trust_effective DESC, u.published_at DESC
+                        """,
+                        (t_target, fsid),
+                    ).fetchall()
+                    for ur in urows:
+                        seed_rows.append(dict(ur))
             if cid:
                 cr = self.runtime.store.db.execute(
                     "SELECT * FROM satz_news_clusters WHERE cluster_id = ?",
                     (cid,),
                 ).fetchone()
                 if cr:
-                    cluster_headline = str(cr["headline"] or "").strip()
+                    if not cluster_headline:
+                        cluster_headline = str(cr["headline"] or "").strip()
                     arows = self.runtime.store.db.execute(
                         """
                         SELECT a.*,
@@ -2366,8 +2515,11 @@ class SatzNewsEngine:
                         """,
                         (t_target, cid),
                     ).fetchall()
+                    seen_seed_urls = {str(r.get("url") or "") for r in seed_rows}
                     for ar in arows:
-                        seed_rows.append(dict(ar))
+                        d_ar = dict(ar)
+                        if str(d_ar.get("url") or "") not in seen_seed_urls:
+                            seed_rows.append(d_ar)
 
             # Expand keywords from matching tracked topic if any
             top_rows = self.runtime.store.db.execute(
@@ -2524,10 +2676,11 @@ class SatzNewsEngine:
         self,
         topic: str = "",
         cluster_id: str = "",
+        followed_story_id: str = "",
         roles_override: dict[str, str] | None = None,
         prior_messages: list[dict[str, Any]] | None = None,
     ):
-        """SSE generator finding relevant articles across sources for a user topic and streaming a comparison."""
+        """SSE generator finding relevant articles across sources for a user topic or followed story and streaming a comparison."""
         from src.planck3.qtype import PENALTY
         from src.planck3.registry import BAND_LABEL, band
 
@@ -2535,7 +2688,12 @@ class SatzNewsEngine:
         topic_label_in = (topic or "").strip() or "current top news"
         yield {"status": f"searching articles on '{topic_label_in[:48]}' across sources...", "phase": "searching"}
 
-        data = self._collect_topic_perspective_articles(topic_label_in, cluster_id=cluster_id, limit_families=8)
+        data = self._collect_topic_perspective_articles(
+            topic_label_in,
+            cluster_id=cluster_id,
+            followed_story_id=followed_story_id,
+            limit_families=8,
+        )
         topic_label = data["topic_label"] or topic_label_in
         fam_articles = data["fam_articles"]
         blind_spots = data["blind_spots"]
@@ -2785,12 +2943,15 @@ class SatzNewsEngine:
     # ── M25: Audited read -> weigh -> write News Chat Pipeline ──────────────
     def _build_reader(self, model_id: str):
         if model_id in ("hertz (reader)", "planck (reader)"):
-            try:
-                return self.runtime.ensure_reader(model_id)
-            except Exception:
-                from src.planck3.readers import HeuristicReader
+            candidates = (model_id, "planck (reader)") if model_id == "hertz (reader)" else (model_id,)
+            for cand in candidates:
+                try:
+                    return self.runtime.ensure_reader(cand)
+                except Exception:
+                    continue
+            from src.planck3.readers import HeuristicReader
 
-                return HeuristicReader()
+            return HeuristicReader()
         if model_id == "heuristic":
             from src.planck3.readers import HeuristicReader
 
@@ -4058,6 +4219,12 @@ class SatzNewsEngine:
             brain_cl_cnt = self.runtime.store.db.execute(
                 "SELECT COUNT(*) FROM satz_news_clusters WHERE is_hidden = 0 AND brain_slug IS NOT NULL AND brain_slug != ''"
             ).fetchone()[0]
+            followed_cnt = self.runtime.store.db.execute(
+                "SELECT COUNT(*) FROM satz_news_followed_stories WHERE status = 'active'"
+            ).fetchone()[0]
+            unread_updates_cnt = self.runtime.store.db.execute(
+                "SELECT COALESCE(SUM(unread_updates), 0) FROM satz_news_followed_stories WHERE status = 'active'"
+            ).fetchone()[0]
         interval_secs = float(getattr(self.runtime, "news_refresh_interval_secs", 3600.0))
         last_sync_at = self._get_meta_float("news_last_sync_at")
         last_brain_sync_at = self._get_meta_float("news_last_brain_sync_at")
@@ -4067,9 +4234,617 @@ class SatzNewsEngine:
             "feeds_enabled": int(feed_cnt or 0),
             "topics": int(topic_cnt or 0),
             "brain_stories": int(brain_cl_cnt or 0),
+            "followed_stories": int(followed_cnt or 0),
+            "unread_story_updates": int(unread_updates_cnt or 0),
             "sync_interval_seconds": interval_secs,
             "last_sync_at": last_sync_at,
             "next_sync_at": (last_sync_at + interval_secs) if last_sync_at > 0 else 0.0,
             "last_brain_sync_at": last_brain_sync_at,
             "syncing": bool(getattr(self.runtime, "news_sync_in_progress", False)),
         }
+
+    # ── Evolving Followed Stories (Pin + Auto-Index Evolution) ───────────────
+    @staticmethod
+    def _extract_story_keywords(title: str, extra_texts: list[str] | None = None, limit: int = 12) -> list[str]:
+        noise = {
+            "reuters", "apnews", "associated", "press", "latest", "update", "updates",
+            "report", "reports", "reporting", "says", "said", "amid", "after", "over",
+            "under", "against", "between", "through", "world", "europe", "european",
+            "today", "yesterday", "week", "month", "year", "news", "story", "stories",
+        }
+        primary = [t for t in _tokenize_title(title) if t not in noise]
+        seen: set[str] = set()
+        out: list[str] = []
+        for tok in primary:
+            if tok not in seen:
+                seen.add(tok)
+                out.append(tok)
+        if extra_texts:
+            freq: dict[str, int] = {}
+            for txt in extra_texts:
+                for tok in _tokenize_title(txt):
+                    if tok not in noise and tok not in seen:
+                        freq[tok] = freq.get(tok, 0) + 1
+            for tok, _cnt in sorted(freq.items(), key=lambda x: (-x[1], x[0])):
+                seen.add(tok)
+                out.append(tok)
+                if len(out) >= limit:
+                    break
+        return out[:limit]
+
+    def _synthesize_followed_story_overview(
+        self,
+        title: str,
+        updates: list[dict[str, Any]],
+        *,
+        allow_llm: bool = True,
+    ) -> tuple[str, str]:
+        if not updates:
+            return (f"Tracking updates for **{title}** across configured sources.", "none")
+
+        # Collapse identical wire copies so overview cites distinct reporting families
+        seen_fam: set[str] = set()
+        fam_updates: list[dict[str, Any]] = []
+        for u in updates:
+            fk = str(u.get("family") or u.get("domain") or "")
+            if fk in seen_fam:
+                continue
+            seen_fam.add(fk)
+            fam_updates.append(u)
+
+        chrono = sorted(fam_updates, key=lambda u: float(u.get("published_at") or 0.0))
+        latest_first = sorted(fam_updates, key=lambda u: (-float(u.get("published_at") or 0.0), -float(u.get("trust_effective") or 0.0)))
+
+        lines: list[str] = [
+            f"**Evolution overview** ({len(updates)} update(s) across {len(fam_updates)} independent source family/families):"
+        ]
+        if len(chrono) == 1:
+            u0 = chrono[0]
+            ts0 = _utc_iso_from_ts(float(u0.get("published_at") or time.time()))
+            t0 = str(u0.get("title_tr") or u0.get("title") or title)
+            s0 = str(u0.get("snippet_tr") or u0.get("snippet") or "")[:200]
+            lines.append(f"- **Initial report ({ts0}, {u0['domain']} · {float(u0['trust_effective']):.1f}/10):** {t0} — {s0}")
+        else:
+            earliest = chrono[0]
+            ts_e = _utc_iso_from_ts(float(earliest.get("published_at") or time.time()))
+            lines.append(
+                f"- **Origin ({ts_e}, {earliest['domain']} · {float(earliest['trust_effective']):.1f}/10):** "
+                f"{str(earliest.get('title_tr') or earliest.get('title') or '')}"
+            )
+            for idx_u, u in enumerate(latest_first[:4], 1):
+                ts_u = _utc_iso_from_ts(float(u.get("published_at") or time.time()))
+                tag = "New update" if u.get("is_new") else "Development"
+                u_t = str(u.get("title_tr") or u.get("title") or "")
+                u_s = str(u.get("snippet_tr") or u.get("snippet") or "")[:180]
+                lines.append(
+                    f"- **{tag} ({ts_u}, {u['domain']} · {float(u['trust_effective']):.1f}/10) [{idx_u}]:** {u_t}"
+                    + (f" — {u_s}" if u_s else "")
+                )
+
+        fb_text = "\n".join(lines)
+        cfg = self.runtime.get_model_management_config()
+        analyzer_m = str(cfg["roles"].get("news_analyzer") or cfg["roles"].get("news_reader") or "template")
+        is_mocked_complete = "_complete_role_prompt" in getattr(self.runtime, "__dict__", {})
+        can_run_llm = (
+            allow_llm
+            and analyzer_m != "template"
+            and (":" in analyzer_m or getattr(self.runtime, "gemma_model", None) is not None or is_mocked_complete)
+        )
+        if not can_run_llm:
+            return (fb_text, "extractive")
+
+        ctx_lines = []
+        for idx_u, u in enumerate(latest_first[:8], 1):
+            ts_u = _utc_iso_from_ts(float(u.get("published_at") or time.time()))
+            utitle = neutralize_brain_directives_in_source(str(u.get("title_tr") or u.get("title") or ""))
+            usnip = neutralize_brain_directives_in_source(str(u.get("snippet_tr") or u.get("snippet") or "")[:360])
+            ctx_lines.append(
+                f"[{idx_u}] ({ts_u}) {u['domain']} (trust={float(u['trust_effective']):.1f}/10): {utitle} | {usnip}"
+            )
+        t_target = self._primary_translation_target()
+        sys_p = (
+            "Synthesize an evolving news story overview strictly from the chronological source updates provided. "
+            "Write 3-5 concise bullets covering: (1) how the story started, (2) what changed in later updates, "
+            "and (3) current status or points of disagreement. Cite source indices like [1], [2]. "
+            f"Never invent facts outside the updates. Write in {t_target}."
+        )
+        usr_p = f"STORY: {title}\nUPDATES (newest first):\n" + "\n".join(ctx_lines)
+        try:
+            cand = _complete_role_fast(
+                self.runtime,
+                analyzer_m,
+                sys_p,
+                usr_p,
+                temperature=0.1,
+                max_tokens=360,
+                thinking_budget=0,
+            ).strip()
+            if cand and len(cand) >= 24:
+                return (cand, analyzer_m)
+        except Exception:
+            pass
+        return (fb_text, "extractive")
+
+    def pin_followed_story(
+        self,
+        *,
+        cluster_id: str = "",
+        title: str = "",
+        url: str = "",
+        article_id: str = "",
+        keywords: list[str] | None = None,
+    ) -> dict[str, Any]:
+        from src.planck3.registry import BAND_LABEL
+
+        now_ts = time.time()
+        cid = (cluster_id or "").strip()
+        raw_title = (title or "").strip()
+        raw_url = (url or "").strip()
+        aid = (article_id or "").strip()
+        t_target = self._primary_translation_target()
+
+        seed_articles: list[dict[str, Any]] = []
+        anchor_domain = ""
+        lead_image = ""
+        conf10 = 6.0
+        band_code = "good"
+        indep = 1
+
+        with self.runtime.store_lock:
+            if cid:
+                cr = self.runtime.store.db.execute(
+                    "SELECT * FROM satz_news_clusters WHERE cluster_id = ?",
+                    (cid,),
+                ).fetchone()
+                if cr:
+                    if not raw_title:
+                        raw_title = str(cr["headline"] or "").strip()
+                    conf10 = float(cr["confidence10"] or 6.0)
+                    band_code = str(cr["band"] or "good")
+                    indep = int(cr["independent_families"] or 1)
+                arows = self.runtime.store.db.execute(
+                    """
+                    SELECT a.*, COALESCE(nt.title_tr, '') AS title_tr, COALESCE(nt.snippet_tr, '') AS snippet_tr
+                    FROM satz_news_articles a
+                    LEFT JOIN satz_news_translations nt ON nt.article_id = a.article_id AND nt.target_lang = ?
+                    WHERE a.cluster_id = ?
+                    ORDER BY a.trust_effective DESC, a.published_at DESC
+                    """,
+                    (t_target, cid),
+                ).fetchall()
+                seed_articles = [dict(r) for r in arows]
+            elif aid or raw_url:
+                ar = self.runtime.store.db.execute(
+                    """
+                    SELECT a.*, COALESCE(nt.title_tr, '') AS title_tr, COALESCE(nt.snippet_tr, '') AS snippet_tr
+                    FROM satz_news_articles a
+                    LEFT JOIN satz_news_translations nt ON nt.article_id = a.article_id AND nt.target_lang = ?
+                    WHERE a.article_id = ? OR a.url = ?
+                    LIMIT 1
+                    """,
+                    (t_target, aid, raw_url),
+                ).fetchone()
+                if ar:
+                    d_ar = dict(ar)
+                    seed_articles = [d_ar]
+                    if not raw_title:
+                        raw_title = str(d_ar.get("title_tr") or d_ar.get("title") or "").strip()
+                    cid = str(d_ar.get("cluster_id") or "")
+
+            if cid:
+                existing = self.runtime.store.db.execute(
+                    "SELECT story_id FROM satz_news_followed_stories WHERE seed_cluster_id = ? AND status = 'active'",
+                    (cid,),
+                ).fetchone()
+                if existing:
+                    st_id = str(existing["story_id"])
+                    stories = self.list_followed_stories()["stories"]
+                    found = next((s for s in stories if s["story_id"] == st_id), None)
+                    return {"ok": True, "already_pinned": True, "story": found}
+
+        if not raw_title:
+            raise ValueError("Cannot pin story without headline/cluster/article")
+
+        # Prefer translated headline if primary language differs cleanly
+        best_title = raw_title
+        if seed_articles and seed_articles[0].get("title_tr"):
+            best_title = str(seed_articles[0]["title_tr"]).strip() or raw_title
+
+        seed_key = cid or raw_url or raw_title.lower()
+        story_id = f"story-{hashlib.sha1(seed_key.encode('utf-8')).hexdigest()[:12]}"
+        extra_snips = [
+            f"{a.get('title_tr') or a.get('title') or ''} {a.get('snippet_tr') or a.get('snippet') or ''}"
+            for a in seed_articles[:5]
+        ]
+        kws = [str(k).strip().lower() for k in (keywords or []) if str(k).strip()] or self._extract_story_keywords(
+            best_title, extra_snips
+        )
+        if raw_title.lower() != best_title.lower():
+            for tk in _tokenize_title(raw_title):
+                if tk not in kws and len(kws) < 16:
+                    kws.append(tk)
+
+        if seed_articles:
+            anchor_domain = str(seed_articles[0].get("domain") or "")
+            lead_image = next((str(a.get("image_url") or "") for a in seed_articles if a.get("image_url")), "")
+
+        max_pub = max((float(a.get("published_at") or now_ts) for a in seed_articles), default=now_ts)
+
+        with self.runtime.store_lock:
+            self.runtime.store.db.execute(
+                """
+                INSERT INTO satz_news_followed_stories
+                (story_id, title, summary_overview, summary_model, keywords_json, seed_cluster_id,
+                 anchor_domain, lead_image, confidence10, band, independent_families,
+                 update_count, unread_updates, status, created_at, updated_at, last_synthesized_at)
+                VALUES (?, ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, 0, 'active', ?, ?, 0.0)
+                ON CONFLICT(story_id) DO UPDATE SET
+                    status = 'active',
+                    keywords_json = excluded.keywords_json,
+                    seed_cluster_id = COALESCE(excluded.seed_cluster_id, satz_news_followed_stories.seed_cluster_id),
+                    updated_at = MAX(satz_news_followed_stories.updated_at, excluded.updated_at)
+                """,
+                (
+                    story_id,
+                    best_title,
+                    json.dumps(kws, ensure_ascii=False),
+                    cid or None,
+                    anchor_domain,
+                    lead_image,
+                    conf10,
+                    band_code,
+                    indep,
+                    len(seed_articles),
+                    now_ts,
+                    max_pub,
+                ),
+            )
+            for sa in seed_articles:
+                dom = str(sa.get("domain") or "")
+                trec = self._trust_for_domain(dom, use_personal=True)
+                tsys = self._trust_for_domain(dom, use_personal=False)
+                self.runtime.store.db.execute(
+                    """
+                    INSERT OR IGNORE INTO satz_news_followed_story_updates
+                    (story_id, article_id, url, domain, family, title, snippet, language, image_url,
+                     published_at, added_at, trust_system, trust_effective, conflict, match_score, is_seed, is_new)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 10.0, 1, 0)
+                    """,
+                    (
+                        story_id,
+                        str(sa.get("article_id") or ""),
+                        str(sa.get("url") or ""),
+                        dom,
+                        str(sa.get("family") or trec["family"] or dom),
+                        str(sa.get("title") or ""),
+                        str(sa.get("snippet") or "")[:450],
+                        str(sa.get("language") or "en"),
+                        str(sa.get("image_url") or ""),
+                        float(sa.get("published_at") or now_ts),
+                        now_ts,
+                        round(float(tsys["system"]), 2),
+                        round(float(trec["effective"]), 2),
+                        int(bool(trec.get("conflict"))),
+                    ),
+                )
+            self.runtime.store.db.commit()
+
+        # Sweep related already-indexed articles across sources and synthesize initial evolving overview
+        self.sync_followed_stories(synthesize_new=True, force_story_id=story_id, allow_llm_in_bg=False)
+        stories = self.list_followed_stories()["stories"]
+        found = next((s for s in stories if s["story_id"] == story_id), None)
+        return {"ok": True, "already_pinned": False, "story": found}
+
+    def unpin_followed_story(self, story_id: str) -> dict[str, Any]:
+        sid = (story_id or "").strip()
+        if not sid:
+            return {"ok": False, "error": "story_id required"}
+        with self.runtime.store_lock:
+            self.runtime.store.db.execute("DELETE FROM satz_news_followed_story_updates WHERE story_id = ?", (sid,))
+            self.runtime.store.db.execute("DELETE FROM satz_news_followed_stories WHERE story_id = ?", (sid,))
+            self.runtime.store.db.commit()
+        return {"ok": True, "unpinned": sid}
+
+    def mark_followed_story_read(self, story_id: str) -> dict[str, Any]:
+        sid = (story_id or "").strip()
+        if not sid:
+            return {"ok": False, "error": "story_id required"}
+        with self.runtime.store_lock:
+            self.runtime.store.db.execute("UPDATE satz_news_followed_story_updates SET is_new = 0 WHERE story_id = ?", (sid,))
+            self.runtime.store.db.execute("UPDATE satz_news_followed_stories SET unread_updates = 0 WHERE story_id = ?", (sid,))
+            self.runtime.store.db.commit()
+        return {"ok": True, "story_id": sid}
+
+    def sync_followed_stories(
+        self,
+        *,
+        synthesize_new: bool = True,
+        force_story_id: str = "",
+        allow_llm_in_bg: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Matches newly indexed articles across all configured/synced sources against pinned stories,
+        records chronological updates, and refreshes each story's evolving overview.
+        """
+        from src.planck3.qtype import PENALTY
+        from src.planck3.registry import band
+
+        now_ts = time.time()
+        t_target = self._primary_translation_target()
+        cutoff = now_ts - 30 * 86400.0
+
+        with self.runtime.store_lock:
+            story_rows = self.runtime.store.db.execute(
+                "SELECT * FROM satz_news_followed_stories WHERE status = 'active' ORDER BY updated_at DESC"
+            ).fetchall()
+            if not story_rows:
+                return {"ok": True, "stories_checked": 0, "new_updates_added": 0}
+            art_rows = self.runtime.store.db.execute(
+                """
+                SELECT a.*, COALESCE(nt.title_tr, '') AS title_tr, COALESCE(nt.snippet_tr, '') AS snippet_tr
+                FROM satz_news_articles a
+                LEFT JOIN satz_news_translations nt ON nt.article_id = a.article_id AND nt.target_lang = ?
+                WHERE a.published_at >= ?
+                ORDER BY a.published_at DESC
+                LIMIT 400
+                """,
+                (t_target, cutoff),
+            ).fetchall()
+
+        noise_toks = {
+            "reuters", "apnews", "latest", "update", "report", "says", "said",
+            "amid", "after", "over", "europe", "european", "today", "news",
+        }
+        articles = [dict(r) for r in art_rows]
+        total_new_added = 0
+        updated_story_ids: list[str] = []
+
+        for sr in story_rows:
+            sid = str(sr["story_id"])
+            if force_story_id and sid != force_story_id:
+                continue
+            seed_cid = str(sr["seed_cluster_id"] or "")
+            try:
+                kws = [str(k).lower() for k in json.loads(sr["keywords_json"] or "[]")]
+            except Exception:
+                kws = []
+            title_anchor_toks = {t for t in _tokenize_title(str(sr["title"] or "")) if t not in noise_toks}
+            kw_toks = set(title_anchor_toks) | {t for t in kws[:8] if t not in noise_toks}
+            if not title_anchor_toks and kw_toks:
+                title_anchor_toks = set(kw_toks)
+
+            with self.runtime.store_lock:
+                existing_rows = self.runtime.store.db.execute(
+                    "SELECT article_id, url FROM satz_news_followed_story_updates WHERE story_id = ?",
+                    (sid,),
+                ).fetchall()
+            seen_aids = {str(er["article_id"]) for er in existing_rows}
+            seen_urls = {str(er["url"]) for er in existing_rows}
+
+            matched_new: list[tuple[float, dict[str, Any]]] = []
+            for art in articles:
+                aid = str(art.get("article_id") or "")
+                aurl = str(art.get("url") or "")
+                if not aid or aid in seen_aids or aurl in seen_urls:
+                    continue
+                same_cluster = bool(seed_cid and str(art.get("cluster_id") or "") == seed_cid)
+                art_title_toks = {
+                    t
+                    for t in _tokenize_title(f"{art.get('title') or ''} {art.get('title_tr') or ''}")
+                    if t not in noise_toks
+                }
+                art_snip_toks = _tokenize_title(f"{art.get('snippet') or ''} {art.get('snippet_tr') or ''}")
+                title_inter = title_anchor_toks & art_title_toks
+                all_inter = kw_toks & (art_title_toks | art_snip_toks)
+                ratio_title = len(title_inter) / max(1, len(title_anchor_toks))
+                score = float(len(title_inter)) * 2.0 + float(len(all_inter)) * 0.75 + (10.0 if same_cluster else 0.0)
+                is_match = (
+                    same_cluster
+                    or len(title_inter) >= 3
+                    or (len(title_inter) >= 2 and (ratio_title >= 0.34 or len(all_inter) >= 3))
+                    or len(all_inter) >= 4
+                )
+                if not is_match:
+                    continue
+                seen_aids.add(aid)
+                seen_urls.add(aurl)
+                matched_new.append((score, art))
+
+            if matched_new:
+                with self.runtime.store_lock:
+                    for sc, art in matched_new:
+                        dom = str(art.get("domain") or "")
+                        trec = self._trust_for_domain(dom, use_personal=True)
+                        tsys = self._trust_for_domain(dom, use_personal=False)
+                        self.runtime.store.db.execute(
+                            """
+                            INSERT OR IGNORE INTO satz_news_followed_story_updates
+                            (story_id, article_id, url, domain, family, title, snippet, language, image_url,
+                             published_at, added_at, trust_system, trust_effective, conflict, match_score, is_seed, is_new)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)
+                            """,
+                            (
+                                sid,
+                                str(art["article_id"]),
+                                str(art["url"]),
+                                dom,
+                                str(art.get("family") or trec["family"] or dom),
+                                str(art.get("title") or ""),
+                                str(art.get("snippet") or "")[:450],
+                                str(art.get("language") or "en"),
+                                str(art.get("image_url") or ""),
+                                float(art.get("published_at") or now_ts),
+                                now_ts,
+                                round(float(tsys["system"]), 2),
+                                round(float(trec["effective"]), 2),
+                                int(bool(trec.get("conflict"))),
+                                round(sc, 2),
+                            ),
+                        )
+                    self.runtime.store.db.commit()
+                total_new_added += len(matched_new)
+                updated_story_ids.append(sid)
+
+            # Recompute aggregate metrics and overview whenever new updates arrived or forced
+            with self.runtime.store_lock:
+                all_upds_rows = self.runtime.store.db.execute(
+                    """
+                    SELECT u.*, COALESCE(nt.title_tr, '') AS title_tr, COALESCE(nt.snippet_tr, '') AS snippet_tr
+                    FROM satz_news_followed_story_updates u
+                    LEFT JOIN satz_news_translations nt ON nt.article_id = u.article_id AND nt.target_lang = ?
+                    WHERE u.story_id = ?
+                    ORDER BY u.published_at DESC
+                    """,
+                    (t_target, sid),
+                ).fetchall()
+            all_upds = [dict(ur) for ur in all_upds_rows]
+            # Refresh effective trust under current profile rules
+            fam_best: dict[str, dict[str, Any]] = {}
+            for u in all_upds:
+                trec = self._trust_for_domain(str(u["domain"]), use_personal=True)
+                u["trust_effective"] = round(float(trec["effective"]), 2)
+                fk = str(u.get("family") or u["domain"])
+                if fk not in fam_best or u["trust_effective"] > fam_best[fk]["trust_effective"]:
+                    fam_best[fk] = u
+            fams_sorted = sorted(fam_best.values(), key=lambda x: -float(x["trust_effective"]))
+            indep_cnt = max(1, len(fams_sorted))
+            top_tr = float(fams_sorted[0]["trust_effective"]) if fams_sorted else float(sr["confidence10"] or 5.0)
+            agree_b = min(2.0, sum(1.0 for f in fams_sorted[1:] if float(f["trust_effective"]) >= 7.0))
+            conf10 = round(max(0.0, min(10.0, top_tr + agree_b - PENALTY["news"])), 1)
+            band_c = band(conf10)
+            unread_cnt = sum(1 for u in all_upds if u.get("is_new"))
+            latest_pub = max((float(u["published_at"]) for u in all_upds), default=float(sr["updated_at"] or now_ts))
+            lead_img = str(sr["lead_image"] or "") or next((str(u.get("image_url") or "") for u in all_upds if u.get("image_url")), "")
+
+            need_synth = bool(matched_new) or not str(sr["summary_overview"] or "").strip() or (force_story_id == sid)
+            new_ov = str(sr["summary_overview"] or "")
+            new_mod = str(sr["summary_model"] or "")
+            new_synth_ts = float(sr["last_synthesized_at"] or 0.0)
+            if need_synth and all_upds:
+                new_ov, new_mod = self._synthesize_followed_story_overview(
+                    str(sr["title"]),
+                    all_upds,
+                    allow_llm=synthesize_new and (allow_llm_in_bg or bool(force_story_id)),
+                )
+                new_synth_ts = now_ts
+
+            with self.runtime.store_lock:
+                self.runtime.store.db.execute(
+                    """
+                    UPDATE satz_news_followed_stories
+                    SET summary_overview = ?, summary_model = ?, lead_image = ?,
+                        confidence10 = ?, band = ?, independent_families = ?,
+                        update_count = ?, unread_updates = ?, updated_at = ?, last_synthesized_at = ?
+                    WHERE story_id = ?
+                    """,
+                    (
+                        new_ov,
+                        new_mod,
+                        lead_img,
+                        conf10,
+                        band_c,
+                        indep_cnt,
+                        len(all_upds),
+                        unread_cnt,
+                        latest_pub,
+                        new_synth_ts,
+                        sid,
+                    ),
+                )
+                self.runtime.store.db.commit()
+
+        return {
+            "ok": True,
+            "stories_checked": len(story_rows),
+            "new_updates_added": total_new_added,
+            "updated_story_ids": updated_story_ids,
+        }
+
+    def list_followed_stories(self, include_updates: bool = True) -> dict[str, Any]:
+        from src.planck3.registry import BAND_LABEL
+
+        t_target = self._primary_translation_target()
+        with self.runtime.store_lock:
+            story_rows = self.runtime.store.db.execute(
+                """
+                SELECT * FROM satz_news_followed_stories
+                WHERE status = 'active'
+                ORDER BY (unread_updates > 0) DESC, updated_at DESC
+                """
+            ).fetchall()
+
+            updates_by_story: dict[str, list[dict[str, Any]]] = {}
+            if include_updates and story_rows:
+                sids = [str(r["story_id"]) for r in story_rows]
+                ph = ",".join("?" for _ in sids)
+                urows = self.runtime.store.db.execute(
+                    f"""
+                    SELECT u.*,
+                           COALESCE(nt.title_tr, '') AS title_tr,
+                           COALESCE(nt.snippet_tr, '') AS snippet_tr,
+                           COALESCE(nt.body_tr, '') AS body_tr,
+                           COALESCE(nt.source_lang, '') AS tr_source_lang,
+                           COALESCE(nt.target_lang, '') AS tr_target_lang
+                    FROM satz_news_followed_story_updates u
+                    LEFT JOIN satz_news_translations nt ON nt.article_id = u.article_id AND nt.target_lang = ?
+                    WHERE u.story_id IN ({ph})
+                    ORDER BY u.published_at DESC
+                    """,
+                    (t_target, *sids),
+                ).fetchall()
+                for ur in urows:
+                    trec = self._trust_for_domain(str(ur["domain"]), use_personal=True)
+                    updates_by_story.setdefault(str(ur["story_id"]), []).append(
+                        {
+                            "article_id": ur["article_id"],
+                            "url": ur["url"],
+                            "domain": ur["domain"],
+                            "family": ur["family"],
+                            "title": ur["title"],
+                            "title_tr": ur["title_tr"] or None,
+                            "snippet": ur["snippet"] or "",
+                            "snippet_tr": ur["snippet_tr"] or None,
+                            "translated_text": ur["body_tr"] or ur["snippet_tr"] or None,
+                            "translation_source_lang": ur["tr_source_lang"] or None,
+                            "translation_target_lang": ur["tr_target_lang"] or None,
+                            "language": ur["language"] or "en",
+                            "image_url": ur["image_url"] or "",
+                            "published_at": float(ur["published_at"] or 0.0),
+                            "added_at": float(ur["added_at"] or 0.0),
+                            "trust_system": float(ur["trust_system"] or 5.0),
+                            "trust_effective": round(float(trec["effective"]), 2),
+                            "conflict": bool(trec.get("conflict")),
+                            "is_seed": bool(ur["is_seed"]),
+                            "is_new": bool(ur["is_new"]),
+                        }
+                    )
+
+        stories_out: list[dict[str, Any]] = []
+        for sr in story_rows:
+            sid = str(sr["story_id"])
+            b_code = str(sr["band"] or "good")
+            upds = updates_by_story.get(sid, [])
+            stories_out.append(
+                {
+                    "story_id": sid,
+                    "title": sr["title"],
+                    "summary_overview": sr["summary_overview"] or "",
+                    "summary_model": sr["summary_model"] or "extractive",
+                    "keywords": json.loads(sr["keywords_json"] or "[]"),
+                    "seed_cluster_id": sr["seed_cluster_id"] or "",
+                    "anchor_domain": sr["anchor_domain"] or "",
+                    "lead_image": sr["lead_image"] or "",
+                    "confidence10": float(sr["confidence10"] or 5.0),
+                    "band": b_code,
+                    "band_label": BAND_LABEL.get(b_code, b_code),
+                    "independent_families": int(sr["independent_families"] or 1),
+                    "update_count": int(sr["update_count"] or len(upds)),
+                    "unread_updates": int(sr["unread_updates"] or 0),
+                    "status": sr["status"] or "active",
+                    "created_at": float(sr["created_at"] or 0.0),
+                    "updated_at": float(sr["updated_at"] or 0.0),
+                    "last_synthesized_at": float(sr["last_synthesized_at"] or 0.0),
+                    "updates": upds[:25],
+                }
+            )
+        return {"ok": True, "stories": stories_out}

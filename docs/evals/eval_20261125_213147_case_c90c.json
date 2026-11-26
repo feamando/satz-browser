@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "eval_id": "eval_20261125_213147_case_c90c",
+  "created_at": "2026-11-25T21:31:47Z",
+  "title": "Captured Eval Case",
+  "notes": "Captured from chat turn failure review.",
+  "model_id": "news-settings-onboard",
+  "mode": {
+    "web_enabled": false,
+    "mail_enabled": false
+  },
+  "user_msg": "",
+  "prior_messages": [],
+  "bad_assistant_answer": "You have **5 active news feed(s)** configured, but **no tracked topics** yet.\n\nWhat topics of interest would you like Satz News to follow? Tell me a few subjects in chat or click suggestions below.",
+  "sources": [],
+  "expected": {
+    "expected_tools": [],
+    "expected_task_agent": "",
+    "require_send_gate": false,
+    "min_citations": 0,
+    "max_flagged_citations": 0,
+    "must_contain": [],
+    "forbidden_substrings": [],
+    "min_answer_chars": 15
+  }
+}

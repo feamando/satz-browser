@@ -1,47 +1,51 @@
-# Satz (`feamando/satz-browser`) — v0.5: Parity, Trust, Agents
+# Satz (`feamando/satz-browser`)
 
-**Satz** is a local-first, terminal-aesthetic AI-native desktop browser where **conversations are the workspace**, **tabs live inside a conversation**, and **Search, Mail, and Brain** are first-class surfaces powered by local models on your machine.
+**Satz** is a local-first AI-native desktop browser where **conversations are the workspace**, **tabs live inside a conversation**, and **Search, Mail, News, Cloud Drives, and Brain** are first-class surfaces powered by local models on your machine (with opt-in BYOK cloud support).
 
-Built on **Tauri v2** (`WebView2` on Windows 11, `WKWebView` on macOS) and powered by local models from [`feamando/sgs`](https://github.com/feamando/sgs) (**Gemma 4 E4B**, **Planck 3.0**, **Hertz 1.2**, **Planck 1.3/1.5** cross-readers, **Planck 13** semantic encoder, and a local **DistilBERT** 4-label mail classifier), Satz turns every browsed page, synced email, and stored Brain entity into a checked source that you can query, compare, watch, and cite inline with `[1]`, `[2]` and `[B1]`, `[B2]`.
+Built on **Tauri v2** (`WebView2` on Windows 11, `WKWebView` on macOS) with a modular **TypeScript** frontend, **Rust** backend, and local **Python** AI sidecar bundling **Planck 3.0** (`planck_vendor/` + sharded `planck13` encoder and `xreader_planck` reader weights), **Gemma / Qwen / HuggingFace** local models (`satz_local_models.py`), and a local **DistilBERT** 4-label mail classifier, Satz turns browsed pages, synced emails, news clusters, cloud drive metadata, and Brain entities into grounded sources cited inline with `[1]`, `[2]` and `[B1]`, `[B2]`.
 
-![Satz Terminal Shell](docs/screenshots/m1.png)
+![Satz Shell](docs/screenshots/m1.png)
 
 ---
 
-## What Changed in v0.5 (`docs/PLAN_v0.5.md`)
+## Core Capabilities
 
-1. **Platform Parity & Model Doctor (M16):**
-   - **Device Selection (`cuda > mps > cpu`) & Streaming Heartbeat:** `ensure_gemma()` automatically selects `cuda` (Windows/Linux NVIDIA GPU), `mps` (macOS Apple Silicon `bfloat16`), or `cpu`, displaying `gemma [warm · cuda|mps|cpu]` in the status bar. `/chat` emits an SSE heartbeat every `2 s` during prompt prefill (`warming up gemma · Ns`) and aborts cleanly after `30 s` of token silence (`gemma stopped responding after 30 s.`).
-   - **Native macOS `WKWebView` DOM Capture (`objc2-web-kit`):** Child tabs on macOS capture live rendered DOM (`visible_text`, `html`, `findings`) via `WKWebView.evaluateJavaScript:completionHandler:` in Rust (`src-tauri/src/webview_manager.rs`) with no page-reachable bridge.
-   - **Toolbar Bounds, Honest User-Agent & Cross-Platform Settings:** Child webview bounds enforce `y = max(rect.top, toolbar_bottom)` so native webviews never cover the site toolbar (`<-`, `->`, `[reload]`, address bar, `[codes (N)]`, `[fill login]`, `[watch]`, `[chat rail Mod+J]`). Child webviews send a platform-appropriate modern User-Agent (`Safari/605.1.15 Satz/0.5` on macOS; `Chrome/131.0.0.0 Safari/537.36 Satz/0.5` on Windows) and normalize path separators across OSes (`normalize_cross_platform_path`).
-   - **`GET /doctor` & Settings Model Doctor:** Reports per-role readiness (`ready | missing | cpu_only`), device, checkpoint path, and a one-line fix for `gemma-4-e4b`, `planck3 (web)`, `hertz (reader)`, `planck (reader)`, `planck13` (Brain encoder), and `distilbert-mail`.
+1. **Conversations-as-Tabs Browser Shell & Design System**
+   - **Unified Workspace:** Conversations replace scattered tab bars; open web tabs, `satzmail://` emails, compose drafts, and Compare View (`Mod+M`) live inside each conversation with a collapsible AI agent side rail (`Mod+J`).
+   - **Design System (`src/design-system/`):** Built on tokenized light, dark, and system themes (`Besley`, `Inter`, `JetBrains Mono`) with switchable `floating` and `flush` layouts (`docs/design/DESIGN_SYSTEM.md`).
+   - **Command Bar (`Mod+K`) & Start Screen:** Ranks navigation (`dw.com`), page Q&A, mail/brain search, and workspace commands with explicit privacy disclosures before execution.
+   - **Agents & Send Gates:** Typed **Task Cards** with `[stop]` cancellation, **Comparer** agent (cited 2–4 tab comparison tables), **Watcher** agent (value/price monitoring surfaced in Home digest and rail badges), and single-use `confirm_token` send gates (`[confirm] [cancel]`) before any state-changing action.
 
-2. **Honest Sources & Shell Polish (M17):**
-   - **Honest Capture Accounting:** `ingest_page` records `capture_mode: "dom" | "fetch" | "timeout"`. Tabs with `0` captured chars are excluded from the model prompt and shown as `empty [recapture]` in the context bar; public-fetch fallbacks show `public fetch`. When all open tabs are empty and `+ web` is off, Satz shows an inline recovery banner (`[recapture]`, `[turn on + web]`, `[ask without pages]`). `check_citations` flags any citation to a 0-char source as `[unsourced]`.
-   - **Plain-English Errors, Overlays & Inline Unlock (+ Touch ID):** Raw Python tracebacks are mapped to one-line human summaries with `[retry]`, `[use planck instead]`, and `[debug]`. Child webviews hide whenever Settings, Brain, or the Command Bar overlay is open. Locked views (Mail, Brain) unlock in place with a 6-digit PIN or macOS Touch ID / OS keychain (`POST /profile/unlock_keychain`). First-run migration (`db_version = 2`) removes legacy seed conversations.
+2. **Encrypted Profiles, Vault & Offline Profile Portability**
+   - **Hardware-Bound Local Vaults (`vault.enc`):** Protected by `AES-256-GCM` with `HKDF-SHA256(Argon2id(6-digit PIN, salt16) || OS_keychain_device_key)`, exponential wrong-PIN lockout (`30s` to `1h`), 30-minute inactivity autolock, and optional OS keychain / macOS Touch ID unlock (`POST /profile/unlock_keychain`).
+   - **Strictly Profile-Scoped Storage:** Each unlocked profile isolates `profiles/<id>/planck_store.sqlite`, `mail.sqlite`, `drives.sqlite`, `mail_model/`, and `brain/`. When locked, the Planck store is `:memory:` and `SatzBrain` refuses reads and writes.
+   - **Offline Profile Export & Upload (`satz_profile_bundle.py`):**
+     - **Export** (Settings -> Profiles) generates an encrypted `.satzprofile` backup sealed solely with the profile's 6-digit PIN (`Argon2id` + `HKDF-SHA256` + `AES-256-GCM` over zlib-compressed JSON) without exposing plaintext metadata or depending on the source machine's OS keychain.
+     - **Upload profile** (available from the Unlock Modal, Start card, inline Mail/News/Drive gates, and Settings -> Profiles) decrypts the bundle with its PIN and installs it as a local profile—excluding bulky re-fetchable caches (mail HTML/attachments, drive item trees, cached news articles) so bundles remain compact.
+     - **UUID Most-Recently-Updated Merge:** Distinct profile UUIDs install alongside existing profiles (deduplicating directory slugs automatically). Matching UUIDs merge vault credentials/tombstones, `SatzBrain` Markdown entities & `registry.yaml`, trust overrides, news topics/feeds, providers, and mail/drive account configs by taking whichever edit is more recent (prompting for the local PIN if the two machines used different PINs).
 
-3. **Brain & Profile Integrity (M18):**
-   - **Profile-Scoped Planck Store & Migration:** Each unlocked profile owns `profiles/<id>/planck_store.sqlite` (and `:memory:` when locked). Existing shared `planck_store.sqlite` files are backed up to `planck_store.sqlite.bak` and migrated automatically on first unlock.
-   - **Entity Quality Guards, Clean Bookmark Entities & Cascading Deletes:** `is_valid_entity_name` rejects conversational artefacts (`Here are`, `[bookmark]`, URLs, sentences `> 60` chars, stopwords). Bookmarks strip `[bookmark]` prefixes and extract clean subject entities. `/digest` deduplicates to at most 1 item per URL and 2 per domain (`changed:` and `watch:` items replace older entries for the same URL). Deleting a conversation, passage, or entity cascades cleanly across `passages`, `edges`, and `queries`.
+3. **SatzBrain (`Mod+B`) & 30% Trust Rules**
+   - **Human-Readable Memory Graph:** Stores entities (`person`, `company`, `project`, `story`, `claim`, `topic`, `source`, etc.), alias indexes, and pipe-delimited `BRAIN.md` summaries under `profiles/<id>/brain/`.
+   - **PII Scrubber & Honest Citations:** Automatically strips private Brain names/emails/booking tokens before external web queries (`scrub_pii_for_external_query`). Empty (`0 char`) captures are excluded and checked via `check_citations` against `[n]` web/mail sources and `[Bn]` Brain entities.
+   - **Domain Trust Sliders:** Blends system trust and personal trust with a hard 30% personal cap (`0.7 * system + 0.3 * personal`), highlighting divergence badges and offering a counterfactual system-only view.
 
-4. **Mail Cold Start & Actionable Extraction (M19):**
-   - **Cold-Start Heuristic & Gemma JSON Confidence:** Before DistilBERT reaches 50 labels, a deterministic header/domain/keyword classifier (`List-Id`, `List-Unsubscribe`, `Auto-Submitted`, `Precedence: bulk`, order/shipping subjects, platform notifications) routes obvious pings, orders, and promotions immediately and asks Gemma for `{label, confidence}` on ambiguous messages.
-   - **Relabel Re-Extraction, 5-Card Onboarding, Order Cards & `[new]` Recipient Badge:** Moving a message with keys `1`–`4` (`record_user_correction`) re-runs structured extraction (`order_info` / `promo_info` / `ping_info`) and updates the Brain entity. Cold-start Mail surfaces a 5-card inline onboarding strip, renders rich order cards (merchant, status badge, carrier, tracking link, delivery date, items), flags never-before-emailed recipients with `[new]` in the send gate, and surfaces `[codes (N)]` on matching shopping tabs.
+4. **Mail & Local Classifier (`satz_mail.py`)**
+   - **Pinned `conv-mail` Workspace:** Syncs IMAP (`BODY.PEEK`) and POP3 (forced leave-on-server), classifying into `Inbox`, `Pings`, `Orders`, and `Promos` via cold-start heuristics + DistilBERT + Gemma confidence fallback, retraining on user corrections (`1`–`4`).
+   - **Structured Extraction:** Extracts tracking/order cards, shipping status, unsubscribe targets (`satz_unsubscribe`), and promotional/verification codes (`[codes (N)]` in shopping tabs).
 
-5. **A Brain You Can Use (`Mod+B`) (M20):**
-   - **Dedicated Brain View (`Mod+B`) vs Settings:** The left rail footer splits `[brain · Mod+B]` (`renderBrainView`) and `[settings]` (`renderKnowledgeView`).
-   - **Unified Brain Search (`/brain/search`):** Searches entities, passages, and mail in one box using `planck13` semantic embeddings + lexical/FTS5 ranking.
-   - **Domain Trust Sliders with 30% Hard Cap:** Every domain row in Brain displays its hand-scored system trust (`0..10`), category, and reason (`why`), alongside a personal trust slider (`0..10`) capped at **30% influence** (`effective = 0.7 * system + 0.3 * yours`), a conflict badge when `|personal - system| >= 3.0`, and `[reset]`.
-   - **`"this week"` Timeline & `[B1]` Memory Citations:** Brain shows a chronological `"this week"` timeline of read pages and received mail. Relevant Brain entities are injected into chat context as `[B1]`, `[B2]`, verified by `check_citations`, and rendered as clickable `[B1] <Entity Name>` chips that open the entity card in Brain.
+5. **Satz News, Followed Stories & Perspectives (`satz_news.py`)**
+   - **Five News Surfaces (`conv-news`):** `Chat`, `Top stories`, `Stories`, `Perspectives`, and `Settings`.
+   - **Conditional RSS & Wire Collapsing:** Polls RSS/Atom feeds with `ETag`/`If-Modified-Since`, clusters articles, collapses syndicated wire stories (`AP`, `Reuters`, `AFP`, `DPA`, `DW`), and scores with your 30%-capped trust rules.
+   - **Pinned Evolving Stories:** Pin any cluster to **Stories** so future auto-indexed articles append to its timeline and refresh a multi-source evolution overview.
+   - **Streaming Perspectives & Conversational News Settings:** Select tracked topics, recent clusters, or pinned stories in **Perspectives** for streamed cross-source comparisons, or manage feeds, topics, and trust overrides via natural chat or manual accordions in News Settings.
 
-6. **One Command Bar (`Mod+K`) (M21):**
-   - **Unified Start Screen & `Mod+K` Modal (`rankCommandBarRoutes` / `GET /command/route`):** Replaces the separate rail filter input and unifies the Start screen input and `Mod+K` overlay into one Command Bar.
-   - **Ranked Routes & Explicit Privacy Disclosures:** Typing any line (`dw.com`, `dw.com what are the top stories today?`, `what is the capital of Portugal?`, `mail: Jordan Reyes`, `brain: zalando`, `lock` / `compare` / `bookmark` / `new conversation`) lists ranked routes before `Enter` with `ArrowUp`/`ArrowDown` navigation and an explicit privacy disclosure on every route (`[local only]`, `[loads <domain>]`, `[loads <domain> · local model]`, or `[web search · duckduckgo]`).
+6. **Zero-Disk Cloud Drives (`satz_drives.py`)**
+   - Connects Google Drive (`satz_google_auth.py`) and Microsoft OneDrive in zero-disk metadata/index mode, syncing searchable summaries directly into `drives.sqlite` and Brain.
 
-7. **First Agents: Task Cards, Comparer, Watcher (M22):**
-   - **Task Cards & Single-Use Send-Gate Tokens:** Every agent task is a typed object (`{id, conversation_id, agent, goal, steps[], status, started_at, stop_token, result_md}`) rendered in chat with live steps, `[stop]`, and a final result block. Any step that would commit (`send_gate`) requires user confirmation (`[confirm] [cancel]`) with a single-use `confirm_token`.
-   - **Comparer Agent (`POST /agent/compare`):** In Compare View (`[compare these]`) or chat (`compare these`), the Comparer reads 2–4 sources, extracts `Price`, `Key specs`, `Availability`, and `Source`, and pins a Markdown comparison table where every cell cites its source `[1]`..`[4]` (`0 uncited cells`).
-   - **Watcher Agent (`POST /watch/add`, `POST /watch/check`):** Any open page or assistant answer can become a watch (`[watch]`), stored in `satz_watches` and the Planck `watches` table. Value/price changes surface at the top of `For you` (`/digest`) as `watch: <title> (<old> -> <new>)` and display a `[watch !]` badge on the conversation in the left rail.
+7. **Conversational Settings, App-Wide Localization & Self-Contained Packaging**
+   - **Settings (`conv-settings`):** Switch seamlessly between **Chat** (powered by the declarative `satz_tools/` registry with RAM-only file staging and secret redaction) and **Manual settings** accordions (Profiles, Vault, Cloud/Local models & Model Doctor, Providers, Mail, Drives, Indexing, Appearance & Language).
+   - **App-Wide i18n & Translation (`satz_i18n.py`, `satz_translate.py`):** Translates all UI strings across profiles (`scripts/i18n_extract.mjs`) using your selected local/cloud model, supports RTL layout mirroring, and translates Home digests, News stories, Emails, and open tabs on demand.
+   - **Bundled Sidecar & Auto-Updater (`src/updater.ts`, `scripts/prepare_sidecar_bundle.py`):** Stages shipped Planck weights and Python runtime for standalone Tauri bundles (`src-tauri/tauri.bundle.conf.json`) with signed GitHub Release update checks via `@tauri-apps/plugin-updater`.
 
 ---
 
@@ -50,32 +54,33 @@ Built on **Tauri v2** (`WebView2` on Windows 11, `WKWebView` on macOS) and power
 ### Global Browser Shortcuts
 | Shortcut | Action |
 | :--- | :--- |
-| `Mod+K` | Open Command Bar (route URL, URL+question, question, mail, brain, or command) |
-| `Mod+B` | Open Satz Brain view (search entities/passages/mail, entity cards, this week, trust sliders) |
-| `Mod+N` | New conversation (Start Screen) |
-| `Mod+T` | New site tab in the active conversation (focuses address bar) |
-| `Mod+W` | Close active site/email/compose tab (`chat` tab cannot be closed) |
-| `Mod+1` | Switch to `[1 chat]` tab |
-| `Mod+2` .. `Mod+9` | Switch to tab `2` .. `9` |
-| `Mod+L` | Focus address bar of the current site tab |
-| `Mod+Shift+L` | Fill login credentials from unlocked vault on exact host match (never auto-submits) |
-| `Mod+J` | Toggle collapsible chat/agent rail on a site or email tab |
-| `Mod+M` | Toggle Compare View (tile 2 to 4 selected tabs) |
-| `Mod+D` | Bookmark the current page (hooks up 30-min background indexing) |
+| `Mod+K` | Open Command Bar (route URL, Q&A, mail, brain, or workspace command) |
+| `Mod+B` | Open Satz Brain view (`Mod+B`: search entities/passages/mail, timeline, trust sliders) |
+| `Mod+Shift+H` | Jump to Home / Start screen |
+| `Mod+N` | New conversation |
+| `Mod+T` | New site tab in active conversation (focuses address bar) |
+| `Mod+W` | Close active site, email, or compose tab (`chat` tab stays pinned) |
+| `Mod+Shift+W` | Archive active conversation |
+| `Mod+1` .. `Mod+9` | Switch to tab `1` .. `9` |
+| `Mod+L` | Focus address bar of the active site tab |
+| `Mod+Shift+L` | Fill credentials from unlocked vault on exact host match (never auto-submits) |
+| `Mod+J` | Toggle collapsible assistant/context side rail |
+| `Mod+M` | Toggle Compare View (tile 2–4 tabs) |
+| `Mod+D` | Bookmark active page (queues background indexing) |
 | `Mod+F` | Native find-in-page |
-| `Esc` | Close Command Bar / Brain / Settings overlay or exit Compare View |
+| `Esc` | Close active overlay or exit Compare View |
 
-### Mail Lane & Message Shortcuts (when no text input is focused)
+### Mail Lane & Message Shortcuts (when no input is focused)
 | Shortcut | Action |
 | :--- | :--- |
 | `j` / `k` | Move selection down / up in the active mail lane |
-| `Enter` | Open the selected email in a `satzmail://` tab |
-| `r` | Reply to the active or selected email in a `compose` tab |
+| `Enter` | Open selected email in a `satzmail://` tab |
+| `r` | Reply in a `compose` tab |
 | `c` | Open a new blank `compose` tab |
-| `e` | Hide (archive locally in `mail.sqlite`; never deletes on server) |
-| `1` / `2` / `3` / `4` | Move message to `1 inbox` (`email`), `2 pings`, `3 orders` (`information`), or `4 promos` (records correction + re-runs extraction) |
+| `e` | Archive locally in `mail.sqlite` (never deletes from server) |
+| `1` / `2` / `3` / `4` | Relabel message to `Inbox`, `Pings`, `Orders`, or `Promos` |
 | `/` | Focus FTS5 mail search bar |
-| `Mod+Enter` | Prepare send confirmation (`[confirm] [cancel]`) in a `compose` tab |
+| `Mod+Enter` | Prepare send confirmation gate (`[confirm] [cancel]`) in `compose` |
 
 ---
 
@@ -83,12 +88,11 @@ Built on **Tauri v2** (`WebView2` on Windows 11, `WKWebView` on macOS) and power
 
 | Boundary | Enforcement |
 | :--- | :--- |
-| **Sidecar HTTP (`127.0.0.1:8020`)** | Per-launch 32-byte CSPRNG token (`X-Satz-Token`), `Host` allowlist (`127.0.0.1:<port>`, `localhost:<port>`), and strict `Origin` allowlist (`http://tauri.localhost`, `tauri://localhost`, `http://localhost:1420`). |
-| **Password Vault (`vault.enc`)** | `AES-256-GCM` with `HKDF-SHA256(Argon2id(PIN, salt16) || OS_keychain_device_key)`. Exponential lockout (`30s` -> `1h`) after 5 failed PIN attempts; 30-minute inactivity autolock; optional macOS Touch ID / OS keychain unlock. |
-| **Profile-Scoped Brain & Store** | Each profile isolates `profiles/<id>/planck_store.sqlite`, `profiles/<id>/mail.sqlite`, and `profiles/<id>/brain/`. When locked, the Planck store is `:memory:` and `SatzBrain` refuses reads and writes. |
-| **30% Personal Trust Cap** | Domain trust blends `0.7 * system + 0.3 * personal` (`Store.set_personal`). Personal trust can never override more than 30% of the hand-scored system trust registry. |
-| **Honest Citations (`[n]` & `[Bn]`)** | Empty (`0 char`) tabs are excluded from prompts and cannot be cited (`[unsourced]`). `check_citations` verifies numbers, dates, and capitalized names against both `[n]` page/mail sources and `[Bn]` Brain entities. |
-| **Read / Act Boundary & Send Gates** | Page and email text never authorizes actions. `<brain_store>` in sources is neutralized (`‹brain_store›`). Agent Task Cards (`POST /task/confirm`) and outgoing SMTP mail (`POST /mail/send`) require an explicit user click on `[confirm]` with a single-use `confirm_token`. |
+| **Local Sidecar (`127.0.0.1:8020`)** | Per-launch CSPRNG `X-Satz-Token`, `Host` allowlist (`127.0.0.1:<port>`, `localhost:<port>`), and strict `Origin` allowlist (`tauri://localhost`, `http://tauri.localhost`, `http://localhost:1420`). |
+| **Vault (`vault.enc`) & Export (`.satzprofile`)** | Local vaults bind PIN to OS keychain `device_key`; `.satzprofile` exports encrypt with standalone PIN-derived Argon2id + HKDF (`info=b"satz-profile-export-v1"`) + AES-256-GCM without storing plaintext headers or secrets on disk. |
+| **Zero-Secret LLM & Staging Boundary** | Staging files (`POST /settings/stage_file`) strips/holds raw credentials in RAM only, wipes on lock/switch, and never echoes secrets into `satz.db`, HTTP error logs, or LLM prompts. |
+| **30% Personal Trust Cap** | Domain trust blends `0.7 * system + 0.3 * personal`, preserving counterfactual system-only results and conflict indicators. |
+| **Read / Act Separation** | Page, email, and drive text never authorizes mutations. `<brain_store>` directives in untrusted text are neutralized, and mutations/emails/unsubscribe actions require single-use `confirm_token` confirmation. |
 
 ---
 
@@ -96,57 +100,91 @@ Built on **Tauri v2** (`WebView2` on Windows 11, `WKWebView` on macOS) and power
 
 ```text
 satz-browser/
-├── .gemini/
-│   └── antigravity.md                # Workspace rules & monochrome terminal constraints
+├── .github/workflows/release.yml     # Cross-platform signed preview release workflow (Windows & macOS)
 ├── docs/
-│   ├── PLAN_v0.5.md                  # Full Satz v0.5 specification (M16-M23)
-│   ├── NOTES_v0.5.md                 # v0.5 milestone measurements, latency logs & gate summary
-│   ├── PLATFORMS.md                  # macOS (WKWebView / MPS) & Windows (WebView2 / CUDA) parity matrix
-│   ├── REVIEW_v0.4_macos.md          # macOS v0.4 dogfood review that motivated v0.5
-│   └── smoke/                        # 12-email local IMAP fixture + per-milestone smoke artifacts (m16..m23)
-├── public/
-│   └── fonts/                        # Bundled JetBrains Mono (Regular & Bold woff2)
+│   ├── PLAN_v0.3_working_browser.md .. PLAN_v0.9_localization.md
+│   ├── NOTES_v0.3.md .. NOTES_v0.9.md
+│   ├── design/DESIGN_SYSTEM.md       # UI tokens, typography, layout & hygiene rules
+│   ├── evals/                        # Replayable harness & prompt-injection evals
+│   └── smoke/                        # Fixtures & verification captures
+├── scripts/
+│   ├── prepare_sidecar_bundle.py     # Stages sidecar, shipped Planck models & Python runtime for release bundles
+│   ├── build_preview.ps1             # Local Windows preview installer build script
+│   ├── build_preview.sh              # Local macOS preview installer build script
+│   ├── i18n_extract.mjs              # TypeScript AST i18n catalog & key audit
+│   └── build_components_gallery.py   # Design system component gallery builder
 ├── sidecar/
-│   ├── satz_models.py                # Local model HTTP sidecar (/doctor, /chat, /answer, /read, /brain/search, /command/route, /agent/compare, /watch/*, /task/*)
-│   ├── satz_brain.py                 # Profile-scoped Brain entity graph, guards, [B1] citations, shared planck13 encoder
-│   ├── satz_passwords.py             # Argon2id + OS keychain + AES-256-GCM vault.enc & per-profile store paths
-│   ├── satz_mail.py                  # Mail accounts, IMAP PEEK / POP3 UIDL sync, lanes, order cards, [new] recipient check
-│   ├── satz_mail_pipeline.py         # EN/DE splitter, cold-start heuristic, DistilBERT + Gemma JSON confidence, relabel re-extractor
-│   └── test_m16.py .. test_m22.py    # Comprehensive unit & integration test suites (M5-M22)
-├── src/                              # Modular TypeScript frontend
-│   ├── main.ts                       # App shell orchestration, Brain/Settings/Compare/Site/Mail viewports, Comparer & Watcher actions
-│   ├── start.ts                      # Unified Start screen & Mod+K Command Bar with ranked routes and privacy disclosures
-│   ├── knowledge.ts                  # Split Brain view (Mod+B: search, cards, this week, trust sliders) & Settings view
-│   ├── chat.ts                       # Chat thread, Task Cards, Markdown tables, [n] & [Bn] citations, [watch] & [compare these]
-│   ├── mail.ts                       # Mail lanes, 5-card onboarding, order cards, inline unlock, compose send gate
-│   ├── rail.ts                       # Left rail ([> command bar], pinned Mail, [watch !] badges, bookmarks, [brain] & [settings])
-│   ├── sources.ts                    # Context panel (empty [recapture], public fetch, chars_sent/captured)
-│   ├── api.ts                        # Tauri invoke + authenticated sidecar HTTP/SSE client
-│   ├── state.ts                      # App state, URL/command route classifier, plain error mapper
-│   ├── keys.ts                       # Cross-platform Mod keyboard shortcuts (Mod+K, Mod+B, Mod+J, Mod+M, Mod+Shift+L)
-│   ├── status.ts                     # Bottom status line (gemma [warm · device], mail progress, [N errors] overlay)
+│   ├── satz_models.py                # Sidecar HTTP/SSE server, routing, model runtime & chat loop
+│   ├── satz_passwords.py             # Profile registry, OS keychain + PIN vault.enc & portable bundle crypto
+│   ├── satz_profile_bundle.py        # Offline .satzprofile export/import & UUID timestamp merge
+│   ├── satz_brain.py                 # Profile-scoped SatzBrain graph, PII scrubber & [Bn] citations
+│   ├── satz_news.py                  # News RSS poller, wire collapsing, followed stories & perspectives
+│   ├── satz_mail.py                  # IMAP/POP3 sync, FTS5 search, lanes & SMTP send gate
+│   ├── satz_mail_pipeline.py         # EN/DE splitter, cold-start rules, DistilBERT + Gemma classifier & extractors
+│   ├── satz_drives.py                # Google Drive & OneDrive zero-disk metadata indexer
+│   ├── satz_local_models.py          # Bundled Planck discovery, HF catalog/downloader & local model config
+│   ├── satz_google_auth.py           # Loopback OAuth flow & credential storage
+│   ├── satz_providers.py             # Configurable search/commerce/maps providers
+│   ├── satz_skills.py                # Behavior miner, domain recipes & skill DAG runner
+│   ├── satz_i18n.py                  # App-wide UI string translation & custom language packs
+│   ├── satz_translate.py             # Persistent article/mail/tab content translation cache
+│   ├── satz_web_harness.py           # Bounded multi-step web + tool search harness
+│   ├── satz_evals.py                 # Automated red-team & regression eval runner
+│   ├── satz_tools/                   # Declarative Settings & News Settings tool registry
+│   ├── planck_vendor/                # Vendored Planck 3.0 core primitives
+│   ├── models/planck/                # Sharded shipped Planck weights (planck13 & xreader_planck) + tokenizer
+│   └── test_*.py                     # Sidecar unit & integration suites
+├── src/
+│   ├── main.ts                       # Workspace shell orchestration & region bindings
+│   ├── api.ts                        # Tauri IPC + authenticated HTTP/SSE sidecar client
+│   ├── state.ts                      # Frontend state & URL/command routing
 │   ├── types.ts                      # Shared TypeScript interfaces
-│   └── style.css                     # Strict monochrome terminal CSS (#000000..#e8e8e8, border-radius: 0)
-└── src-tauri/                        # Rust + Tauri v2 backend
-    └── src/
-        ├── db.rs                     # SQLite schema + v2 clean-first-run migration
-        ├── webview_manager.rs        # Per-tab WebView2 / WKWebView (objc2) capture, toolbar bounds guard, modern UA
-        ├── lib.rs                    # Cross-platform settings defaults, CSPRNG token, satzmail:// handler, sidecar lifecycle
-        └── main.rs                   # Application entry point
+│   ├── start.ts                      # Home screen, For You digest, Command Bar & Unlock modal
+│   ├── profile_prompt.ts             # Shared inline profile gate & offline bundle upload UI
+│   ├── knowledge.ts                  # Split Brain view (Mod+B) & Manual Settings accordions
+│   ├── chat.ts                       # Chat thread, Task Cards, UI cards & citations
+│   ├── mail.ts                       # Mail lanes, order cards & compose view
+│   ├── news.ts                       # News lanes, pinned Stories, Perspectives & News settings
+│   ├── drives.ts                     # Cloud Drives connection & status panel
+│   ├── sources.ts                    # Page/source context side rail
+│   ├── tabs.ts                       # Tab strip, navigation bar & mode switches
+│   ├── rail.ts                       # Left workspace rail, pinned apps & profile menu
+│   ├── status.ts                     # Status telemetry popover & error log
+│   ├── keys.ts                       # Cross-platform keyboard shortcuts
+│   ├── updater.ts                    # Tauri updater check & install helper
+│   ├── favicon.ts                    # Safe favicon resolution helpers
+│   ├── i18n/                         # Canonical EN_CATALOG & runtime localization loader
+│   └── design-system/                # tokens.css, components.css, icons.ts, brand.ts
+└── src-tauri/
+    ├── tauri.conf.json               # Primary Tauri v2 configuration & updater endpoints
+    ├── tauri.bundle.conf.json        # Release resource bundling overlay
+    ├── capabilities/                 # Tauri ACL capability permissions
+    └── src/                          # Rust core (db.rs, webview_manager.rs, lib.rs, main.rs)
 ```
 
 ---
 
-## Building, Testing & Running
+## Building, Testing & Packaging
 
 ```powershell
-# 1. Frontend TypeScript + Vite build
+# 1. Frontend TypeScript check + Vite build + i18n AST check
+npx tsc --noEmit
 npm run build
+node scripts/i18n_extract.mjs --check
 
-# 2. Rust compile & unit tests (12 tests: cross-platform settings, toolbar bounds, v2 migration, LRU cap, capture deadline)
+# 2. Rust check & unit tests (16 tests)
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
 
-# 3. Python sidecar pytest suite (29 test modules/cases covering M5 through M22)
-..\sgs\.venv\Scripts\python.exe -m pytest sidecar -q
+# 3. Release binary build (after stopping any running satz-browser.exe)
+cargo build --release --manifest-path src-tauri/Cargo.toml
+
+# 4. Python sidecar tests (run suites sequentially on Windows)
+..\sgs\.venv\Scripts\python.exe -m pytest sidecar/test_profile_transfer.py -v
+..\sgs\.venv\Scripts\python.exe -m pytest sidecar/test_settings_tools.py -q
+..\sgs\.venv\Scripts\python.exe -m pytest sidecar/test_web_harness.py -q
+
+# 5. Stage sidecar + runtime resources & build preview installer
+..\sgs\.venv\Scripts\python.exe scripts/prepare_sidecar_bundle.py
+# Or run .\scripts\build_preview.ps1 (Windows) / ./scripts/build_preview.sh (macOS)
 ```

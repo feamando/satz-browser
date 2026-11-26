@@ -4446,38 +4446,63 @@ def stream_local_gemma_chat(
             if proc is None:
                 from transformers import AutoProcessor
 
-                proc = AutoProcessor.from_pretrained(str(gemma_dir))
-                harness.runtime.gemma_processor = proc
-            sys_txt = ""
-            user_txt = ""
-            for cm in local_chat_msgs:
-                if cm.get("role") == "system":
-                    sys_txt = str(cm.get("content") or "")
-                elif cm.get("role") == "user":
-                    user_txt = str(cm.get("content") or "")
-            user_parts: list[dict[str, Any]] = [
-                {"type": "image", "image": img["pil_image"]}
-                for img in active_images
-            ]
-            user_parts.append({"type": "text", "text": user_txt})
-            mm_msgs: list[dict[str, Any]] = []
-            if sys_txt:
-                mm_msgs.append({"role": "system", "content": [{"type": "text", "text": sys_txt}]})
-            mm_msgs.append({"role": "user", "content": user_parts})
-            inputs = proc.apply_chat_template(
-                mm_msgs,
-                add_generation_prompt=True,
-                tokenize=True,
-                return_dict=True,
-                return_tensors="pt",
-            ).to(model.device)
+                try:
+                    proc = AutoProcessor.from_pretrained(str(gemma_dir))
+                    harness.runtime.gemma_processor = proc
+                except Exception:
+                    proc = None
+            if proc is not None:
+                sys_txt = ""
+                user_txt = ""
+                for cm in local_chat_msgs:
+                    if cm.get("role") == "system":
+                        sys_txt = str(cm.get("content") or "")
+                    elif cm.get("role") == "user":
+                        user_txt = str(cm.get("content") or "")
+                user_parts: list[dict[str, Any]] = [
+                    {"type": "image", "image": img["pil_image"]}
+                    for img in active_images
+                ]
+                user_parts.append({"type": "text", "text": user_txt})
+                mm_msgs: list[dict[str, Any]] = []
+                if sys_txt:
+                    mm_msgs.append({"role": "system", "content": [{"type": "text", "text": sys_txt}]})
+                mm_msgs.append({"role": "user", "content": user_parts})
+                inputs = proc.apply_chat_template(
+                    mm_msgs,
+                    add_generation_prompt=True,
+                    tokenize=True,
+                    return_dict=True,
+                    return_tensors="pt",
+                ).to(model.device)
+            else:
+                try:
+                    inputs = tok.apply_chat_template(
+                        local_chat_msgs,
+                        add_generation_prompt=True,
+                        return_tensors="pt",
+                        return_dict=True,
+                    ).to(model.device)
+                except Exception:
+                    plain_p = "\n\n".join(
+                        f"{str(cm.get('role') or 'user').upper()}: {str(cm.get('content') or '')}"
+                        for cm in local_chat_msgs
+                    ) + "\n\nASSISTANT:"
+                    inputs = tok(plain_p, return_tensors="pt").to(model.device)
         else:
-            inputs = tok.apply_chat_template(
-                local_chat_msgs,
-                add_generation_prompt=True,
-                return_tensors="pt",
-                return_dict=True,
-            ).to(model.device)
+            try:
+                inputs = tok.apply_chat_template(
+                    local_chat_msgs,
+                    add_generation_prompt=True,
+                    return_tensors="pt",
+                    return_dict=True,
+                ).to(model.device)
+            except Exception:
+                plain_p = "\n\n".join(
+                    f"{str(cm.get('role') or 'user').upper()}: {str(cm.get('content') or '')}"
+                    for cm in local_chat_msgs
+                ) + "\n\nASSISTANT:"
+                inputs = tok(plain_p, return_tensors="pt").to(model.device)
 
         streamer = TextIteratorStreamer(tok, skip_prompt=True, skip_special_tokens=True)
         gen_kwargs: dict[str, Any] = dict(

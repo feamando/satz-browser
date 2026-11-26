@@ -1,0 +1,388 @@
+{
+  "_note": "System layer of source trust (src/planck3/trust.py). Measured on the G2 training questions (disjoint from every benchmark), never hand-edited. Counts are capped at 20 so a user's own signals can outvote it.",
+  "built_at": "2026-10-09T19:38:46Z",
+  "built_from": [
+    "points_ddgs_quick.jsonl"
+  ],
+  "min_n": 3,
+  "domains": {
+    "en.wikipedia.org": {
+      "a": 15.747,
+      "b": 4.253,
+      "n": 172,
+      "right": 136,
+      "rate": 0.791
+    },
+    "wikiwand.com": {
+      "a": 16.145,
+      "b": 3.855,
+      "n": 81,
+      "right": 66,
+      "rate": 0.815
+    },
+    "everything.explained.today": {
+      "a": 13.962,
+      "b": 6.038,
+      "n": 51,
+      "right": 36,
+      "rate": 0.706
+    },
+    "grokipedia.com": {
+      "a": 16.757,
+      "b": 3.243,
+      "n": 35,
+      "right": 30,
+      "rate": 0.857
+    },
+    "es.wikipedia.org": {
+      "a": 13.043,
+      "b": 6.957,
+      "n": 21,
+      "right": 14,
+      "rate": 0.667
+    },
+    "wikidata.org": {
+      "a": 16.522,
+      "b": 3.478,
+      "n": 21,
+      "right": 18,
+      "rate": 0.857
+    },
+    "wtatennis.com": {
+      "a": 2.0,
+      "b": 18.0,
+      "n": 18,
+      "right": 1,
+      "rate": 0.056
+    },
+    "espn.com": {
+      "a": 13.0,
+      "b": 7.0,
+      "n": 18,
+      "right": 12,
+      "rate": 0.667
+    },
+    "football.fandom.com": {
+      "a": 17.0,
+      "b": 3.0,
+      "n": 18,
+      "right": 16,
+      "rate": 0.889
+    },
+    "formula1.com": {
+      "a": 4.0,
+      "b": 14.0,
+      "n": 16,
+      "right": 3,
+      "rate": 0.188
+    },
+    "formula1archive.com": {
+      "a": 15.0,
+      "b": 1.0,
+      "n": 14,
+      "right": 14,
+      "rate": 1.0
+    },
+    "flashscore.com": {
+      "a": 1.0,
+      "b": 15.0,
+      "n": 14,
+      "right": 0,
+      "rate": 0.0
+    },
+    "f1-fansite.com": {
+      "a": 11.0,
+      "b": 4.0,
+      "n": 13,
+      "right": 10,
+      "rate": 0.769
+    },
+    "dbpedia.org": {
+      "a": 13.0,
+      "b": 1.0,
+      "n": 12,
+      "right": 12,
+      "rate": 1.0
+    },
+    "de.wikipedia.org": {
+      "a": 4.0,
+      "b": 10.0,
+      "n": 12,
+      "right": 3,
+      "rate": 0.25
+    },
+    "youtube.com": {
+      "a": 10.0,
+      "b": 4.0,
+      "n": 12,
+      "right": 9,
+      "rate": 0.75
+    },
+    "bleacherreport.com": {
+      "a": 11.0,
+      "b": 2.0,
+      "n": 11,
+      "right": 10,
+      "rate": 0.909
+    },
+    "olympics.com": {
+      "a": 1.0,
+      "b": 12.0,
+      "n": 11,
+      "right": 0,
+      "rate": 0.0
+    },
+    "bbc.co.uk": {
+      "a": 6.0,
+      "b": 6.0,
+      "n": 10,
+      "right": 5,
+      "rate": 0.5
+    },
+    "bbc.com": {
+      "a": 5.0,
+      "b": 6.0,
+      "n": 9,
+      "right": 4,
+      "rate": 0.444
+    },
+    "it.wikipedia.org": {
+      "a": 9.0,
+      "b": 2.0,
+      "n": 9,
+      "right": 8,
+      "rate": 0.889
+    },
+    "reference.org": {
+      "a": 8.0,
+      "b": 3.0,
+      "n": 9,
+      "right": 7,
+      "rate": 0.778
+    },
+    "tennis-db.com": {
+      "a": 8.0,
+      "b": 2.0,
+      "n": 8,
+      "right": 7,
+      "rate": 0.875
+    },
+    "racefans.net": {
+      "a": 4.0,
+      "b": 5.0,
+      "n": 7,
+      "right": 3,
+      "rate": 0.429
+    },
+    "transfermarkt.com": {
+      "a": 1.0,
+      "b": 8.0,
+      "n": 7,
+      "right": 0,
+      "rate": 0.0
+    },
+    "the-sports.org": {
+      "a": 2.0,
+      "b": 7.0,
+      "n": 7,
+      "right": 1,
+      "rate": 0.143
+    },
+    "si.com": {
+      "a": 6.0,
+      "b": 3.0,
+      "n": 7,
+      "right": 5,
+      "rate": 0.714
+    },
+    "uefa.com": {
+      "a": 7.0,
+      "b": 1.0,
+      "n": 6,
+      "right": 6,
+      "rate": 1.0
+    },
+    "theguardian.com": {
+      "a": 5.0,
+      "b": 3.0,
+      "n": 6,
+      "right": 4,
+      "rate": 0.667
+    },
+    "alchetron.com": {
+      "a": 6.0,
+      "b": 2.0,
+      "n": 6,
+      "right": 5,
+      "rate": 0.833
+    },
+    "cyclingnews.com": {
+      "a": 3.0,
+      "b": 4.0,
+      "n": 5,
+      "right": 2,
+      "rate": 0.4
+    },
+    "redbull.com": {
+      "a": 5.0,
+      "b": 2.0,
+      "n": 5,
+      "right": 4,
+      "rate": 0.8
+    },
+    "sportskeeda.com": {
+      "a": 3.0,
+      "b": 3.0,
+      "n": 4,
+      "right": 2,
+      "rate": 0.5
+    },
+    "cnn.com": {
+      "a": 5.0,
+      "b": 1.0,
+      "n": 4,
+      "right": 4,
+      "rate": 1.0
+    },
+    "f1.fandom.com": {
+      "a": 5.0,
+      "b": 1.0,
+      "n": 4,
+      "right": 4,
+      "rate": 1.0
+    },
+    "topendsports.com": {
+      "a": 3.0,
+      "b": 3.0,
+      "n": 4,
+      "right": 2,
+      "rate": 0.5
+    },
+    "simple.wikipedia.org": {
+      "a": 4.0,
+      "b": 2.0,
+      "n": 4,
+      "right": 3,
+      "rate": 0.75
+    },
+    "f1report.net": {
+      "a": 4.0,
+      "b": 1.0,
+      "n": 3,
+      "right": 3,
+      "rate": 1.0
+    },
+    "eurobasket.com": {
+      "a": 3.0,
+      "b": 2.0,
+      "n": 3,
+      "right": 2,
+      "rate": 0.667
+    },
+    "sandiegouniontribune.com": {
+      "a": 3.0,
+      "b": 2.0,
+      "n": 3,
+      "right": 2,
+      "rate": 0.667
+    },
+    "mykhel.com": {
+      "a": 1.0,
+      "b": 4.0,
+      "n": 3,
+      "right": 0,
+      "rate": 0.0
+    },
+    "sport-histoire.fr": {
+      "a": 1.0,
+      "b": 4.0,
+      "n": 3,
+      "right": 0,
+      "rate": 0.0
+    },
+    "sportstralia.com.au": {
+      "a": 1.0,
+      "b": 4.0,
+      "n": 3,
+      "right": 0,
+      "rate": 0.0
+    },
+    "raceslap.com": {
+      "a": 4.0,
+      "b": 1.0,
+      "n": 3,
+      "right": 3,
+      "rate": 1.0
+    },
+    "grandprix.com": {
+      "a": 3.0,
+      "b": 2.0,
+      "n": 3,
+      "right": 2,
+      "rate": 0.667
+    },
+    "sbnation.com": {
+      "a": 3.0,
+      "b": 2.0,
+      "n": 3,
+      "right": 2,
+      "rate": 0.667
+    },
+    "reuters.com": {
+      "a": 2.0,
+      "b": 3.0,
+      "n": 3,
+      "right": 1,
+      "rate": 0.333
+    },
+    "crash.net": {
+      "a": 4.0,
+      "b": 1.0,
+      "n": 3,
+      "right": 3,
+      "rate": 1.0
+    },
+    "cyclenews.com": {
+      "a": 4.0,
+      "b": 1.0,
+      "n": 3,
+      "right": 3,
+      "rate": 1.0
+    },
+    "es.uefa.com": {
+      "a": 3.0,
+      "b": 2.0,
+      "n": 3,
+      "right": 2,
+      "rate": 0.667
+    },
+    "worldathletics.org": {
+      "a": 3.0,
+      "b": 2.0,
+      "n": 3,
+      "right": 2,
+      "rate": 0.667
+    },
+    "f1dailybrief.com": {
+      "a": 4.0,
+      "b": 1.0,
+      "n": 3,
+      "right": 3,
+      "rate": 1.0
+    },
+    "smh.com.au": {
+      "a": 3.0,
+      "b": 2.0,
+      "n": 3,
+      "right": 2,
+      "rate": 0.667
+    },
+    "fr.wikipedia.org": {
+      "a": 3.0,
+      "b": 2.0,
+      "n": 3,
+      "right": 2,
+      "rate": 0.667
+    }
+  }
+}

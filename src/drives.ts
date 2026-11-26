@@ -62,7 +62,6 @@ export interface DrivesViewActions {
   onChangeProviderFilter: (provider: DriveProviderFilter) => void;
   onChangeFileTypeFilter: (fileType: DriveFileTypeFilter) => void;
   onChangeOwnerFilter: (owner: string) => void;
-  onSearchQueryChange: (query: string) => void;
   onResetFilters: () => void;
   onOpenDocumentInTab: (url: string, title: string, activate: boolean) => void;
   onTriggerSync: (fullResync?: boolean) => void;
@@ -80,7 +79,6 @@ export interface DrivesViewActions {
   onUnlockProfile?: (profileId: string, pin: string) => void | Promise<void>;
   onUnlockProfileKeychain?: (profileId: string) => void | Promise<void>;
   onCreateProfile?: (name: string, pin: string) => void | Promise<void>;
-  onSwitchToChat: () => void;
 }
 
 export function snapshotCurrentDrivesNav(): DriveNavSnapshot {
@@ -158,12 +156,6 @@ export function renderDrivesView(
   container: HTMLElement,
   actions: DrivesViewActions
 ): void {
-  const prevFocusedId = (document.activeElement as HTMLElement | null)?.id ?? "";
-  const prevSearchSelStart =
-    prevFocusedId === "drives-search-input"
-      ? (document.activeElement as HTMLInputElement).selectionStart
-      : null;
-
   const isUnlocked = Boolean(
     state.knowledge.profile?.unlocked && state.knowledge.profile?.active_profile
   );
@@ -286,7 +278,8 @@ export function renderDrivesView(
       `
       : "";
 
-  const isBusySync = Boolean(dStatus?.syncing || dStatus?.indexing || state.drivesLoading);
+  const isBusySync = Boolean(dStatus?.syncing || dStatus?.indexing || state.drivesSyncing);
+  const isViewLoading = Boolean(state.drivesLoading);
 
   const accountsPanelHtml = showAccountsPanel
     ? renderDriveAccountsPanelHtml(gConnected, odConnected)
@@ -326,9 +319,14 @@ export function renderDrivesView(
     ? `<div class="banner">${escapeHtml(state.drivesStatusMessage)}</div>`
     : "";
 
+  const trimmedSearch = state.drivesSearchQuery.trim();
   const scopeNoteHtml =
     state.drivesScope === "search"
-      ? `<div class="banner"><span>${escapeHtml(t("drives.scope_search_banner"))} · ${state.drivesItems.length}</span><button id="drives-reset-filters-banner-btn" class="btn" type="button">${escapeHtml(t("drives.clear_filters"))}</button></div>`
+      ? `<div class="banner"><span>${escapeHtml(
+          trimmedSearch
+            ? t("drives.scope_search_query_banner", { query: trimmedSearch })
+            : t("drives.scope_search_banner")
+        )} · ${state.drivesItems.length}</span><button id="drives-reset-filters-banner-btn" class="btn" type="button">${escapeHtml(t("drives.clear_filters"))}</button></div>`
       : state.drivesScope === "filtered"
         ? `<div class="banner"><span>${escapeHtml(t("drives.scope_filter_banner"))} · ${state.drivesItems.length}</span><button id="drives-reset-filters-banner-btn" class="btn" type="button">${escapeHtml(t("drives.clear_filters"))}</button></div>`
         : "";
@@ -336,8 +334,34 @@ export function renderDrivesView(
   const showParentPathInRow =
     state.drivesScope === "search" || state.drivesScope === "filtered";
 
+  const loadingText =
+    state.drivesFolderKey && !hasActiveFilterOrSearch
+      ? t("drives.loading_folder")
+      : t("drives.loading_files");
+
+  const loadingBarHtml = isViewLoading
+    ? `<div class="drives-loading-bar" aria-hidden="true"></div>`
+    : `<div class="drives-loading-bar is-idle" aria-hidden="true"></div>`;
+
+  const loadingBannerHtml =
+    isViewLoading && state.drivesItems.length > 0
+      ? `
+        <div class="drives-loading-banner" role="status" aria-live="polite">
+          <span class="satz-spinner" aria-hidden="true"></span>
+          <span>${escapeHtml(loadingText)}</span>
+        </div>
+      `
+      : "";
+
   const rowsHtml =
-    state.drivesItems.length === 0
+    isViewLoading && state.drivesItems.length === 0
+      ? `
+        <div class="drives-empty drives-empty-loading" role="status" aria-live="polite">
+          <span class="satz-spinner" aria-hidden="true"></span>
+          <span>${escapeHtml(loadingText)}</span>
+        </div>
+      `
+      : state.drivesItems.length === 0
       ? `
         <div class="drives-empty">
           <span>${escapeHtml(
@@ -422,16 +446,6 @@ export function renderDrivesView(
           </div>
 
           <button
-            id="drives-chat-jump-btn"
-            class="btn"
-            type="button"
-            title="${escapeHtml(t("common.chat"))}"
-          >
-            ${icon("chat", "ico-sm")}
-            <span>${escapeHtml(t("common.chat"))}</span>
-          </button>
-
-          <button
             id="drives-sync-btn"
             class="btn"
             type="button"
@@ -457,20 +471,6 @@ export function renderDrivesView(
       ${accountsPanelHtml}
 
       <div class="drives-filter-bar">
-        <div class="drives-search-wrap">
-          ${icon("search", "ico-sm")}
-          <input
-            id="drives-search-input"
-            class="input drives-search-input"
-            type="text"
-            spellcheck="false"
-            autocorrect="off"
-            autocapitalize="off"
-            placeholder="${escapeHtml(t("drives.search_placeholder"))}"
-            value="${escapeHtml(state.drivesSearchQuery)}"
-          />
-        </div>
-
         ${
           providerOptions.length > 0
             ? `<div class="drives-filter-group" role="group" aria-label="${escapeHtml(t("drives.col_cloud"))}">
@@ -532,7 +532,9 @@ export function renderDrivesView(
         }
       </div>
 
-      <div class="drives-scroll">
+      ${loadingBarHtml}
+      <div class="drives-scroll${isViewLoading ? " is-loading" : ""}" aria-busy="${isViewLoading ? "true" : "false"}">
+        ${loadingBannerHtml}
         ${statusBannerHtml}
         ${scopeNoteHtml}
         ${rowsHtml}
@@ -541,20 +543,6 @@ export function renderDrivesView(
   `;
 
   bindDrivesEvents(container, actions);
-
-  if (prevFocusedId === "drives-search-input") {
-    const inp = container.querySelector("#drives-search-input") as HTMLInputElement | null;
-    if (inp) {
-      inp.focus();
-      if (prevSearchSelStart !== null) {
-        try {
-          inp.setSelectionRange(prevSearchSelStart, prevSearchSelStart);
-        } catch {
-          // Ignore selection errors
-        }
-      }
-    }
-  }
 }
 
 export function renderDriveAccountsPanelHtml(
@@ -759,8 +747,6 @@ function renderDriveItemRowHtml(
   `;
 }
 
-let searchDebounceTimer: number | null = null;
-
 export function bindDriveAccountsEvents(
   container: HTMLElement,
   actions: Partial<DriveAccountsActions>
@@ -847,10 +833,6 @@ function bindDrivesEvents(
     });
   });
 
-  container.querySelector("#drives-chat-jump-btn")?.addEventListener("click", () => {
-    actions.onSwitchToChat();
-  });
-
   container.querySelector("#drives-sync-btn")?.addEventListener("click", (e) => {
     const full = (e as MouseEvent).shiftKey;
     actions.onTriggerSync(full);
@@ -862,29 +844,6 @@ function bindDrivesEvents(
   });
 
   bindDriveAccountsEvents(container, actions);
-
-  const searchInp = container.querySelector("#drives-search-input") as HTMLInputElement | null;
-  searchInp?.addEventListener("input", () => {
-    const val = searchInp.value;
-    if (searchDebounceTimer !== null) {
-      window.clearTimeout(searchDebounceTimer);
-    }
-    searchDebounceTimer = window.setTimeout(() => {
-      actions.onSearchQueryChange(val);
-    }, 160);
-  });
-  searchInp?.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      if (searchDebounceTimer !== null) {
-        window.clearTimeout(searchDebounceTimer);
-      }
-      actions.onSearchQueryChange(searchInp.value);
-    } else if (e.key === "Escape" && searchInp.value) {
-      e.preventDefault();
-      e.stopPropagation();
-      actions.onSearchQueryChange("");
-    }
-  });
 
   container.querySelectorAll("[data-drives-provider]").forEach((btn) => {
     btn.addEventListener("click", () => {

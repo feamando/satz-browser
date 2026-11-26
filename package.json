@@ -8,10 +8,13 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "build:release": "npx --no-install tauri build --config src-tauri/tauri.bundle.conf.json"
   },
   "dependencies": {
-    "@tauri-apps/api": "~2.8.0"
+    "@tauri-apps/api": "~2.8.0",
+    "@tauri-apps/plugin-process": "2.2.1",
+    "@tauri-apps/plugin-updater": "2.9.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "~2.8.0",

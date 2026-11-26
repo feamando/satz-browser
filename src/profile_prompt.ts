@@ -6,7 +6,186 @@ export interface ProfileGateActions {
   onUnlockProfile?: (profileId: string, pin: string) => void | Promise<void>;
   onUnlockProfileKeychain?: (profileId: string) => void | Promise<void>;
   onCreateProfile?: (name: string, pin: string) => void | Promise<void>;
+  onImportProfileFile?: (bundleB64: string, pin: string, localPin?: string) => void | Promise<void>;
   onOpenSettings?: () => void | Promise<void>;
+}
+
+function encodeBytesToBase64(bytes: Uint8Array): string {
+  const chunkSize = 0x2000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const slice = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+    binary += String.fromCharCode(...slice);
+  }
+  return btoa(binary);
+}
+
+function formatBundleBytes(sizeBytes: number): string {
+  if (sizeBytes < 1024) return `${sizeBytes} B`;
+  const kb = sizeBytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  return `${(kb / 1024).toFixed(2)} MB`;
+}
+
+function renderProfileUploadInnerHtml(prefix: string): string {
+  const draft = state.profileImportDraft;
+  const busy = Boolean(state.profileUnlocking);
+  const dis = busy ? "disabled" : "";
+  const fileInput = `<input id="${escapeHtml(prefix)}-upload-file-input" class="sr-only-file-input" type="file" accept=".satzprofile,.json,application/octet-stream" data-prof-upload-file="${escapeHtml(prefix)}" ${dis} />`;
+  if (!draft) {
+    return `
+      <div class="section profile-upload-block">
+        <div class="form-row">
+          <span class="muted">${escapeHtml(t("profile.upload_section_title"))}</span>
+          <button id="${escapeHtml(prefix)}-upload-pick-btn" type="button" class="btn end" data-prof-upload-pick="${escapeHtml(prefix)}" ${dis}>
+            ${icon("upload", "ico-sm")}
+            <span>${escapeHtml(t("profile.upload_btn"))}</span>
+          </button>
+          ${fileInput}
+        </div>
+      </div>
+    `;
+  }
+  return `
+    <div class="section profile-upload-block">
+      <div class="profile-upload-meta">
+        <span>${escapeHtml(t("profile.upload_selected", { filename: draft.filename, size: formatBundleBytes(draft.sizeBytes) }))}</span>
+        <button id="${escapeHtml(prefix)}-upload-pick-btn" type="button" class="btn-text" data-prof-upload-pick="${escapeHtml(prefix)}" ${dis}>${escapeHtml(t("profile.upload_btn"))}</button>
+        <button id="${escapeHtml(prefix)}-import-cancel-btn" type="button" class="btn-text end" data-prof-import-cancel="${escapeHtml(prefix)}" ${dis}>${escapeHtml(t("profile.upload_cancel_btn"))}</button>
+        ${fileInput}
+      </div>
+      <div class="muted">${escapeHtml(t("profile.upload_pin_hint"))}</div>
+      <div class="form-row">
+        <input
+          id="${escapeHtml(prefix)}-import-pin-input"
+          class="input pin"
+          type="password"
+          inputmode="numeric"
+          maxlength="6"
+          spellcheck="false"
+          autocorrect="off"
+          autocapitalize="off"
+          placeholder="${escapeHtml(t("profile.pin6_placeholder"))}"
+          data-prof-import-pin="${escapeHtml(prefix)}"
+          ${dis}
+        />
+        ${
+          draft.needLocalPin
+            ? `
+          <input
+            id="${escapeHtml(prefix)}-import-local-pin-input"
+            class="input pin"
+            type="password"
+            inputmode="numeric"
+            maxlength="6"
+            spellcheck="false"
+            autocorrect="off"
+            autocapitalize="off"
+            placeholder="${escapeHtml(t("profile.upload_local_pin_ph"))}"
+            data-prof-import-local-pin="${escapeHtml(prefix)}"
+            ${dis}
+          />
+        `
+            : ""
+        }
+        <button
+          id="${escapeHtml(prefix)}-import-submit-btn"
+          type="button"
+          class="btn primary"
+          data-prof-import-submit="${escapeHtml(prefix)}"
+          ${dis}
+        >${escapeHtml(busy ? t("profile.importing_short") : t("profile.upload_open_btn"))}</button>
+      </div>
+    </div>
+  `;
+}
+
+export function renderProfileUploadSectionHtml(prefix: string): string {
+  return `
+    <div class="sep"></div>
+    <div class="profile-upload-host" data-prof-upload-host="${escapeHtml(prefix)}">
+      ${renderProfileUploadInnerHtml(prefix)}
+    </div>
+  `;
+}
+
+export function bindProfileUploadSectionEvents(
+  container: ParentNode,
+  prefix: string,
+  onImportProfileFile?: (bundleB64: string, pin: string, localPin?: string) => void | Promise<void>
+): void {
+  const host = container.querySelector(`[data-prof-upload-host="${prefix}"]`) as HTMLElement | null;
+  if (!host) return;
+
+  const wireHost = (focusPin: boolean) => {
+    const pickBtn = host.querySelector(`[data-prof-upload-pick="${prefix}"]`) as HTMLButtonElement | null;
+    const fileInput = host.querySelector(`[data-prof-upload-file="${prefix}"]`) as HTMLInputElement | null;
+    const cancelBtn = host.querySelector(`[data-prof-import-cancel="${prefix}"]`) as HTMLButtonElement | null;
+    const pinInput = host.querySelector(`[data-prof-import-pin="${prefix}"]`) as HTMLInputElement | null;
+    const localPinInput = host.querySelector(`[data-prof-import-local-pin="${prefix}"]`) as HTMLInputElement | null;
+    const submitBtn = host.querySelector(`[data-prof-import-submit="${prefix}"]`) as HTMLButtonElement | null;
+
+    pickBtn?.addEventListener("click", () => {
+      if (state.profileUnlocking) return;
+      fileInput?.click();
+    });
+
+    fileInput?.addEventListener("change", async () => {
+      const f = fileInput.files?.[0];
+      if (!f) return;
+      try {
+        const buf = await f.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        const bundleB64 = encodeBytesToBase64(bytes);
+        state.profileImportDraft = {
+          filename: f.name || "profile.satzprofile",
+          bundleB64,
+          sizeBytes: bytes.byteLength,
+          needLocalPin: false,
+        };
+        state.profileStatusMessage = "";
+        host.innerHTML = renderProfileUploadInnerHtml(prefix);
+        wireHost(true);
+      } catch (err) {
+        state.profileStatusMessage = `${t("common.error_prefix")} ${String(err)}`;
+      }
+    });
+
+    cancelBtn?.addEventListener("click", () => {
+      if (state.profileUnlocking) return;
+      state.profileImportDraft = null;
+      host.innerHTML = renderProfileUploadInnerHtml(prefix);
+      wireHost(false);
+    });
+
+    const submitImport = () => {
+      if (state.profileUnlocking || !state.profileImportDraft) return;
+      const pin = pinInput?.value.trim() ?? "";
+      const localPin = localPinInput?.value.trim() || undefined;
+      if (!pin || !onImportProfileFile) return;
+      void onImportProfileFile(state.profileImportDraft.bundleB64, pin, localPin);
+    };
+
+    submitBtn?.addEventListener("click", submitImport);
+    pinInput?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submitImport();
+      }
+    });
+    localPinInput?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submitImport();
+      }
+    });
+
+    if (focusPin && pinInput && !state.profileUnlocking) {
+      pinInput.focus();
+    }
+  };
+
+  wireHost(false);
 }
 
 export function renderInlineProfileGateHtml(opts: {
@@ -147,6 +326,7 @@ export function renderInlineProfileGateHtml(opts: {
             </button>
           </div>
         </div>
+        ${renderProfileUploadSectionHtml("inline")}
       </div>
     </div>
   `;
@@ -228,4 +408,6 @@ export function bindInlineProfileGateEvents(
       submitCreate();
     }
   });
+
+  bindProfileUploadSectionEvents(container, "inline", actions.onImportProfileFile);
 }

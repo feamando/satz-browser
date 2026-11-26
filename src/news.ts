@@ -1,18 +1,23 @@
 import {
   apiEnsureNewsPerspectivesConversation,
   apiGetConversation,
+  sidecarFetchFollowedStories,
   sidecarFetchNewsSources,
   sidecarFetchNewsStories,
   sidecarFetchNewsTopics,
   sidecarHideNewsCluster,
   sidecarManageNewsFeed,
   sidecarManageNewsTopic,
+  sidecarMarkFollowedStoryRead,
+  sidecarPinFollowedStory,
+  sidecarRefreshFollowedStories,
   sidecarRefreshNews,
   sidecarSaveNewsClusterToBrain,
   sidecarSetDomainTrust,
   sidecarTranslateNewsArticle,
+  sidecarUnpinFollowedStory,
 } from "./api";
-import { bindChatThreadEvents, renderMessageBlock, type ChatActions } from "./chat";
+import { bindChatThreadEvents, formatCitationsInText, renderMessageBlock, type ChatActions } from "./chat";
 import { drawWordmark, fontsReady } from "./design-system/brand";
 import { icon } from "./design-system/icons";
 import { t, tCount } from "./i18n";
@@ -38,7 +43,11 @@ export interface NewsViewActions {
   onCreateProfile?: (name: string, pin: string) => void | Promise<void>;
   onOpenNewsSettings?: (targetTab?: string) => void;
   onOpenNewsHome?: () => void;
-  onSendPerspectivesTopic?: (topic: string, clusterId?: string) => Promise<void>;
+  onSendPerspectivesTopic?: (
+    topic: string,
+    clusterId?: string,
+    followedStoryId?: string
+  ) => Promise<void>;
   perspChatActions?: ChatActions;
   onRefreshShell: () => void;
 }
@@ -47,36 +56,52 @@ let newsAutoWarmedThisSession = false;
 const expandedStoryFamilyPills = new Set<string>();
 
 export async function refreshNewsState(
-  lane?: NewsLane | "topics" | "sources" | "settings"
+  lane?: NewsLane | "topics" | "sources" | "settings",
+  onProgress?: (detail: string, statusLine?: string) => void
 ): Promise<void> {
   const target = lane ?? state.newsActiveLane ?? "stories";
+  onProgress?.(t("profile.detail_news_fetch"), t("profile.status_loading_news"));
   if (target === "stories") {
     const fetchLane = async () => {
-      const [storiesRes, topicsRes] = await Promise.all([
+      const [storiesRes, topicsRes, followedRes] = await Promise.all([
         sidecarFetchNewsStories("top", "", false, 30),
         sidecarFetchNewsTopics(),
+        sidecarFetchFollowedStories(true),
       ]);
       state.newsStories = storiesRes.stories;
       state.newsTopics = topicsRes.topics;
+      if (followedRes.ok) {
+        state.newsFollowedStories = followedRes.stories;
+      }
       return storiesRes.stories;
     };
 
     const initial = await fetchLane();
     if (initial.length === 0 && !newsAutoWarmedThisSession) {
       newsAutoWarmedThisSession = true;
+      onProgress?.(t("profile.detail_news_update"), t("profile.status_updating_news"));
       await sidecarRefreshNews(false, false);
       await fetchLane();
     }
+  } else if (target === "tracked") {
+    const res = await sidecarFetchFollowedStories(true);
+    if (res.ok) {
+      state.newsFollowedStories = res.stories;
+    }
   } else if (target === "perspectives") {
-    const [storiesRes, topicsRes] = await Promise.all([
+    const [storiesRes, topicsRes, followedRes] = await Promise.all([
       sidecarFetchNewsStories("top", "", false, 15),
       sidecarFetchNewsTopics(),
+      sidecarFetchFollowedStories(false),
     ]);
     state.newsPerspectivesStories = storiesRes.stories;
     if (state.newsStories.length === 0) {
       state.newsStories = storiesRes.stories;
     }
     state.newsTopics = topicsRes.topics;
+    if (followedRes.ok) {
+      state.newsFollowedStories = followedRes.stories;
+    }
     try {
       const pConv = await apiEnsureNewsPerspectivesConversation();
       state.newsPerspectivesDetail = await apiGetConversation(pConv.id);
@@ -136,6 +161,12 @@ function renderStoryCardsHtml(
   stories: NewsStoryCluster[],
   lane: "stories"
 ): string {
+  const pinnedByCluster = new Map<string, string>();
+  for (const fs of state.newsFollowedStories) {
+    if (fs.seed_cluster_id) {
+      pinnedByCluster.set(fs.seed_cluster_id, fs.story_id);
+    }
+  }
   if (stories.length === 0) {
     return `
       <div class="card">
@@ -229,6 +260,7 @@ function renderStoryCardsHtml(
             : `<button type="button" class="btn-text" data-news-ask-chat="${escapeHtml(dispHeadline)}">${escapeHtml(t("news.ask_in_chat"))}</button>`;
 
       const menuOpen = state.newsStoryMenuId === s.cluster_id;
+      const pinnedStoryId = pinnedByCluster.get(s.cluster_id) ?? "";
 
       return `
         <article class="story ${s.lead_image ? "" : "no-thumb"}" data-news-cluster="${escapeHtml(s.cluster_id)}">
@@ -272,6 +304,14 @@ function renderStoryCardsHtml(
                     : ""
                 }
                 ${secondActionHtml}
+                <button
+                  type="button"
+                  class="btn-text ${pinnedStoryId ? "pri" : ""}"
+                  data-news-pin-story="${escapeHtml(s.cluster_id)}"
+                  data-news-pinned-id="${escapeHtml(pinnedStoryId)}"
+                >${icon("pin", "ico-sm")}<span>${escapeHtml(
+                    pinnedStoryId ? t("news.pinned_story") : t("news.pin_story")
+                  )}</span></button>
                 <button type="button" class="btn-text" data-news-save-brain="${escapeHtml(s.cluster_id)}">${escapeHtml(t("common.save"))}</button>
                 <div class="story-more-anchor">
                   <button
@@ -318,8 +358,107 @@ function renderStoryCardsHtml(
     .join("")}</div>`;
 }
 
+function renderTrackedStoriesLaneHtml(): string {
+  const stories = state.newsFollowedStories;
+  if (stories.length === 0) {
+    return `
+      <div class="card inset">
+        <div class="card-h">
+          <b>${escapeHtml(t("news.story_empty_title"))}</b>
+          <button type="button" class="btn primary sm" data-news-goto-top="1">${escapeHtml(t("news.story_goto_top"))}</button>
+        </div>
+        <div class="settings-card-note">${escapeHtml(t("news.story_empty_sub"))}</div>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="stories">
+      ${stories
+        .map((st) => {
+          const relAge = formatRelativeTime(String(Math.floor(st.updated_at || st.created_at)));
+          const overviewHtml = formatCitationsInText(
+            st.summary_overview || st.title,
+            st.updates.map((u) => u.url)
+          );
+          const updatesHtml = st.updates
+            .slice(0, 12)
+            .map((u, idx) => {
+              const uAge = formatRelativeTime(String(Math.floor(u.published_at)));
+              const uTitle = u.title_tr || u.title;
+              const uSnip = u.snippet_tr || u.snippet;
+              return `
+                <div class="tracked-update-row ${u.is_new ? "is-new" : ""}">
+                  <div class="tracked-update-meta">
+                    <span class="badge soft">${idx + 1}</span>
+                    ${u.is_new ? `<span class="badge accent">${escapeHtml(t("news.story_new_badge"))}</span>` : ""}
+                    <b>${escapeHtml(u.domain)}</b>
+                    <span>${u.trust_effective.toFixed(1)}/10</span>
+                    <span>${escapeHtml(uAge)}</span>
+                  </div>
+                  <div class="tracked-update-title">${escapeHtml(uTitle)}</div>
+                  ${uSnip ? `<div class="tracked-update-snip">${escapeHtml(uSnip.slice(0, 220))}</div>` : ""}
+                  <div class="tracked-update-acts">
+                    <button type="button" class="btn-text pri" data-news-open-reader="${escapeHtml(u.article_id)}">${escapeHtml(t("news.open_reader"))}</button>
+                    <button type="button" class="btn-text" data-news-open-url="${escapeHtml(u.url)}" data-news-open-title="${escapeHtml(uTitle)}">${escapeHtml(t("news.open_live_tab"))}</button>
+                  </div>
+                </div>
+              `;
+            })
+            .join("");
+
+          return `
+            <article class="story tracked-story-card" data-tracked-story-id="${escapeHtml(st.story_id)}">
+              <div class="tracked-story-head">
+                ${
+                  st.lead_image
+                    ? `<img class="story-thumb" src="${escapeHtml(st.lead_image)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
+                    : ""
+                }
+                <div class="story-c">
+                  <div class="story-meta">
+                    ${st.unread_updates > 0 ? `<span class="badge accent">${escapeHtml(tCount("news.story_unread_n", st.unread_updates))}</span>` : ""}
+                    <span>${escapeHtml(tCount("news.story_updates_n", st.update_count))}</span>
+                    <span>${escapeHtml(t("news.fam_age", { count: st.independent_families, age: relAge }))}</span>
+                    ${renderBandPillHtml(st.band, st.confidence10)}
+                  </div>
+                  <h3 class="story-title">${escapeHtml(st.title)}</h3>
+                </div>
+              </div>
+
+              <div class="tracked-overview">
+                <div class="label">${escapeHtml(t("news.story_overview_head"))}</div>
+                <div class="tracked-overview-body">${overviewHtml}</div>
+              </div>
+
+              <div class="story-foot">
+                <div class="acts">
+                  <button type="button" class="btn primary sm" data-tracked-open-persp="${escapeHtml(st.story_id)}" data-tracked-title="${escapeHtml(st.title)}">${escapeHtml(t("news.story_perspectives_btn"))}</button>
+                  <button type="button" class="btn sm" data-tracked-refresh="${escapeHtml(st.story_id)}">${icon("reload", "ico-sm")}<span>${escapeHtml(t("news.story_refresh_overview"))}</span></button>
+                  ${
+                    st.unread_updates > 0
+                      ? `<button type="button" class="btn sm" data-tracked-read="${escapeHtml(st.story_id)}">${escapeHtml(t("news.story_mark_read"))}</button>`
+                      : ""
+                  }
+                  <button type="button" class="btn-text" data-tracked-unpin="${escapeHtml(st.story_id)}">${icon("pin", "ico-sm")}<span>${escapeHtml(t("news.unpin_story"))}</span></button>
+                </div>
+              </div>
+
+              <div class="tracked-timeline">
+                <div class="label">${escapeHtml(t("news.story_timeline_head"))}</div>
+                ${updatesHtml}
+              </div>
+            </article>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
 function renderPerspectivesLaneHtml(): string {
   const topics = state.newsTopics;
+  const followed = state.newsFollowedStories;
   const recentStories =
     state.newsPerspectivesStories.length > 0
       ? state.newsPerspectivesStories
@@ -334,6 +473,14 @@ function renderPerspectivesLaneHtml(): string {
     .map(
       (tp) =>
         `<button type="button" class="pill" ${isStreaming ? "disabled" : ""} data-persp-pick-topic="${escapeHtml(tp.name)}">${escapeHtml(tp.name)}</button>`
+    )
+    .join("");
+
+  const followedChipsHtml = followed
+    .slice(0, 8)
+    .map(
+      (fs) =>
+        `<button type="button" class="pill ${fs.unread_updates > 0 ? "accent" : ""}" ${isStreaming ? "disabled" : ""} data-persp-pick-followed="${escapeHtml(fs.story_id)}" data-persp-pick-title="${escapeHtml(fs.title)}">${escapeHtml(fs.title.length > 50 ? `${fs.title.slice(0, 49)}...` : fs.title)}${fs.update_count > 1 ? ` · ${fs.update_count}` : ""}</button>`
     )
     .join("");
 
@@ -420,6 +567,14 @@ function renderPerspectivesLaneHtml(): string {
           ${topicChipsHtml || `<span class="muted">${escapeHtml(t("news.no_topics_yet"))}</span>`}
           <button type="button" class="btn-text end" data-news-open-settings="chat">${icon("settings", "ico-sm")}<span>${escapeHtml(t("news.persp_manage_topics"))}</span></button>
         </div>
+        ${
+          followedChipsHtml
+            ? `<div class="persp-chips-row">
+                <span class="persp-chips-label">${escapeHtml(t("news.persp_followed_stories"))}:</span>
+                ${followedChipsHtml}
+              </div>`
+            : ""
+        }
         ${
           storyChipsHtml
             ? `<div class="persp-chips-row">
@@ -625,20 +780,24 @@ function renderReaderOverlayHtml(): string {
   const allArts = [
     ...state.newsStories.flatMap((s) => s.articles ?? []),
     ...state.newsPerspectivesStories.flatMap((s) => s.articles ?? []),
+    ...state.newsFollowedStories.flatMap((fs) => fs.updates ?? []),
   ];
   const art = allArts.find((a) => a.article_id === aid);
   if (!art) return "";
   const artHasTr = Boolean(art.translated_text || art.title_tr || art.snippet_tr);
   const showingTranslated = artHasTr && !state.newsReaderShowOriginal;
   const displayTitle = showingTranslated && art.title_tr ? art.title_tr : art.title;
+  const rawBody = "body_text" in art && art.body_text ? art.body_text : art.snippet;
   const displayText = showingTranslated
-    ? art.translated_text || art.snippet_tr || art.body_text || art.snippet || ""
-    : art.body_text || art.snippet || t("news.reader_summary_only");
+    ? art.translated_text || art.snippet_tr || rawBody || ""
+    : rawBody || t("news.reader_summary_only");
+  const artCategory = "category" in art && art.category ? art.category : art.domain;
+  const artAuthor = "author" in art && art.author ? art.author : "";
 
   return `
     <div class="card reader-card">
       <div class="card-h">
-        <span class="muted">${escapeHtml(t("news.reader_meta", { domain: art.domain, trust: art.trust_effective.toFixed(1), category: art.category }))}</span>
+        <span class="muted">${escapeHtml(t("news.reader_meta", { domain: art.domain, trust: art.trust_effective.toFixed(1), category: artCategory }))}</span>
         <span class="end">
           ${
             artHasTr
@@ -651,7 +810,7 @@ function renderReaderOverlayHtml(): string {
       </div>
       <div class="reader">
         <h1>${escapeHtml(displayTitle)}</h1>
-        ${art.author ? `<div class="muted">${escapeHtml(t("news.by_author", { author: art.author, age: formatRelativeTime(String(Math.floor(art.published_at))) }))}</div>` : ""}
+        ${artAuthor ? `<div class="muted">${escapeHtml(t("news.by_author", { author: artAuthor, age: formatRelativeTime(String(Math.floor(art.published_at))) }))}</div>` : ""}
         ${art.image_url ? `<img class="attach-img" src="${escapeHtml(art.image_url)}" alt="" />` : ""}
         <div class="reader-body">${escapeHtml(displayText)}</div>
       </div>
@@ -663,6 +822,8 @@ function getNewsLaneSubtitle(lane: NewsLane): string {
   switch (lane) {
     case "stories":
       return t("news.sub_stories");
+    case "tracked":
+      return t("news.sub_tracked");
     case "perspectives":
       return t("news.sub_perspectives");
   }
@@ -708,10 +869,17 @@ export function renderNewsLaneView(
     return;
   }
 
-  const lane: NewsLane = state.newsActiveLane === "perspectives" ? "perspectives" : "stories";
+  const lane: NewsLane =
+    state.newsActiveLane === "perspectives"
+      ? "perspectives"
+      : state.newsActiveLane === "tracked"
+        ? "tracked"
+        : "stories";
   let bodyHtml = "";
   if (lane === "stories") {
     bodyHtml = renderStoryCardsHtml(state.newsStories, "stories");
+  } else if (lane === "tracked") {
+    bodyHtml = renderTrackedStoriesLaneHtml();
   } else {
     bodyHtml = renderPerspectivesLaneHtml();
   }
@@ -1049,6 +1217,96 @@ function bindNewsViewEvents(
     });
   });
 
+  container.querySelectorAll("[data-news-pin-story]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const cid = el.getAttribute("data-news-pin-story") ?? "";
+      const pinnedId = el.getAttribute("data-news-pinned-id") ?? "";
+      if (!cid) return;
+      void (async () => {
+        if (pinnedId) {
+          const r = await sidecarUnpinFollowedStory(pinnedId);
+          state.newsStatusMessage = r.ok
+            ? t("news.unpinned_story_toast")
+            : `${t("common.error_prefix")} ${r.error ?? ""}`;
+        } else {
+          const r = await sidecarPinFollowedStory({ cluster_id: cid });
+          state.newsStatusMessage = r.ok
+            ? t("news.pinned_story_toast")
+            : `${t("common.error_prefix")} ${r.error ?? ""}`;
+        }
+        await refreshNewsState("stories");
+        reRender();
+        actions.onRefreshShell();
+      })();
+    });
+  });
+
+  container.querySelectorAll("[data-news-goto-top]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.newsActiveLane = "stories";
+      state.activeTabId = "news-lane:stories";
+      void refreshNewsState("stories").then(() => {
+        actions.onRefreshShell();
+      });
+    });
+  });
+
+  container.querySelectorAll("[data-tracked-unpin]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const sid = (btn as HTMLElement).getAttribute("data-tracked-unpin") ?? "";
+      if (!sid) return;
+      void sidecarUnpinFollowedStory(sid).then(async () => {
+        state.newsStatusMessage = t("news.unpinned_story_toast");
+        await refreshNewsState("tracked");
+        reRender();
+        actions.onRefreshShell();
+      });
+    });
+  });
+
+  container.querySelectorAll("[data-tracked-read]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const sid = (btn as HTMLElement).getAttribute("data-tracked-read") ?? "";
+      if (!sid) return;
+      void sidecarMarkFollowedStoryRead(sid).then(async () => {
+        await refreshNewsState("tracked");
+        reRender();
+        actions.onRefreshShell();
+      });
+    });
+  });
+
+  container.querySelectorAll("[data-tracked-refresh]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const sid = (btn as HTMLElement).getAttribute("data-tracked-refresh") ?? "";
+      if (!sid) return;
+      state.newsLoading = true;
+      reRender();
+      void sidecarRefreshFollowedStories(sid).then((r) => {
+        state.newsLoading = false;
+        if (r.ok) {
+          state.newsFollowedStories = r.stories;
+        }
+        reRender();
+        actions.onRefreshShell();
+      });
+    });
+  });
+
+  container.querySelectorAll("[data-tracked-open-persp]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const sid = el.getAttribute("data-tracked-open-persp") ?? "";
+      const title = el.getAttribute("data-tracked-title") ?? "";
+      if (!sid) return;
+      state.newsActiveLane = "perspectives";
+      state.activeTabId = "news-lane:perspectives";
+      actions.onRefreshShell();
+      void actions.onSendPerspectivesTopic?.(title, undefined, sid);
+    });
+  });
+
   container.querySelectorAll("[data-news-save-brain]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const cid = (btn as HTMLElement).getAttribute("data-news-save-brain") ?? "";
@@ -1135,6 +1393,15 @@ function bindNewsViewEvents(
               }
             }
           }
+          for (const fs of state.newsFollowedStories) {
+            for (const u of fs.updates) {
+              if (u.article_id === aid) {
+                if (r.translated_text) u.translated_text = r.translated_text;
+                if (r.title_tr) u.title_tr = r.title_tr;
+                if (r.snippet_tr) u.snippet_tr = r.snippet_tr;
+              }
+            }
+          }
           state.newsReaderArticleId = aid;
           state.newsReaderShowOriginal = false;
           state.newsStatusMessage = t("news.translated_article");
@@ -1179,6 +1446,32 @@ function bindNewsViewEvents(
       }
     });
   });
+  container.querySelectorAll("[data-persp-pick-followed]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const sid = el.getAttribute("data-persp-pick-followed") ?? "";
+      const title = el.getAttribute("data-persp-pick-title") ?? "";
+      if (title && sid && !state.newsPerspectivesStream) {
+        void actions.onSendPerspectivesTopic?.(title, undefined, sid);
+      }
+    });
+  });
+
+  container.querySelectorAll(".tracked-story-card [data-citation-idx]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const idx = Number(el.getAttribute("data-citation-idx") || "0");
+      const cardEl = el.closest("[data-tracked-story-id]") as HTMLElement | null;
+      const sid = cardEl?.getAttribute("data-tracked-story-id") ?? "";
+      const story = state.newsFollowedStories.find((s) => s.story_id === sid);
+      const upd = idx > 0 ? story?.updates[idx - 1] : undefined;
+      if (upd) {
+        state.newsReaderArticleId = upd.article_id;
+        state.newsReaderShowOriginal = false;
+        reRender();
+      }
+    });
+  });
 
   const perspScroll = container.querySelector("#persp-messages-list") as HTMLElement | null;
   if (perspScroll) {
@@ -1194,39 +1487,58 @@ function bindNewsViewEvents(
   }
 
   // Topics events
-  container.querySelector("#news-topic-add-btn")?.addEventListener("click", () => {
+  const addTopicBtn = container.querySelector("#news-topic-add-btn") as HTMLButtonElement | null;
+  addTopicBtn?.addEventListener("click", () => {
     const nameEl = container.querySelector("#news-topic-name-input") as HTMLInputElement | null;
     const kwEl = container.querySelector("#news-topic-kw-input") as HTMLInputElement | null;
     const name = nameEl?.value.trim() ?? "";
-    if (!name) return;
+    if (!name || addTopicBtn.disabled) {
+      if (!name) nameEl?.focus();
+      return;
+    }
+    addTopicBtn.disabled = true;
     void sidecarManageNewsTopic({
       action: "add",
       name,
       keywords: kwEl?.value.trim() ?? "",
       watch: true,
-    }).then(async (r) => {
-      state.newsStatusMessage = r.ok ? t("news.tracked_topic_added", { name }) : `${t("common.error_prefix")} ${r.error}`;
-      await refreshNewsState("topics");
-      reRender();
-      actions.onRefreshShell();
-    });
+    })
+      .then(async (r) => {
+        state.newsStatusMessage = r.ok ? t("news.tracked_topic_added", { name }) : `${t("common.error_prefix")} ${r.error}`;
+        await refreshNewsState(onReRender ? "settings" : "topics");
+      })
+      .catch((err) => {
+        state.newsStatusMessage = `${t("common.error_prefix")} ${String(err)}`;
+      })
+      .finally(() => {
+        reRender();
+        actions.onRefreshShell();
+      });
   });
 
   container.querySelectorAll("[data-news-topic-del]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const tid = (btn as HTMLElement).getAttribute("data-news-topic-del") ?? "";
-      if (!tid) return;
-      void sidecarManageNewsTopic({ action: "delete", topic_id: tid }).then(async () => {
-        await refreshNewsState("topics");
-        reRender();
-        actions.onRefreshShell();
-      });
+      const el = btn as HTMLButtonElement;
+      const tid = el.getAttribute("data-news-topic-del") ?? "";
+      if (!tid || el.disabled) return;
+      el.disabled = true;
+      void sidecarManageNewsTopic({ action: "delete", topic_id: tid })
+        .then(async () => {
+          await refreshNewsState(onReRender ? "settings" : "topics");
+        })
+        .catch((err) => {
+          state.newsStatusMessage = `${t("common.error_prefix")} ${String(err)}`;
+        })
+        .finally(() => {
+          reRender();
+          actions.onRefreshShell();
+        });
     });
   });
 
   // Sources events
   const reloadSources = () => {
-    void refreshNewsState("sources").then(() => {
+    void refreshNewsState(onReRender ? "settings" : "sources").then(() => {
       reRender();
       actions.onRefreshShell();
     });
@@ -1257,29 +1569,47 @@ function bindNewsViewEvents(
     reloadSources();
   });
 
-  container.querySelector("#news-add-feed-btn")?.addEventListener("click", () => {
+  const addFeedBtn = container.querySelector("#news-add-feed-btn") as HTMLButtonElement | null;
+  addFeedBtn?.addEventListener("click", () => {
     const urlEl = container.querySelector("#news-add-feed-url") as HTMLInputElement | null;
     const titleEl = container.querySelector("#news-add-feed-title") as HTMLInputElement | null;
     const val = urlEl?.value.trim() ?? "";
-    if (!val) return;
+    if (!val || addFeedBtn.disabled) {
+      if (!val) urlEl?.focus();
+      return;
+    }
+    addFeedBtn.disabled = true;
     const isUrl = val.startsWith("http://") || val.startsWith("https://");
     void sidecarManageNewsFeed(
       isUrl
         ? { feed_url: val, title: titleEl?.value.trim() ?? "" }
         : { domain: val, title: titleEl?.value.trim() ?? "" }
-    ).then((r) => {
-      state.newsStatusMessage = r.ok ? t("news.added_item", { item: val }) : `${t("common.error_prefix")} ${r.error}`;
-      reloadSources();
-    });
+    )
+      .then((r) => {
+        state.newsStatusMessage = r.ok ? t("news.added_item", { item: val }) : `${t("common.error_prefix")} ${r.error}`;
+      })
+      .catch((err) => {
+        state.newsStatusMessage = `${t("common.error_prefix")} ${String(err)}`;
+      })
+      .finally(() => {
+        reloadSources();
+      });
   });
 
   container.querySelectorAll("[data-news-toggle-feed]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const fid = (btn as HTMLElement).getAttribute("data-news-toggle-feed") ?? "";
-      const en = (btn as HTMLElement).getAttribute("data-enabled") === "1";
-      void sidecarManageNewsFeed({ action: "toggle", feed_id: fid, enabled: en }).then(() => {
-        reloadSources();
-      });
+      const el = btn as HTMLButtonElement;
+      if (el.disabled) return;
+      const fid = el.getAttribute("data-news-toggle-feed") ?? "";
+      const en = el.getAttribute("data-enabled") === "1";
+      el.disabled = true;
+      void sidecarManageNewsFeed({ action: "toggle", feed_id: fid, enabled: en })
+        .catch((err) => {
+          state.newsStatusMessage = `${t("common.error_prefix")} ${String(err)}`;
+        })
+        .finally(() => {
+          reloadSources();
+        });
     });
   });
 

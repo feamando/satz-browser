@@ -19,6 +19,7 @@ export interface TopBarActions {
   onToggleAgentRail: () => void;
   onNewTab: () => void;
   onOpenCommandBar: () => void;
+  onClearDrivesSearch?: () => void;
 }
 
 export interface TabStripActions {
@@ -219,10 +220,13 @@ export function renderTopBar(actions: TopBarActions): void {
       </div>
     `;
   } else {
+    const drivesQuery = isDrivesConv ? state.drivesSearchQuery.trim() : "";
     const promptHint = isNewsConv
       ? t("top.search_explore_news")
       : isDrivesConv
-        ? t("top.search_explore_drives")
+        ? drivesQuery
+          ? t("top.search_drives_active", { query: drivesQuery })
+          : t("top.search_explore_drives")
         : detail.conversation.title || t("top.search_or_url");
     centerHtml = `
       <div class="addr">
@@ -231,6 +235,11 @@ export function renderTopBar(actions: TopBarActions): void {
           <span class="truncate">${escapeHtml(promptHint)}</span>
           <span class="kbd">${escapeHtml(MOD_LABEL.toUpperCase())}+K</span>
         </button>
+        ${
+          isDrivesConv && drivesQuery
+            ? `<button id="top-clear-drives-search-btn" class="icon-btn addr-clear-btn" type="button" title="${escapeHtml(t("common.clear"))}">${icon("x", "ico-sm")}</button>`
+            : ""
+        }
       </div>
     `;
   }
@@ -347,6 +356,10 @@ export function renderTopBar(actions: TopBarActions): void {
 
   container.querySelector("#top-cmd-addr-btn")?.addEventListener("click", () => {
     actions.onOpenCommandBar();
+  });
+
+  container.querySelector("#top-clear-drives-search-btn")?.addEventListener("click", () => {
+    actions.onClearDrivesSearch?.();
   });
 
   if (!tabsVisible) {
@@ -471,12 +484,17 @@ export function renderTabStrip(actions: TabStripActions): void {
     : "";
 
   const newsClusterCount = state.newsStories.length || state.sidecar.news?.clusters || 0;
+  const newsTrackedCount = state.newsFollowedStories.length || state.sidecar.news?.followed_stories || 0;
   const newsTopicCount = state.newsTopics.length || state.sidecar.news?.topics || 0;
   const newsLaneTabsHtml = isNewsConv
     ? `
       <button type="button" class="tab tab-pinned ${!state.compareMode && state.activeTabId === "news-lane:stories" ? "active on" : ""}" aria-selected="${!state.compareMode && state.activeTabId === "news-lane:stories" ? "true" : "false"}" data-news-lane-tab="stories" title="${escapeHtml(t("top.news_stories_title"))}">
         <span>${escapeHtml(t("top.news_stories"))}</span>
         ${newsClusterCount > 0 ? `<span class="count">${newsClusterCount}</span>` : ""}
+      </button>
+      <button type="button" class="tab tab-pinned ${!state.compareMode && state.activeTabId === "news-lane:tracked" ? "active on" : ""}" aria-selected="${!state.compareMode && state.activeTabId === "news-lane:tracked" ? "true" : "false"}" data-news-lane-tab="tracked" title="${escapeHtml(t("top.news_tracked_title"))}">
+        <span>${escapeHtml(t("top.news_tracked"))}</span>
+        ${newsTrackedCount > 0 ? `<span class="count">${newsTrackedCount}</span>` : ""}
       </button>
       <button type="button" class="tab tab-pinned ${!state.compareMode && state.activeTabId === "news-lane:perspectives" ? "active on" : ""}" aria-selected="${!state.compareMode && state.activeTabId === "news-lane:perspectives" ? "true" : "false"}" data-news-lane-tab="perspectives" title="${escapeHtml(t("top.news_perspectives_title"))}">
         <span>${escapeHtml(t("top.news_perspectives"))}</span>

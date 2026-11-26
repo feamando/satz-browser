@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "createUpdaterArtifacts": true,
+    "resources": {
+      "target/staged-resources/sidecar": "sidecar",
+      "target/staged-resources/python-runtime": "python-runtime"
+    }
+  }
+}

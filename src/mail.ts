@@ -420,7 +420,10 @@ function renderStatusBannerHtml(msg: string): string {
   return `<div class="${variant}">${escapeHtml(msg)}</div>`;
 }
 
-export async function refreshMailState(): Promise<void> {
+export async function refreshMailState(
+  onProgress?: (detail: string, statusLine?: string) => void
+): Promise<void> {
+  onProgress?.(t("profile.detail_mail_accounts"), t("profile.status_loading_mail"));
   const acctRes = await sidecarGetMailAccounts();
   state.mailAccounts = acctRes.accounts ?? [];
   if (
@@ -437,6 +440,7 @@ export async function refreshMailState(): Promise<void> {
   state.siteTabPromoCodes = {};
 
   if (acctRes.unlocked && state.mailAccounts.length > 0) {
+    onProgress?.(t("profile.detail_mail_lanes"), t("profile.status_loading_mail"));
     await apiEnsureMailConversation();
     const laneRes = await sidecarGetMailLane(
       state.mailActiveLane,
@@ -458,6 +462,7 @@ export async function refreshMailState(): Promise<void> {
     if (state.mailActiveLane === "inbox") {
       state.mailInboxRows = laneRes.rows ?? [];
     }
+    onProgress?.(t("profile.detail_mail_triage"), t("profile.status_loading_mail"));
     const triageRes = await sidecarGetMailTriage(state.mailActiveAccountId);
     if (triageRes.ok) {
       state.mailTriageOverview = triageRes.overview ?? "";

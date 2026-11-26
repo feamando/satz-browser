@@ -837,6 +837,86 @@ class TestSpeedupsAndSkills(unittest.TestCase):
         self.assertTrue(done["ok"])
         self.assertIn("European grid", done["answer"])
 
+    def _http_sse(self, port: int, path: str, token: str, payload: dict) -> tuple[int, str, list[dict]]:
+        data = json.dumps(payload).encode("utf-8")
+        headers = {"X-Satz-Token": token, "Content-Type": "application/json"}
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=10.0) as resp:
+            ctype = str(resp.headers.get("Content-Type") or "")
+            raw = resp.read().decode("utf-8")
+        events: list[dict] = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if line.startswith("data:"):
+                events.append(json.loads(line[5:].strip()))
+        return resp.status, ctype, events
+
+    def test_profile_unlock_sse_progress_stream_and_wrong_pin_error(self) -> None:
+        self.rt.passwords.create_profile("Stream User", "112233")
+        pid = self.rt.passwords.active_profile_id
+        assert pid
+        self.rt.passwords.lock_profile()
+
+        server = make_sidecar_server(self.rt, host="127.0.0.1", port=0)
+        port = server.server_address[1]
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            # 1. Wrong PIN streams error in final SSE frame cleanly
+            code_bad, ctype_bad, evs_bad = self._http_sse(
+                port,
+                "/profile/unlock",
+                server.auth_token,
+                {"profile_id": pid, "pin": "000000", "stream": True},
+            )
+            self.assertEqual(code_bad, 200)
+            self.assertIn("text/event-stream", ctype_bad.lower())
+            self.assertTrue(any(e.get("step") == "vault" and e.get("detail") == "verifying_pin" for e in evs_bad))
+            done_bad = next(e for e in evs_bad if e.get("done"))
+            self.assertFalse(done_bad["ok"])
+            self.assertIn("Invalid 6-digit PIN", str(done_bad.get("error") or ""))
+
+            # 2. Valid PIN streams real stages (vault -> store -> mail -> drives -> done)
+            with mock.patch.object(
+                self.rt.mail.pipeline,
+                "_ensure_active_model_loaded",
+                side_effect=AssertionError("DistilBERT must remain lazy during streamed unlock"),
+            ):
+                code_pin, ctype_pin, evs_pin = self._http_sse(
+                    port,
+                    "/profile/unlock",
+                    server.auth_token,
+                    {"profile_id": pid, "pin": "112233", "stream": True},
+                )
+            self.assertEqual(code_pin, 200)
+            self.assertIn("text/event-stream", ctype_pin.lower())
+            step_pairs = [(e.get("step"), e.get("status"), e.get("detail")) for e in evs_pin if e.get("phase") == "step"]
+            self.assertIn(("vault", "running", "verifying_pin"), step_pairs)
+            self.assertIn(("vault", "done", None), step_pairs)
+            self.assertIn(("store", "running", "opening_store"), step_pairs)
+            self.assertIn(("store", "done", None), step_pairs)
+            self.assertTrue(any(e.get("step") == "mail" and e.get("status") == "running" for e in evs_pin))
+            done_pin = next(e for e in evs_pin if e.get("done"))
+            self.assertTrue(done_pin["ok"])
+            self.assertTrue(done_pin["unlocked"])
+
+            # 3. Keychain unlock also streams checking_keychain -> done
+            self.rt.passwords.lock_profile()
+            code_kc, _, evs_kc = self._http_sse(
+                port,
+                "/profile/unlock_keychain",
+                server.auth_token,
+                {"profile_id": pid, "stream": True},
+            )
+            self.assertEqual(code_kc, 200)
+            self.assertTrue(any(e.get("step") == "vault" and e.get("detail") == "checking_keychain" for e in evs_kc))
+            done_kc = next(e for e in evs_kc if e.get("done"))
+            self.assertTrue(done_kc["ok"])
+            self.assertTrue(done_kc["unlocked"])
+        finally:
+            server.shutdown()
+            server.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

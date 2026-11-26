@@ -1,0 +1,14 @@
+{
+  "_note": "Cost model for cost-per-answer. Edit freely; every summary records which prices it used. LLM rates are Anthropic first-party API list prices per million tokens (cached in the claude-api skill 2026-06-24; Bedrock bills separately). 'llm_equivalent' prices a local teacher's tokens AS IF it were an API chat model, which is the comparator the product has to beat.",
+  "as_of": "2026-09-29",
+  "llm_per_mtok": {
+    "claude-haiku-4-5": {"input": 1.00, "output": 5.00},
+    "claude-sonnet-5":  {"input": 2.00, "output": 10.00},
+    "claude-opus-5":    {"input": 5.00, "output": 25.00}
+  },
+  "llm_equivalent": "claude-haiku-4-5",
+  "search_per_call": {"ddgs": 0.0, "searxng": 0.0, "wikipedia": 0.0, "brave": 0.005},
+  "_search_note": "ddgs/searxng/wikipedia are free to call. 'brave' is a PLACEHOLDER; verify against the current Brave Search API price sheet before quoting it.",
+  "cpu_per_hour": 0.05,
+  "_cpu_note": "ASSUMPTION: rough price of one cloud vCPU-hour, used only to put a number on local policy compute if it were served from a box. On a user's own device the marginal cost is ~0."
+}

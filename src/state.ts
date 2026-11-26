@@ -1,4 +1,15 @@
 import { applyUiLocalePreferences, formatLocaleRelativeTime, normalizeLangTag, t } from "./i18n";
+
+export type UnlockStepId = "vault_brain" | "mail" | "news" | "drives" | "digest";
+export type UnlockStepStatus = "pending" | "running" | "done" | "error";
+
+export interface UnlockProgressStep {
+  id: UnlockStepId;
+  label: string;
+  status: UnlockStepStatus;
+  detail?: string;
+}
+
 import type {
   AgentTaskCard,
   AnswerMeta,
@@ -29,6 +40,8 @@ import type {
   EvalSuiteRunSummary,
   FindingItem,
   GoogleOAuthStatus,
+  HfDownloadJob,
+  HfRepoSearchEntry,
   I18nStatusResponse,
   KnowledgeSummary,
   LocalModelId,
@@ -38,6 +51,7 @@ import type {
   MailPreset,
   ModelManagementConfig,
   NewsCategoryEntry,
+  NewsFollowedStory,
   NewsLane,
   NewsPerspectiveMatrix,
   NewsSourceEntry,
@@ -361,6 +375,29 @@ export interface AppState {
   googleOAuthMessage: string;
   modelConfig: ModelManagementConfig | null;
   modelConfigStatusMsg: string;
+  hfSearchQuery: string;
+  hfSearchResults: HfRepoSearchEntry[];
+  hfInspectResult: {
+    repo_id: string;
+    gated?: boolean;
+    total_bytes?: number;
+    file_count?: number;
+    error?: string;
+  } | null;
+  hfDownloads: HfDownloadJob[];
+  hfRepoDraft: string;
+  localModelSlotDraft: string;
+  localModelPathDraft: string;
+  appUpdateStatus: {
+    currentVersion: string;
+    checking: boolean;
+    installing: boolean;
+    availableVersion: string | null;
+    notes: string;
+    progressPct: number;
+    message: string;
+    error: string;
+  };
   providerRegistry: ProviderRegistryState | null;
   providerStatusMsg: string;
   providerFilterGroup: "all" | "search" | "maps" | "commerce" | "custom";
@@ -384,10 +421,20 @@ export interface AppState {
   profilePromptDismissed: boolean;
   profileUnlocking: boolean;
   profileUnlockLabel: string;
+  profileImportDraft: {
+    filename: string;
+    bundleB64: string;
+    sizeBytes: number;
+    needLocalPin?: boolean;
+  } | null;
+  profileExportBusyId: string | null;
   postUnlockLoading: boolean;
   postUnlockLabel: string;
+  postUnlockTitle: string;
+  unlockSteps: UnlockProgressStep[];
   newsActiveLane: NewsLane;
   newsStories: NewsStoryCluster[];
+  newsFollowedStories: NewsFollowedStory[];
   newsPerspectivesStories: NewsStoryCluster[];
   newsPerspectivesDetail: ConversationDetail | null;
   newsPerspectivesStream: ConvStreamState | null;
@@ -403,6 +450,9 @@ export interface AppState {
   newsSourcesConflictedOnly: boolean;
   newsSourcesRssOnly: boolean;
   newsTopics: NewsTopicItem[];
+  newsPendingTopicKeys: Record<string, boolean>;
+  newsPendingFeedKeys: Record<string, boolean>;
+  newsPendingTrustDomains: Record<string, boolean>;
   newsExploreMode: boolean;
   newsLoading: boolean;
   newsStatusMessage: string;
@@ -450,6 +500,7 @@ export interface AppState {
   drivesAccountsOpen: boolean;
   drivesNavStack: DriveNavSnapshot[];
   drivesLoading: boolean;
+  drivesSyncing: boolean;
   drivesStatusMessage: string;
 }
 
@@ -525,8 +576,12 @@ export const state: AppState = {
   profilePromptDismissed: false,
   profileUnlocking: false,
   profileUnlockLabel: "",
+  profileImportDraft: null,
+  profileExportBusyId: null,
   postUnlockLoading: false,
   postUnlockLabel: "",
+  postUnlockTitle: "",
+  unlockSteps: [],
   tabHasPasswordField: {},
   tabCanFillLogin: {},
   messageProposals: {},
@@ -599,6 +654,23 @@ export const state: AppState = {
   tabTranslationState: {},
   modelConfig: null,
   modelConfigStatusMsg: "",
+  hfSearchQuery: "",
+  hfSearchResults: [],
+  hfInspectResult: null,
+  hfDownloads: [],
+  hfRepoDraft: "",
+  localModelSlotDraft: "chat_llm",
+  localModelPathDraft: "",
+  appUpdateStatus: {
+    currentVersion: "0.5.0",
+    checking: false,
+    installing: false,
+    availableVersion: null,
+    notes: "",
+    progressPct: 0,
+    message: "",
+    error: "",
+  },
   providerRegistry: null,
   providerStatusMsg: "",
   providerFilterGroup: "all",
@@ -609,6 +681,7 @@ export const state: AppState = {
   routingNotice: "",
   newsActiveLane: "stories",
   newsStories: [],
+  newsFollowedStories: [],
   newsPerspectivesStories: [],
   newsPerspectivesDetail: null,
   newsPerspectivesStream: null,
@@ -624,6 +697,9 @@ export const state: AppState = {
   newsSourcesConflictedOnly: false,
   newsSourcesRssOnly: false,
   newsTopics: [],
+  newsPendingTopicKeys: {},
+  newsPendingFeedKeys: {},
+  newsPendingTrustDomains: {},
   newsExploreMode: false,
   newsLoading: false,
   newsStatusMessage: "",
@@ -665,6 +741,7 @@ export const state: AppState = {
   drivesAccountsOpen: false,
   drivesNavStack: [],
   drivesLoading: false,
+  drivesSyncing: false,
   drivesStatusMessage: "",
 };
 
@@ -1195,12 +1272,6 @@ export function rankCommandBarRoutes(
       staticBrainHints.some((h) => low.includes(h)) ||
       dynamicBrainTerms.some((t) => t.length >= 3 && low.includes(t));
 
-    if (isBrainTerm && !hasEmailAddr) {
-      return [makeBrainRoute(trimmed), makeMailRoute(trimmed), makeAskRoute(trimmed)];
-    }
-    if (isMailTerm) {
-      return [makeMailRoute(trimmed), makeBrainRoute(trimmed), makeAskRoute(trimmed)];
-    }
     if (state.activeDetail?.conversation.origin === "drives") {
       return [
         makeDrivesRoute(trimmed),
@@ -1208,6 +1279,12 @@ export function rankCommandBarRoutes(
         makeBrainRoute(trimmed),
         makeMailRoute(trimmed),
       ];
+    }
+    if (isBrainTerm && !hasEmailAddr) {
+      return [makeBrainRoute(trimmed), makeMailRoute(trimmed), makeAskRoute(trimmed)];
+    }
+    if (isMailTerm) {
+      return [makeMailRoute(trimmed), makeBrainRoute(trimmed), makeAskRoute(trimmed)];
     }
   }
 
@@ -1686,14 +1763,53 @@ export function getAvailableModelsForPicker(): Array<{
   id: LocalModelId;
   label: string;
 }> {
-  const base: Array<{ id: LocalModelId; label: string }> = [
-    { id: "gemma-4-e4b", label: "gemma-4-e4b (local)" },
-    { id: "planck3 (web)", label: "planck3 (web · local)" },
-    { id: "hertz (reader)", label: "hertz (reader · local)" },
-    { id: "planck (reader)", label: "planck (reader · local)" },
-  ];
-  const seen = new Set<string>(base.map((b) => b.id));
   const cfg = state.modelConfig ?? state.sidecar.model_config ?? null;
+  const lm = cfg?.local_models ?? null;
+  const gemmaReady = lm
+    ? Boolean(lm.gemma_ready)
+    : state.sidecar.models.find((m) => m.id === "gemma-4-e4b")?.state !== "missing";
+  const hertzReady = lm
+    ? Boolean(lm.hertz_ready)
+    : state.sidecar.models.find((m) => m.id === "hertz (reader)")?.state !== "missing";
+
+  const base: Array<{ id: LocalModelId; label: string }> = [];
+  const seen = new Set<string>();
+  const pushItem = (id: LocalModelId, label: string) => {
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    base.push({ id, label });
+  };
+
+  if (gemmaReady) {
+    pushItem("gemma-4-e4b", "gemma-4-e4b (local)");
+  }
+  for (const item of lm?.custom_llms ?? []) {
+    pushItem(
+      item.id,
+      item.ready ? `${item.label} (local)` : `${item.label} (local · invalid)`
+    );
+  }
+  if (!gemmaReady) {
+    pushItem("gemma-4-e4b", "gemma-4-e4b (local · not installed)");
+  }
+
+  pushItem(
+    "planck3 (web)",
+    lm?.planck_reader_source === "shipped"
+      ? "planck3 (web · local shipped)"
+      : "planck3 (web · local)"
+  );
+  pushItem(
+    "hertz (reader)",
+    hertzReady ? "hertz (reader · local)" : "hertz (reader · not installed)"
+  );
+  pushItem(
+    "planck (reader)",
+    lm?.planck_reader_source === "shipped"
+      ? "planck (reader · local shipped)"
+      : "planck (reader · local)"
+  );
+
   for (const prov of cfg?.cloud_providers ?? []) {
     if (!prov.configured && (!prov.models || prov.models.length === 0)) continue;
     for (const m of prov.models ?? []) {
@@ -1740,9 +1856,9 @@ export function getDefaultComposeModelId(): LocalModelId {
 }
 
 /**
- * Syncs `state.selectedModel` to Settings' configured `roles.chat` unless the user
- * manually picked a different model for the current chat session (`force = true`
- * overrides that on profile switches, `[+ new conversation]`, or Settings updates).
+ * Syncs `state.selectedModel` to Settings' configured `roles.chat` (or backend
+ * `effective_chat` when Gemma is not installed locally) unless the user manually
+ * picked a different model for the current chat session.
  */
 export function syncConfiguredChatModel(
   cfg?: ModelManagementConfig | null,
@@ -1751,6 +1867,9 @@ export function syncConfiguredChatModel(
   const effectiveCfg = cfg ?? state.modelConfig ?? state.sidecar.model_config ?? null;
   if (effectiveCfg) {
     state.modelConfig = effectiveCfg;
+    if (effectiveCfg.local_models?.downloads) {
+      state.hfDownloads = effectiveCfg.local_models.downloads;
+    }
     if (state.sidecar) {
       state.sidecar.model_config = effectiveCfg;
     }
@@ -1758,7 +1877,9 @@ export function syncConfiguredChatModel(
   if (force) {
     state.userOverrodeModelInSession = false;
   }
-  const configuredChat = effectiveCfg?.roles?.chat?.trim();
+  const configuredChat =
+    effectiveCfg?.roles?.effective_chat?.trim() ||
+    effectiveCfg?.roles?.chat?.trim();
   if (!configuredChat) return false;
   if (!state.userOverrodeModelInSession && state.selectedModel !== configuredChat) {
     state.selectedModel = configuredChat as LocalModelId;

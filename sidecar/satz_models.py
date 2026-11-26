@@ -473,26 +473,36 @@ class SatzSidecarRuntime:
         self.error_log: collections.deque[dict[str, Any]] = collections.deque(maxlen=50)
 
         sidecar_dir = str(Path(__file__).resolve().parent)
+        vendor_planck_dir = str(Path(__file__).resolve().parent / "planck_vendor")
         if sidecar_dir not in sys.path:
             sys.path.insert(0, sidecar_dir)
-        if str(self.sgs_root) not in sys.path:
-            sys.path.insert(0, str(self.sgs_root))
+        if Path(vendor_planck_dir).is_dir() and vendor_planck_dir not in sys.path:
+            # Prefer bundled planck_vendor so standalone & sharded shipped weights work consistently across OSes
+            sys.path.insert(1, vendor_planck_dir)
+        if self.sgs_root.exists() and str(self.sgs_root) not in sys.path:
+            sys.path.insert(len(sys.path), str(self.sgs_root))
 
         from satz_brain import SatzBrain
         from satz_google_auth import GoogleOAuthManager
+        from satz_local_models import LocalModelManager
         from satz_mail import SatzMailManager
         from satz_news import SatzNewsEngine
         from satz_passwords import ProfilePasswordManager
 
-        # Import SGS modules after adding sgs_root to sys.path
+        # Import Planck modules (works standalone via planck_vendor or sibling sgs)
         from src.planck3.store import Store
         from src.planck3.util import load_env
         from src.planck3.web import Web, WebCache
 
         orig_cwd = os.getcwd()
         try:
-            os.chdir(self.sgs_root)
-            load_env()
+            if self.sgs_root.exists():
+                os.chdir(self.sgs_root)
+                load_env()
+            else:
+                local_env = Path(__file__).resolve().parent.parent / ".env"
+                if local_env.is_file():
+                    load_env(local_env)
         finally:
             os.chdir(orig_cwd)
 
@@ -517,16 +527,20 @@ class SatzSidecarRuntime:
         self._cloud_bg_cooldown_until: dict[str, float] = {}
         self._cloud_bg_gate = threading.Semaphore(1)
         self._cloud_bg_tls = threading.local()
+        self._unlock_progress_tls = threading.local()
         self._last_tab_behavior_log: dict[str, float] = {}
         self._staged_files: dict[str, dict[str, Any]] = {}
         self._pending_settings_gates: dict[str, dict[str, Any]] = {}
         self.last_migration_counts: dict[str, int] = {}
+        self.local_models = LocalModelManager(self)
         self.brain = SatzBrain(
             self.passwords.get_profile_brain_dir(),
             sgs_root=self.sgs_root,
             locked=not self.passwords.unlocked,
+            local_models=self.local_models,
         )
         self.passwords.on_profile_change = self._refresh_active_profile_brain
+        self.passwords.on_progress = self._relay_password_progress
         self.google_auth = GoogleOAuthManager(self)
         self.mail = SatzMailManager(self)
         self.news = SatzNewsEngine(self)
@@ -560,6 +574,7 @@ class SatzSidecarRuntime:
         self.gemma_model = None
         self.gemma_loading = False
         self.gemma_device = None
+        self._loaded_local_llm_dir: Path | None = None
 
         self.answerer = None
         self.answer_sessions: collections.OrderedDict[str, Any] = collections.OrderedDict()
@@ -929,6 +944,33 @@ class SatzSidecarRuntime:
         finally:
             self._unlock_defer_heavy = prev
 
+    def _relay_password_progress(self, step: str, status: str, detail: str | None = None) -> None:
+        self.emit_unlock_progress(step, status, detail=detail)
+
+    def emit_unlock_progress(
+        self,
+        step: str,
+        status: str,
+        *,
+        detail: str | None = None,
+        count: int | None = None,
+        total: int | None = None,
+    ) -> None:
+        cb = getattr(self._unlock_progress_tls, "callback", None)
+        if not callable(cb):
+            return
+        ev: dict[str, Any] = {"phase": "step", "step": step, "status": status}
+        if detail is not None:
+            ev["detail"] = detail
+        if count is not None:
+            ev["count"] = int(count)
+        if total is not None:
+            ev["total"] = int(total)
+        try:
+            cb(ev)
+        except Exception:
+            pass
+
     def wait_for_unlock_quiet(self, max_wait: float = 3.5) -> None:
         """Yields Gemma/heavy preload briefly while a profile unlock handshake is active."""
         deadline = time.time() + max(0.0, float(max_wait))
@@ -1010,6 +1052,8 @@ class SatzSidecarRuntime:
         with self.store_lock:
             is_unlocked = bool(self.passwords.unlocked and self.passwords.active_profile_id)
             pid = self.passwords.active_profile_id if is_unlocked else None
+            if is_unlocked:
+                self.emit_unlock_progress("store", "running", detail="opening_store")
             if is_unlocked and pid:
                 self._migrate_legacy_shared_store_if_needed(pid)
             target_store_path = self.passwords.get_profile_store_path(pid)
@@ -1068,7 +1112,10 @@ class SatzSidecarRuntime:
                 self.passwords.get_profile_brain_dir(pid),
                 sgs_root=self.sgs_root,
                 locked=not is_unlocked,
+                local_models=self.local_models,
             )
+            if is_unlocked:
+                self.emit_unlock_progress("store", "done")
 
         if hasattr(self, "mail") and self.mail is not None:
             self.mail.rebind_profile(defer_sync_start=use_defer)
@@ -1093,13 +1140,37 @@ class SatzSidecarRuntime:
 
     def start_gemma_preload(self) -> None:
         """
-        Section 3.2 (M9): Preloads Gemma in a background thread right after the HTTP server starts.
+        Section 3.2 (M9): Preloads Gemma in a background thread right after the HTTP server starts,
+        when local Gemma weights are present. If missing (e.g. fresh macOS install), skips cleanly.
         """
         def _preload():
             try:
                 self.wait_for_unlock_quiet(max_wait=4.0)
-                self.ensure_gemma()
-                print("[satz-sidecar] gemma [warm] - preload complete", flush=True)
+                target_id = None
+                if self.local_models.has_ready_local_llm("gemma-4-e4b"):
+                    target_id = "gemma-4-e4b"
+                else:
+                    role_chat = ""
+                    try:
+                        with self.store_lock:
+                            row = self.store.db.execute(
+                                "SELECT value FROM satz_meta WHERE key = 'model_role_chat'"
+                            ).fetchone()
+                            role_chat = str(row["value"] or "").strip() if row else ""
+                    except Exception:
+                        role_chat = ""
+                    if role_chat and role_chat.startswith("local:") and self.local_models.has_ready_local_llm(role_chat):
+                        target_id = role_chat
+                if not target_id:
+                    if self.gemma_device is None:
+                        self.gemma_device = self._detect_gemma_device()
+                    print(
+                        "[satz-sidecar] gemma [skip] - local LLM weights not installed; use Settings -> Models or Planck/cloud",
+                        flush=True,
+                    )
+                    return
+                self.ensure_gemma(target_id)
+                print(f"[satz-sidecar] {target_id} [warm] - preload complete", flush=True)
             except Exception as e:
                 self.record_error("gemma_preload", e)
 
@@ -1249,10 +1320,12 @@ class SatzSidecarRuntime:
             from satz_skills import ensure_skills_tables_on_conn
             from satz_providers import ensure_provider_tables_on_conn
             from satz_translate import ensure_translation_tables_on_conn
+            from satz_profile_bundle import ensure_planck_sync_triggers
 
             ensure_skills_tables_on_conn(db_conn)
             ensure_provider_tables_on_conn(db_conn)
             ensure_translation_tables_on_conn(db_conn)
+            ensure_planck_sync_triggers(db_conn)
             if hasattr(self, "news") and self.news is not None:
                 self.news.seed_starter_feeds(db_conn)
             # Purge any historical source rows where unclosed <style> blocks polluted trafilatura fallback with raw CSS
@@ -1298,11 +1371,15 @@ class SatzSidecarRuntime:
             pass
         return "cpu"
 
-    def _gemma_dir(self) -> Path:
+    def _gemma_dir(self, model_id: str | None = None) -> Path:
+        if hasattr(self, "local_models") and self.local_models is not None:
+            return self.local_models.resolve_chat_llm_dir(model_id)
         p = Path(self.gemma_rel_path)
         return p if p.is_absolute() else (self.sgs_root / p)
 
     def _hertz_reader_ckpt(self) -> Path | None:
+        if hasattr(self, "local_models") and self.local_models is not None:
+            return self.local_models.resolve_hertz_reader_ckpt()
         for rel in (
             "checkpoints/xreader_hertz_rc/reader.pt",
             "checkpoints/xreader_hertz/reader.pt",
@@ -1314,6 +1391,8 @@ class SatzSidecarRuntime:
         return None
 
     def _planck_reader_ckpt(self) -> Path | None:
+        if hasattr(self, "local_models") and self.local_models is not None:
+            return self.local_models.resolve_planck_reader_ckpt()[0]
         for rel in (
             "checkpoints/xreader_planck_rc/reader.pt",
             "checkpoints/xreader_planck_p15rc/reader.pt",
@@ -1327,29 +1406,50 @@ class SatzSidecarRuntime:
 
     def get_doctor(self) -> dict[str, Any]:
         gemma_dir = self._gemma_dir()
+        gemma_ready = gemma_dir.exists()
+        alt_local = (
+            self.local_models.first_ready_local_llm_id()
+            if hasattr(self, "local_models") and self.local_models is not None and not gemma_ready
+            else None
+        )
+        active_chat_id = "gemma-4-e4b" if (gemma_ready or not alt_local) else alt_local
+        active_chat_dir = gemma_dir if (gemma_ready or not alt_local) else self._gemma_dir(alt_local)
+        chat_ready = gemma_ready or bool(alt_local)
+
         hertz_ckpt = self._hertz_reader_ckpt()
-        planck_ckpt = self._planck_reader_ckpt()
+        planck_ckpt, planck_src = (
+            self.local_models.resolve_planck_reader_ckpt()
+            if hasattr(self, "local_models") and self.local_models is not None
+            else (self._planck_reader_ckpt(), "local_sgs")
+        )
         gemma_dev = self.gemma_device or self._detect_gemma_device()
 
-        enc_ckpt = self.sgs_root / "checkpoints" / "planck13" / "best.pt"
-        enc_tok = self.sgs_root / "data" / "wikipedia" / "tokenizer.model"
+        if hasattr(self, "local_models") and self.local_models is not None:
+            enc_ckpt, enc_tok, enc_src = self.local_models.resolve_planck13_encoder()
+        else:
+            enc_ckpt = self.sgs_root / "checkpoints" / "planck13" / "best.pt"
+            enc_tok = self.sgs_root / "data" / "wikipedia" / "tokenizer.model"
+            enc_src = "local_sgs" if (enc_ckpt.exists() and enc_tok.exists()) else "missing"
         enc_ready = bool(getattr(self.brain, "_encoder_ready", False))
-        enc_files_exist = enc_ckpt.exists() and enc_tok.exists()
+        enc_files_exist = bool(enc_ckpt is not None and enc_ckpt.exists() and enc_tok is not None and enc_tok.exists())
+
+        web_ckpt = hertz_ckpt if (hertz_ckpt is not None and hertz_ckpt.exists()) else planck_ckpt
+        web_ready = bool(web_ckpt is not None and web_ckpt.exists())
 
         roles = [
             {
                 "role": "chat",
-                "model": "gemma-4-e4b",
+                "model": active_chat_id,
                 "state": (
                     "missing"
-                    if not gemma_dir.exists()
+                    if not chat_ready
                     else ("cpu_only" if gemma_dev == "cpu" else "ready")
                 ),
                 "device": gemma_dev,
-                "path": str(gemma_dir),
+                "path": str(active_chat_dir),
                 "fix": (
-                    f"Place Gemma 4 E4B weights at {gemma_dir}"
-                    if not gemma_dir.exists()
+                    "Download a model from Hugging Face, link a local folder, or add a Cloud API key in Settings -> Models"
+                    if not chat_ready
                     else (
                         "Install CUDA or Apple Silicon MPS PyTorch build for GPU acceleration"
                         if gemma_dev == "cpu"
@@ -1360,13 +1460,13 @@ class SatzSidecarRuntime:
             {
                 "role": "web_answer",
                 "model": "planck3 (web)",
-                "state": "ready" if (hertz_ckpt is not None and hertz_ckpt.exists()) else "missing",
+                "state": "ready" if web_ready else "missing",
                 "device": "cpu",
-                "path": str(hertz_ckpt or (self.sgs_root / "checkpoints/xreader_hertz_rc/reader.pt")),
+                "path": str(web_ckpt or (self.sgs_root / "checkpoints/xreader_hertz_rc/reader.pt")),
                 "fix": (
                     ""
-                    if (hertz_ckpt is not None and hertz_ckpt.exists())
-                    else f"Copy reader.pt to {self.sgs_root / 'checkpoints/xreader_hertz_rc/reader.pt'}"
+                    if web_ready
+                    else "Link a Planck/Hertz reader checkpoint in Settings -> Models"
                 ),
             },
             {
@@ -1378,7 +1478,7 @@ class SatzSidecarRuntime:
                 "fix": (
                     ""
                     if (hertz_ckpt is not None and hertz_ckpt.exists())
-                    else f"Copy reader.pt to {self.sgs_root / 'checkpoints/xreader_hertz_rc/reader.pt'}"
+                    else f"Optional: shipped Planck reader is active, or link Hertz reader.pt in Settings -> Models ({self.sgs_root / 'checkpoints/xreader_hertz_rc/reader.pt'})"
                 ),
             },
             {
@@ -1387,10 +1487,11 @@ class SatzSidecarRuntime:
                 "state": "ready" if (planck_ckpt is not None and planck_ckpt.exists()) else "missing",
                 "device": "cpu",
                 "path": str(planck_ckpt or (self.sgs_root / "checkpoints/xreader_planck_rc/reader.pt")),
+                "source": planck_src,
                 "fix": (
                     ""
                     if (planck_ckpt is not None and planck_ckpt.exists())
-                    else f"Copy reader.pt to {self.sgs_root / 'checkpoints/xreader_planck_rc/reader.pt'} (optional; hertz reader is active)"
+                    else f"Link Planck reader.pt or manifest.json in Settings -> Models"
                 ),
             },
             {
@@ -1398,7 +1499,8 @@ class SatzSidecarRuntime:
                 "model": "planck13",
                 "state": "ready" if (enc_ready or enc_files_exist) else "missing",
                 "device": "cpu",
-                "path": str(enc_ckpt),
+                "path": str(enc_ckpt or ""),
+                "source": enc_src,
                 "label": (
                     "brain ranking: semantic (planck13)"
                     if (enc_ready or enc_files_exist)
@@ -1407,7 +1509,7 @@ class SatzSidecarRuntime:
                 "fix": (
                     ""
                     if (enc_ready or enc_files_exist)
-                    else f"Place {enc_ckpt} and {enc_tok} to enable semantic Brain vector embeddings"
+                    else "Link planck13 checkpoint & tokenizer.model in Settings -> Models"
                 ),
             },
         ]
@@ -1427,9 +1529,13 @@ class SatzSidecarRuntime:
         hertz_ckpt = self._hertz_reader_ckpt()
         planck_ckpt = self._planck_reader_ckpt()
         gemma_dev = self.gemma_device or self._detect_gemma_device()
+        loaded_dir = getattr(self, "_loaded_local_llm_dir", None)
+        gemma_is_loaded = self.gemma_model is not None and (
+            loaded_dir is None or loaded_dir == gemma_dir
+        )
 
         def gemma_status():
-            if self.gemma_model is not None:
+            if gemma_is_loaded:
                 return {
                     "id": "gemma-4-e4b",
                     "state": "ready",
@@ -1454,16 +1560,18 @@ class SatzSidecarRuntime:
                 "id": "gemma-4-e4b",
                 "state": "missing",
                 "device": gemma_dev,
-                "detail": f"missing {gemma_dir}",
+                "detail": "not installed (configure in Settings -> Models)",
             }
 
         def planck3_status():
             if self.answerer is not None:
-                return {"id": "planck3 (web)", "state": "ready", "device": "cpu", "detail": "x-hertz + template"}
+                return {"id": "planck3 (web)", "state": "ready", "device": "cpu", "detail": "x-reader + template"}
             if self.planck3_loading:
                 return {"id": "planck3 (web)", "state": "loading", "device": "cpu", "detail": "loading pipeline..."}
-            if hertz_ckpt is not None:
+            if hertz_ckpt is not None and hertz_ckpt.exists():
                 return {"id": "planck3 (web)", "state": "not_loaded", "device": "cpu", "detail": "hertz int8 + template"}
+            if planck_ckpt is not None and planck_ckpt.exists():
+                return {"id": "planck3 (web)", "state": "not_loaded", "device": "cpu", "detail": "shipped planck int8 + template"}
             return {"id": "planck3 (web)", "state": "missing", "device": "cpu", "detail": "missing reader checkpoint"}
 
         def reader_status(model_id: str, ckpt: Path | None):
@@ -1472,8 +1580,23 @@ class SatzSidecarRuntime:
             if self.reader_loading.get(model_id):
                 return {"id": model_id, "state": "loading", "device": "cpu", "detail": "loading reader..."}
             if ckpt is not None and ckpt.exists():
-                return {"id": model_id, "state": "not_loaded", "device": "cpu", "detail": f"{ckpt.parent.name}/reader.pt"}
+                detail_name = f"{ckpt.parent.name}/{ckpt.name}" if ckpt.name != "manifest.json" else f"shipped/{ckpt.parent.name}"
+                return {"id": model_id, "state": "not_loaded", "device": "cpu", "detail": detail_name}
             return {"id": model_id, "state": "missing", "device": "cpu", "detail": f"missing {model_id} checkpoint"}
+
+        custom_llm_entries: list[dict[str, Any]] = []
+        if hasattr(self, "local_models") and self.local_models is not None:
+            for item in self.local_models.list_custom_llms():
+                c_path = Path(str(item.get("path") or ""))
+                is_loaded = self.gemma_model is not None and loaded_dir is not None and loaded_dir == c_path
+                custom_llm_entries.append(
+                    {
+                        "id": str(item.get("id") or ""),
+                        "state": "ready" if is_loaded else ("not_loaded" if item.get("ready") else "missing"),
+                        "device": gemma_dev,
+                        "detail": str(item.get("label") or c_path.name) + (" (local)" if item.get("ready") else " (invalid path)"),
+                    }
+                )
 
         mail_status = self.mail.get_status() if hasattr(self, "mail") and self.mail else None
         news_status = self.news.get_status() if hasattr(self, "news") and self.news else None
@@ -1486,6 +1609,7 @@ class SatzSidecarRuntime:
                 planck3_status(),
                 reader_status("hertz (reader)", hertz_ckpt),
                 reader_status("planck (reader)", planck_ckpt),
+                *custom_llm_entries,
                 *self._cloud_model_health_entries(),
             ],
             "ingest_queue_len": self.ingest_queue.qsize(),
@@ -1890,10 +2014,23 @@ class SatzSidecarRuntime:
                 }
             )
 
+        local_snap = self.local_models.get_snapshot() if hasattr(self, "local_models") and self.local_models is not None else None
+        effective_chat = role_chat
+        if role_chat == "gemma-4-e4b" and hasattr(self, "local_models") and self.local_models is not None:
+            if not self.local_models.has_ready_local_llm("gemma-4-e4b"):
+                alt_local = self.local_models.first_ready_local_llm_id()
+                if alt_local:
+                    effective_chat = alt_local
+                else:
+                    ready_cloud = self._resolve_ready_cloud_model()
+                    if ready_cloud:
+                        effective_chat = ready_cloud
+
         return {
             "ok": True,
             "roles": {
                 "chat": role_chat,
+                "effective_chat": effective_chat,
                 "web_answer": role_web,
                 "reader": role_reader,
                 "news_planner": role_news_planner,
@@ -1904,6 +2041,7 @@ class SatzSidecarRuntime:
                 "brain_encoder": "planck13 (local)",
             },
             "cloud_providers": providers_out,
+            "local_models": local_snap,
         }
 
     def update_model_management_config(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -2451,7 +2589,29 @@ class SatzSidecarRuntime:
                 thinking_budget=thinking_budget,
             ).replace("\u2014", "-")
 
-        tok, model = self.ensure_gemma()
+        is_real_ensure = getattr(self.ensure_gemma, "__func__", None) is SatzSidecarRuntime.ensure_gemma
+        if is_real_ensure:
+            target_id = (
+                model_id
+                if (model_id and self.local_models.has_ready_local_llm(model_id))
+                else self.local_models.first_ready_local_llm_id()
+            )
+            if not target_id:
+                cloud_fb = self._resolve_ready_cloud_model()
+                if cloud_fb:
+                    return self._generate_with_cloud_provider(
+                        cloud_fb,
+                        msgs,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        thinking_budget=thinking_budget,
+                    ).replace("\u2014", "-")
+                raise RuntimeError(
+                    "No local model or cloud API key is configured. Open Settings -> Models to download or link a model."
+                )
+            tok, model = self.ensure_gemma(target_id)
+        else:
+            tok, model = self.ensure_gemma()
         import torch
 
         inputs = tok.apply_chat_template(
@@ -2520,7 +2680,52 @@ class SatzSidecarRuntime:
             yield {"__full_raw": full_txt.replace("\u2014", "-").strip()}
             return
 
-        tok, model = self.ensure_gemma()
+        is_real_ensure = getattr(self.ensure_gemma, "__func__", None) is SatzSidecarRuntime.ensure_gemma
+        if is_real_ensure:
+            target_id = (
+                model_id
+                if (model_id and self.local_models.has_ready_local_llm(model_id))
+                else self.local_models.first_ready_local_llm_id()
+            )
+            if not target_id:
+                cloud_fb = self._resolve_ready_cloud_model()
+                if cloud_fb:
+                    from satz_web_harness import WebSearchSessionHarness, stream_cloud_chat
+
+                    h = WebSearchSessionHarness(
+                        self,
+                        combined_sources=[],
+                        hydrated_sources=[],
+                        used_source_ids=[],
+                        cited_web_sources=[],
+                        source_stats_list=[],
+                        allow_web_tools=False,
+                        user_msg=user_prompt,
+                    )
+                    full_txt = ""
+                    for ev in stream_cloud_chat(
+                        h,
+                        model_id=cloud_fb,
+                        chat_msgs=msgs,
+                        allow_web_tools=False,
+                        allow_actor_tools=False,
+                        thinking_budget=thinking_budget,
+                        single_turn=True,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    ):
+                        if "__full_raw" in ev:
+                            full_txt = str(ev.get("__full_raw") or "")
+                        elif ev.get("delta") or ev.get("phase") == "heartbeat":
+                            yield ev
+                    yield {"__full_raw": full_txt.replace("\u2014", "-").strip()}
+                    return
+                raise RuntimeError(
+                    "No local model or cloud API key is configured. Open Settings -> Models to download or link a model."
+                )
+            tok, model = self.ensure_gemma(target_id)
+        else:
+            tok, model = self.ensure_gemma()
         import queue as _q
         import torch
         from transformers import TextIteratorStreamer
@@ -2583,16 +2788,42 @@ class SatzSidecarRuntime:
         yield {"__full_raw": "".join(parts_out).strip()}
 
     # ── Lazy Model Loaders ───────────────────────────────────────────────
-    def ensure_gemma(self):
-        if self.gemma_model is not None:
+    def ensure_gemma(self, model_id: str | None = None):
+        target_dir = self._gemma_dir(model_id)
+        if self.gemma_model is not None and (
+            self._loaded_local_llm_dir is None
+            or not model_id
+            or self._loaded_local_llm_dir == target_dir
+        ):
             return self.gemma_tok, self.gemma_model
         self.wait_for_unlock_quiet(max_wait=3.0)
         with self.model_lock:
-            if self.gemma_model is not None:
+            target_dir = self._gemma_dir(model_id)
+            if self.gemma_model is not None and (
+                self._loaded_local_llm_dir is None
+                or not model_id
+                or self._loaded_local_llm_dir == target_dir
+            ):
                 return self.gemma_tok, self.gemma_model
-            gemma_dir = self._gemma_dir()
-            if not gemma_dir.exists():
-                raise RuntimeError(f"Gemma checkpoint not found at {gemma_dir}")
+            if not target_dir.exists():
+                raise RuntimeError(
+                    f"Local LLM checkpoint not found at {target_dir}. Open Settings -> Models to download from Hugging Face or link a local model folder."
+                )
+            if self.gemma_model is not None:
+                # Unload previous local LLM before swapping weights
+                self.gemma_model = None
+                self.gemma_tok = None
+                self.gemma_processor = None
+                self._loaded_local_llm_dir = None
+                try:
+                    import gc
+                    import torch
+
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
             self.gemma_loading = True
             try:
                 import torch
@@ -2602,40 +2833,47 @@ class SatzSidecarRuntime:
                 with _SHARED_ENCODER_LOCK:
                     dev = self._detect_gemma_device()
                     self.gemma_device = dev
-                    print(f"[satz-sidecar] loading Gemma 4 E4B from {gemma_dir} onto {dev} ...", flush=True)
+                    disp_name = model_id or target_dir.name
+                    print(f"[satz-sidecar] loading {disp_name} from {target_dir} onto {dev} ...", flush=True)
                     proc = None
                     try:
-                        proc = AutoProcessor.from_pretrained(str(gemma_dir))
+                        proc = AutoProcessor.from_pretrained(str(target_dir))
                     except Exception:
                         proc = None
-                    tok = getattr(proc, "tokenizer", None) or AutoTokenizer.from_pretrained(str(gemma_dir))
+                    tok = getattr(proc, "tokenizer", None) or AutoTokenizer.from_pretrained(str(target_dir))
+                    if getattr(tok, "pad_token_id", None) is None and getattr(tok, "eos_token", None) is not None:
+                        try:
+                            tok.pad_token = tok.eos_token
+                        except Exception:
+                            pass
                     if dev == "cuda":
                         try:
                             model = AutoModelForCausalLM.from_pretrained(
-                                str(gemma_dir),
+                                str(target_dir),
                                 dtype=torch.bfloat16,
                                 low_cpu_mem_usage=True,
                                 device_map={"": "cuda:0"},
                             )
                         except TypeError:
                             model = AutoModelForCausalLM.from_pretrained(
-                                str(gemma_dir),
+                                str(target_dir),
                                 dtype=torch.bfloat16,
                             ).to("cuda:0")
                     elif dev == "mps":
                         model = AutoModelForCausalLM.from_pretrained(
-                            str(gemma_dir),
+                            str(target_dir),
                             dtype=torch.float16,
                         ).to("mps")
                     else:
                         model = AutoModelForCausalLM.from_pretrained(
-                            str(gemma_dir),
+                            str(target_dir),
                             dtype=torch.float32,
                         )
                     model.eval()
                     self.gemma_processor = proc
                     self.gemma_tok = tok
                     self.gemma_model = model
+                    self._loaded_local_llm_dir = target_dir
                 return self.gemma_tok, self.gemma_model
             finally:
                 self.gemma_loading = False
@@ -2696,7 +2934,8 @@ class SatzSidecarRuntime:
 
                 orig_cwd = os.getcwd()
                 try:
-                    os.chdir(self.sgs_root)
+                    if self.sgs_root.exists():
+                        os.chdir(self.sgs_root)
                     # Section 4.3: Gemma on GPU, readers on CPU with int8 so both fit at once
                     reader = CrossReader(
                         str(ckpt),
@@ -2705,7 +2944,8 @@ class SatzSidecarRuntime:
                         max_cands=16,
                     )
                 finally:
-                    os.chdir(orig_cwd)
+                    if os.getcwd() != orig_cwd:
+                        os.chdir(orig_cwd)
                 self.readers[model_id] = reader
                 return reader
             finally:
@@ -2722,7 +2962,8 @@ class SatzSidecarRuntime:
                 from src.planck3.answer import Answerer
                 from src.planck3.writer import TemplateWriter
 
-                reader = self.ensure_reader("hertz (reader)")
+                reader_id = "hertz (reader)" if self._hertz_reader_ckpt() is not None else "planck (reader)"
+                reader = self.ensure_reader(reader_id)
                 writer = TemplateWriter()
                 self.answerer = Answerer(self.web, self.store, reader, writer)
                 return self.answerer
@@ -4630,7 +4871,16 @@ class SatzSidecarRuntime:
         from src.planck3.qtype import classify
         from src.planck3.web import domain_of
 
-        reader = self.ensure_reader(model_id)
+        eff_reader_id = (
+            "planck (reader)"
+            if (
+                model_id == "hertz (reader)"
+                and self._hertz_reader_ckpt() is None
+                and self._planck_reader_ckpt() is not None
+            )
+            else model_id
+        )
+        reader = self.ensure_reader(eff_reader_id)
         at = infer_answer_type(question)
         qt = classify(question)
 
@@ -5813,7 +6063,49 @@ class SatzSidecarRuntime:
         emitted_len = 0
         in_brain_tag = False
 
-        if cloud_parsed is not None:
+        effective_local_model_id = model_id
+        local_settings_skip = False
+        is_real_ensure = getattr(self.ensure_gemma, "__func__", None) is SatzSidecarRuntime.ensure_gemma
+        if cloud_parsed is None:
+            target_llm_dir = self._gemma_dir(effective_local_model_id)
+            loaded_llm_dir = getattr(self, "_loaded_local_llm_dir", None)
+            needs_disk_check = self.gemma_model is None or (
+                loaded_llm_dir is not None and loaded_llm_dir != target_llm_dir
+            )
+            if (
+                is_real_ensure
+                and needs_disk_check
+                and not self.local_models.has_ready_local_llm(effective_local_model_id)
+            ):
+                alt_local = self.local_models.first_ready_local_llm_id()
+                if alt_local:
+                    yield {
+                        "status": f"{effective_local_model_id} not installed; switching to local {alt_local}...",
+                        "phase": "fallback",
+                    }
+                    effective_local_model_id = alt_local
+                else:
+                    cloud_fb = self._resolve_ready_cloud_model()
+                    if cloud_fb and self._parse_cloud_model_id(cloud_fb) is not None:
+                        yield {
+                            "status": f"{effective_local_model_id} not installed; switching to configured cloud {cloud_fb}...",
+                            "phase": "fallback",
+                        }
+                        model_id = cloud_fb
+                        cloud_parsed = self._parse_cloud_model_id(cloud_fb)
+                    elif is_any_settings_origin:
+                        local_settings_skip = True
+                        in_brain_tag = True
+                    else:
+                        raise RuntimeError(
+                            f"Local model '{effective_local_model_id}' is not installed on this machine. "
+                            "Open Settings -> Models to download a model from Hugging Face, link a local folder, "
+                            "add a Cloud API key, or click Use Planck instead."
+                        )
+
+        if local_settings_skip:
+            pass
+        elif cloud_parsed is not None:
             prov_id, prov_slug = cloud_parsed
             web_note = " + web_search harness" if should_run_web else " (web: off)"
             img_note = f", {len(active_images)} image(s)" if active_images else ""
@@ -6016,9 +6308,16 @@ class SatzSidecarRuntime:
                         emitted_len += len(tail_rem)
                 in_brain_tag = True
         else:
-            if self.gemma_model is None:
+            target_llm_dir = self._gemma_dir(effective_local_model_id)
+            loaded_llm_dir = getattr(self, "_loaded_local_llm_dir", None)
+            needs_load = self.gemma_model is None or (
+                is_real_ensure
+                and loaded_llm_dir is not None
+                and loaded_llm_dir != target_llm_dir
+            )
+            if needs_load:
                 yield {
-                    "status": f"loading gemma-4-e4b into {self.gemma_device or self._detect_gemma_device()} memory...",
+                    "status": f"loading {effective_local_model_id} into {self.gemma_device or self._detect_gemma_device()} memory...",
                     "phase": "model_load",
                 }
                 load_done = threading.Event()
@@ -6026,7 +6325,10 @@ class SatzSidecarRuntime:
 
                 def _load_worker():
                     try:
-                        self.ensure_gemma()
+                        if is_real_ensure:
+                            self.ensure_gemma(effective_local_model_id)
+                        else:
+                            self.ensure_gemma()
                     except Exception as exc:
                         load_err.append(exc)
                     finally:
@@ -6038,11 +6340,15 @@ class SatzSidecarRuntime:
                     yield {"phase": "heartbeat"}
                 if load_err:
                     raise load_err[0]
-            tok, model = self.ensure_gemma()
+            tok, model = (
+                self.ensure_gemma(effective_local_model_id)
+                if is_real_ensure
+                else self.ensure_gemma()
+            )
 
             img_note = f", {len(active_images)} image(s)" if active_images else ""
             yield {
-                "status": f"running gemma-4-e4b prefill over {len(used_source_ids)} source(s) ({len(context_str):,} chars{img_note})...",
+                "status": f"running {effective_local_model_id} prefill over {len(used_source_ids)} source(s) ({len(context_str):,} chars{img_note})...",
                 "phase": "generating",
             }
 
@@ -6056,7 +6362,7 @@ class SatzSidecarRuntime:
                 allow_actor_tools=True,
                 active_images=active_images or None,
                 gemma_processor=self.gemma_processor,
-                gemma_dir=self._gemma_dir(),
+                gemma_dir=target_llm_dir,
                 brain_sources=brain_sources,
             ):
                 if "__full_raw" in ev:
@@ -7576,7 +7882,7 @@ class SatzSidecarRuntime:
                 return role_chat
 
         fallback_defaults = {
-            "gemini": "gemini:gemini-2.5-flash",
+            "gemini": "gemini:gemini-3.8-flash",
             "anthropic": "anthropic:claude-3-5-sonnet-latest",
             "openai": "openai:gpt-4o-mini",
             "mistral": "mistral:mistral-large-latest",
@@ -7588,13 +7894,17 @@ class SatzSidecarRuntime:
                 continue
             with self.store_lock:
                 crow = self.store.db.execute(
-                    "SELECT value FROM satz_meta WHERE key = ?",
-                    (f"cloud_models_cache_{pid}",),
+                    "SELECT value FROM satz_meta WHERE key IN (?, ?) ORDER BY key ASC LIMIT 1",
+                    (f"cloud_models_{pid}", f"cloud_models_cache_{pid}"),
                 ).fetchone()
             if crow and crow["value"]:
                 try:
                     cached = json.loads(crow["value"])
-                    models = cached.get("models") if isinstance(cached, dict) else None
+                    models = (
+                        cached
+                        if isinstance(cached, list)
+                        else (cached.get("models") if isinstance(cached, dict) else None)
+                    )
                     if isinstance(models, list) and models:
                         first_id = str((models[0] or {}).get("id") or "").strip()
                         if first_id:
@@ -7734,7 +8044,7 @@ class SatzSidecarRuntime:
             sig = str(r["outcome_signal"] or "")
             mod = str(r["model_id"] or "")
             tgt = str(r["target_model"] or "").strip()
-            is_local = (mod in local_models) or not (mod == "planck3 (web)" or self._parse_cloud_model_id(mod) is not None)
+            is_local = mod.startswith("local:") or (mod in local_models) or not (mod == "planck3 (web)" or self._parse_cloud_model_id(mod) is not None)
             w_on = bool(r["web_enabled"])
             m_on = bool(r["mail_enabled"])
 
@@ -7883,7 +8193,13 @@ class SatzSidecarRuntime:
         escalated = False
         reason = ""
 
-        is_local = eff_model in ("gemma-4-e4b", "hertz (reader)", "hertz-1.2", "planck (reader)", "planck-r5")
+        is_local = eff_model.startswith("local:") or eff_model in (
+            "gemma-4-e4b",
+            "hertz (reader)",
+            "hertz-1.2",
+            "planck (reader)",
+            "planck-r5",
+        )
         if rule:
             if not user_overrode_model and is_local and rule.get("escalated") and rule.get("recommended_model"):
                 cand = str(rule["recommended_model"])
@@ -10150,6 +10466,16 @@ def make_sidecar_server(
                 return self._json(runtime.get_doctor())
             if route_path == "/models/config":
                 return self._json(runtime.get_model_management_config())
+            if route_path == "/models/local":
+                return self._json({"ok": True, "local_models": runtime.local_models.get_snapshot()})
+            if route_path == "/models/hf/catalog":
+                return self._json({"ok": True, "catalog": runtime.local_models.get_snapshot()["hf_catalog"]})
+            if route_path == "/models/hf/search":
+                q = query_params.get("q", "")
+                lim = int(query_params.get("limit", "8") or 8)
+                return self._json(runtime.local_models.search_hf_models(q, limit=lim))
+            if route_path == "/models/hf/downloads":
+                return self._json({"ok": True, "downloads": runtime.local_models.list_hf_downloads()})
             if route_path == "/providers":
                 return self._json(runtime.providers.list_registry())
             if route_path == "/translation/config":
@@ -10189,6 +10515,9 @@ def make_sidecar_server(
                 return self._json(runtime.news.list_sources(q, cat, band_f, conf_only, rss_only))
             if route_path == "/news/topics":
                 return self._json(runtime.news.list_topics())
+            if route_path == "/news/followed_stories":
+                inc_u = query_params.get("include_updates", "1") not in ("0", "false")
+                return self._json(runtime.news.list_followed_stories(include_updates=inc_u))
             if route_path == "/news/settings/onboard":
                 from satz_tools.news_settings import build_news_settings_onboarding_payload
 
@@ -10320,6 +10649,8 @@ def make_sidecar_server(
                 return self._json({"error": "unauthorized"}, 401)
 
             length = int(self.headers.get("Content-Length", 0))
+            if length > 128 * 1024 * 1024:
+                return self._json({"error": "request body too large"}, 413)
             raw_body = self.rfile.read(length) if length > 0 else b"{}"
             try:
                 data = json.loads(raw_body or b"{}")
@@ -10369,6 +10700,73 @@ def make_sidecar_server(
             if self.path == "/models/config":
                 res = runtime.update_model_management_config(data)
                 return self._json(res, 200 if res.get("ok") else 400)
+
+            if self.path == "/models/hf/inspect":
+                res = runtime.local_models.inspect_hf_repo(
+                    str(data.get("repo_id") or ""),
+                    token=str(data.get("token") or ""),
+                )
+                return self._json(res, 200 if res.get("ok") else 400)
+
+            if self.path == "/models/hf/download":
+                res = runtime.local_models.start_hf_download(
+                    repo_id=str(data.get("repo_id") or ""),
+                    token=str(data.get("token") or ""),
+                    target_dir=str(data.get("target_dir") or ""),
+                    use_as_chat=bool(data.get("use_as_chat", True)),
+                )
+                return self._json(res, 200 if res.get("ok") else 400)
+
+            if self.path == "/models/hf/cancel":
+                res = runtime.local_models.cancel_hf_download(str(data.get("download_id") or ""))
+                return self._json(res, 200 if res.get("ok") else 400)
+
+            if self.path == "/models/local/add":
+                res = runtime.local_models.point_local_model(
+                    role_slot=str(data.get("role_slot") or "chat_llm"),
+                    raw_path=str(data.get("path") or ""),
+                    label=str(data.get("label") or ""),
+                    set_active=bool(data.get("set_active", True)),
+                )
+                if res.get("ok"):
+                    return self._json({**runtime.get_model_management_config(), **res}, 200)
+                return self._json(res, 400)
+
+            if self.path == "/models/local/remove":
+                res = runtime.local_models.remove_local_model(
+                    model_id=str(data.get("model_id") or ""),
+                    role_slot=str(data.get("role_slot") or ""),
+                    delete_files=bool(data.get("delete_files", False)),
+                )
+                if res.get("ok"):
+                    return self._json({**runtime.get_model_management_config(), **res}, 200)
+                return self._json(res, 400)
+
+            if self.path == "/models/local/token":
+                res = runtime.local_models.save_hf_token(
+                    token=str(data.get("token") or ""),
+                    clear=bool(data.get("clear", False)),
+                )
+                if res.get("ok"):
+                    return self._json({**runtime.get_model_management_config(), **res}, 200)
+                return self._json(res, 400)
+
+            if self.path == "/models/browse":
+                from satz_local_models import open_native_file_dialog
+
+                sel_path, cancelled, err = open_native_file_dialog(
+                    mode=str(data.get("mode") or "directory"),
+                    title=str(data.get("title") or "Select local model"),
+                )
+                return self._json(
+                    {
+                        "ok": not bool(err),
+                        "path": sel_path,
+                        "cancelled": cancelled,
+                        "error": err,
+                    },
+                    200 if not err else 400,
+                )
 
             if self.path == "/knowledge/delete_passage":
                 pid = str(data.get("passage_id") or "")
@@ -10573,43 +10971,71 @@ def make_sidecar_server(
                 except Exception as e:
                     return self._json({"ok": False, "error": str(e), "previews": {}}, 500)
 
-            if self.path == "/profile/create":
-                try:
-                    with runtime._fast_http_unlock_context():
-                        res = runtime.passwords.create_profile(
-                            name=str(data.get("name") or ""),
-                            pin=str(data.get("pin") or ""),
-                        )
-                        if getattr(runtime.passwords, "on_profile_change", None) is None:
-                            runtime._refresh_active_profile_brain(defer_heavy=True)
-                    return self._json({"ok": True, **res})
-                except Exception as e:
-                    return self._json({"ok": False, "error": str(e)}, 400)
+            if self.path in ("/profile/create", "/profile/unlock", "/profile/unlock_keychain"):
+                want_stream = bool(data.get("stream", False))
 
-            if self.path == "/profile/unlock":
-                try:
+                def _exec_profile_action():
                     with runtime._fast_http_unlock_context():
-                        res = runtime.passwords.unlock_profile(
-                            profile_id=str(data.get("profile_id") or ""),
-                            pin=str(data.get("pin") or ""),
-                        )
+                        if self.path == "/profile/create":
+                            res = runtime.passwords.create_profile(
+                                name=str(data.get("name") or ""),
+                                pin=str(data.get("pin") or ""),
+                            )
+                        elif self.path == "/profile/unlock_keychain":
+                            res = runtime.passwords.unlock_with_keychain(
+                                profile_id=str(data.get("profile_id") or ""),
+                            )
+                        else:
+                            res = runtime.passwords.unlock_profile(
+                                profile_id=str(data.get("profile_id") or ""),
+                                pin=str(data.get("pin") or ""),
+                            )
                         if getattr(runtime.passwords, "on_profile_change", None) is None:
                             runtime._refresh_active_profile_brain(defer_heavy=True)
-                    return self._json({"ok": True, **res})
-                except Exception as e:
-                    return self._json({"ok": False, "error": str(e)}, 400)
+                    return res
 
-            if self.path == "/profile/unlock_keychain":
-                try:
-                    with runtime._fast_http_unlock_context():
-                        res = runtime.passwords.unlock_with_keychain(
-                            profile_id=str(data.get("profile_id") or ""),
-                        )
-                        if getattr(runtime.passwords, "on_profile_change", None) is None:
-                            runtime._refresh_active_profile_brain(defer_heavy=True)
-                    return self._json({"ok": True, **res})
-                except Exception as e:
-                    return self._json({"ok": False, "error": str(e)}, 400)
+                if not want_stream:
+                    try:
+                        res = _exec_profile_action()
+                        return self._json({"ok": True, **res})
+                    except Exception as e:
+                        return self._json({"ok": False, "error": str(e)}, 400)
+
+                self.send_response(200)
+                self._send_cors_headers()
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                self.end_headers()
+
+                ev_q: queue.Queue[dict[str, Any] | None] = queue.Queue()
+
+                def _worker() -> None:
+                    def _push(ev: dict[str, Any]) -> None:
+                        ev_q.put(ev)
+
+                    runtime._unlock_progress_tls.callback = _push
+                    try:
+                        res = _exec_profile_action()
+                        ev_q.put({"done": True, "ok": True, **res})
+                    except Exception as e:
+                        ev_q.put({"done": True, "ok": False, "error": str(e)})
+                    finally:
+                        runtime._unlock_progress_tls.callback = None
+                        ev_q.put(None)
+
+                threading.Thread(target=_worker, daemon=True, name="satz-unlock-sse").start()
+                while True:
+                    item = ev_q.get()
+                    if item is None:
+                        break
+                    try:
+                        line = f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+                        self.wfile.write(line.encode("utf-8"))
+                        self.wfile.flush()
+                    except Exception:
+                        break
+                return
 
             if self.path == "/profile/lock":
                 if getattr(runtime, "google_auth", None) is not None:
@@ -10632,6 +11058,95 @@ def make_sidecar_server(
                     return self._json({"ok": True, **res})
                 except Exception as e:
                     return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/profile/export":
+                try:
+                    from satz_profile_bundle import export_profile_bundle
+
+                    res = export_profile_bundle(
+                        runtime,
+                        profile_id=str(data.get("profile_id") or "").strip() or None,
+                        pin=str(data.get("pin") or "").strip() or None,
+                    )
+                    return self._json({"ok": True, **res})
+                except PermissionError as e:
+                    return self._json({"ok": False, "error": str(e)}, 401)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/profile/import":
+                want_stream = bool(data.get("stream", False))
+                raw_b64 = str(data.get("bundle_b64") or "").strip()
+                pin_val = str(data.get("pin") or "")
+                local_pin_val = str(data.get("local_pin") or "")
+                activate_val = bool(data.get("activate", True))
+
+                def _exec_import_action():
+                    if not raw_b64:
+                        raise ValueError("Missing profile bundle payload.")
+                    try:
+                        raw_bytes = base64.b64decode(raw_b64, validate=True)
+                    except Exception:
+                        try:
+                            raw_bytes = base64.b64decode(raw_b64)
+                        except Exception as exc:
+                            raise ValueError("Invalid base64 bundle payload.") from exc
+                    from satz_profile_bundle import import_profile_bundle
+
+                    with runtime._fast_http_unlock_context():
+                        res = import_profile_bundle(
+                            runtime,
+                            raw_bytes,
+                            pin_val,
+                            local_pin=local_pin_val,
+                            activate=activate_val,
+                        )
+                        if getattr(runtime.passwords, "on_profile_change", None) is None:
+                            runtime._refresh_active_profile_brain(defer_heavy=True)
+                    return res
+
+                if not want_stream:
+                    try:
+                        res = _exec_import_action()
+                        return self._json({"ok": True, **res})
+                    except Exception as e:
+                        return self._json({"ok": False, "error": str(e)}, 400)
+
+                self.send_response(200)
+                self._send_cors_headers()
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                self.end_headers()
+
+                ev_q: queue.Queue[dict[str, Any] | None] = queue.Queue()
+
+                def _import_worker() -> None:
+                    def _push(ev: dict[str, Any]) -> None:
+                        ev_q.put(ev)
+
+                    runtime._unlock_progress_tls.callback = _push
+                    try:
+                        res = _exec_import_action()
+                        ev_q.put({"done": True, "ok": True, **res})
+                    except Exception as e:
+                        ev_q.put({"done": True, "ok": False, "error": str(e)})
+                    finally:
+                        runtime._unlock_progress_tls.callback = None
+                        ev_q.put(None)
+
+                threading.Thread(target=_import_worker, daemon=True, name="satz-profile-import-sse").start()
+                while True:
+                    item = ev_q.get()
+                    if item is None:
+                        break
+                    try:
+                        line = f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+                        self.wfile.write(line.encode("utf-8"))
+                        self.wfile.flush()
+                    except Exception:
+                        break
+                return
 
             if self.path == "/passwords/upsert":
                 try:
@@ -11035,10 +11550,11 @@ def make_sidecar_server(
             if self.path == "/news/perspectives_stream":
                 topic = str(data.get("topic") or data.get("question") or "").strip()
                 cid = str(data.get("cluster_id") or "").strip()
-                if not topic and not cid:
-                    return self._json({"ok": False, "error": "topic or cluster_id required"}, 400)
+                fsid = str(data.get("followed_story_id") or "").strip()
+                if not topic and not cid and not fsid:
+                    return self._json({"ok": False, "error": "topic, cluster_id, or followed_story_id required"}, 400)
                 if hasattr(runtime, "behavior") and runtime.behavior is not None:
-                    runtime.behavior.log_event("news_perspectives", query=topic or cid)
+                    runtime.behavior.log_event("news_perspectives", query=topic or cid or fsid)
                 roles_ovr = data.get("roles") if isinstance(data.get("roles"), dict) else None
                 prior_msgs = data.get("messages") if isinstance(data.get("messages"), list) else None
 
@@ -11052,6 +11568,7 @@ def make_sidecar_server(
                     for event in runtime.news.stream_topic_perspectives(
                         topic=topic,
                         cluster_id=cid,
+                        followed_story_id=fsid,
                         roles_override=roles_ovr,
                         prior_messages=prior_msgs,
                     ):
@@ -11344,6 +11861,36 @@ def make_sidecar_server(
                     return self._json(runtime.news.manage_topic(data))
                 except Exception as e:
                     return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/news/followed_stories/pin":
+                try:
+                    kws = data.get("keywords") if isinstance(data.get("keywords"), list) else None
+                    return self._json(
+                        runtime.news.pin_followed_story(
+                            cluster_id=str(data.get("cluster_id") or ""),
+                            title=str(data.get("title") or ""),
+                            url=str(data.get("url") or ""),
+                            article_id=str(data.get("article_id") or ""),
+                            keywords=kws,
+                        )
+                    )
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/news/followed_stories/unpin":
+                return self._json(runtime.news.unpin_followed_story(str(data.get("story_id") or "")))
+
+            if self.path == "/news/followed_stories/read":
+                return self._json(runtime.news.mark_followed_story_read(str(data.get("story_id") or "")))
+
+            if self.path == "/news/followed_stories/refresh":
+                fsid = str(data.get("story_id") or "")
+                sync_res = runtime.news.sync_followed_stories(
+                    synthesize_new=True,
+                    force_story_id=fsid,
+                    allow_llm_in_bg=True,
+                )
+                return self._json({**sync_res, **runtime.news.list_followed_stories()})
 
             if self.path == "/news/save_to_brain":
                 cid = str(data.get("cluster_id") or "")
@@ -11899,8 +12446,31 @@ def main():
     if args.preload_gemma:
         try:
             runtime.wait_for_unlock_quiet(max_wait=4.0)
-            runtime.ensure_gemma()
-            print("[satz-sidecar] gemma [warm] - preload complete", flush=True)
+            target_id = None
+            if runtime.local_models.has_ready_local_llm("gemma-4-e4b"):
+                target_id = "gemma-4-e4b"
+            else:
+                role_chat = ""
+                try:
+                    with runtime.store_lock:
+                        row = runtime.store.db.execute(
+                            "SELECT value FROM satz_meta WHERE key = 'model_role_chat'"
+                        ).fetchone()
+                        role_chat = str(row["value"] or "").strip() if row else ""
+                except Exception:
+                    role_chat = ""
+                if role_chat and role_chat.startswith("local:") and runtime.local_models.has_ready_local_llm(role_chat):
+                    target_id = role_chat
+            if target_id:
+                runtime.ensure_gemma(target_id)
+                print(f"[satz-sidecar] {target_id} [warm] - preload complete", flush=True)
+            else:
+                if runtime.gemma_device is None:
+                    runtime.gemma_device = runtime._detect_gemma_device()
+                print(
+                    "[satz-sidecar] gemma [skip] - local LLM weights not installed; use Settings -> Models or Planck/cloud",
+                    flush=True,
+                )
         except Exception as e:
             runtime.record_error("gemma_preload", e)
     elif runtime.gemma_device is None:

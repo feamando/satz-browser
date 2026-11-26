@@ -981,6 +981,7 @@ export interface ChatActions {
   onSettingsCardCancelLanguage?: (msgId: string, cardId: string, lang: string) => Promise<void>;
   onChangeModel: (model: LocalModelId) => void;
   onUsePlanckInstead?: (text: string, msgId?: string) => void;
+  onOpenModelsSettings?: () => void;
   onFlaggedCitationClick?: (
     citeLabel: string,
     kind: "src" | "brain" | "unsourced",
@@ -1295,6 +1296,7 @@ export function renderChatPanel(
           <button class="pill" type="button" data-chat-suggest="What are today's top corroborated European news stories?">${escapeHtml(t("chat.sugg_news_eu"))}</button>
           <button class="pill" type="button" data-chat-suggest="Compare perspectives on current global energy &amp; grid policy news">${escapeHtml(t("chat.sugg_news_persp"))}</button>
           <button class="pill" type="button" data-news-jump-lane="stories">${escapeHtml(t("chat.sugg_news_stories"))}</button>
+          <button class="pill" type="button" data-news-jump-lane="tracked">${escapeHtml(t("chat.sugg_news_tracked"))}</button>
           <button class="pill" type="button" data-news-jump-lane="perspectives">${escapeHtml(t("chat.sugg_news_persp_open"))}</button>
           <button class="pill" type="button" data-open-news-settings="chat">${escapeHtml(t("chat.sugg_news_settings"))}</button>
         </div>
@@ -2148,11 +2150,13 @@ function renderSettingsUiCardsHtml(
             ${suggestions
               .map((sg) => {
                 const name = String(sg.name ?? "").trim();
+                const normName = name.toLowerCase();
                 const keywords = Array.isArray(sg.keywords)
                   ? sg.keywords.map((k) => String(k ?? "").trim()).filter(Boolean)
                   : [];
                 const reason = String(sg.reason ?? "");
-                const isTracked = trackedNames.has(name.toLowerCase());
+                const isTracked = trackedNames.has(normName);
+                const isPending = Boolean(state.newsPendingTopicKeys[normName]);
                 return `
                   <div class="ns-row">
                     <div class="ns-row-main">
@@ -2165,7 +2169,7 @@ function renderSettingsUiCardsHtml(
                       ${
                         isTracked
                           ? `<span class="badge ok">${escapeHtml(t("chat.ns_tracked_badge"))}</span>`
-                          : `<button type="button" class="btn sm primary" data-ns-track-topic="${escapeHtml(name)}" data-ns-topic-kw="${escapeHtml(keywords.join(","))}" data-ns-card="${escapeHtml(c.id)}" data-ns-msg="${escapeHtml(msgId)}">${escapeHtml(t("chat.ns_track_topic"))}</button>`
+                          : `<button type="button" class="btn sm primary" data-ns-track-topic="${escapeHtml(name)}" data-ns-topic-kw="${escapeHtml(keywords.join(","))}" data-ns-card="${escapeHtml(c.id)}" data-ns-msg="${escapeHtml(msgId)}" ${isPending ? "disabled" : ""}>${escapeHtml(isPending ? t("chat.ns_tracking_pending") : t("chat.ns_track_topic"))}</button>`
                       }
                     </div>
                   </div>
@@ -2182,7 +2186,8 @@ function renderSettingsUiCardsHtml(
       const sourcesList = Array.isArray(d.sources)
         ? (d.sources as Array<Record<string, unknown>>)
         : [];
-      const liveByDom = new Map(state.newsSources.map((s) => [s.domain, s]));
+      const normDom = (val: string) => val.trim().toLowerCase().replace(/^www\./, "");
+      const liveByDom = new Map(state.newsSources.map((s) => [normDom(s.domain), s]));
       return `
         <div class="card inset" data-settings-card-id="${escapeHtml(c.id)}" data-settings-card-kind="${escapeHtml(c.kind)}">
           <div class="card-h">
@@ -2193,7 +2198,8 @@ function renderSettingsUiCardsHtml(
             ${sourcesList
               .map((src) => {
                 const dom = String(src.domain ?? "").trim();
-                const live = liveByDom.get(dom);
+                const domKey = normDom(dom);
+                const live = liveByDom.get(domKey);
                 const title = String(src.title || dom);
                 const feedUrl = String(src.feed_url ?? live?.feeds?.[0]?.feed_url ?? "");
                 const category = String(src.category ?? live?.category ?? "");
@@ -2204,6 +2210,7 @@ function renderSettingsUiCardsHtml(
                 const isEnabled = live
                   ? Boolean(live.feeds?.some((f) => f.enabled))
                   : Boolean(src.enabled);
+                const isPending = Boolean(state.newsPendingFeedKeys[domKey]);
                 return `
                   <div class="ns-row">
                     <div class="ns-row-main">
@@ -2220,8 +2227,8 @@ function renderSettingsUiCardsHtml(
                     <div class="ns-row-acts">
                       ${
                         hasRss
-                          ? `<button type="button" class="btn sm ${isEnabled ? "" : "primary"}" data-ns-toggle-feed="${escapeHtml(dom)}" data-ns-feed-enable="${isEnabled ? "0" : "1"}" data-ns-feed-url="${escapeHtml(feedUrl)}" data-ns-feed-title="${escapeHtml(title)}" data-ns-card="${escapeHtml(c.id)}" data-ns-msg="${escapeHtml(msgId)}">${escapeHtml(
-                              isEnabled ? t("chat.ns_disable_feed") : t("chat.ns_add_enable_feed")
+                          ? `<button type="button" class="btn sm ${isEnabled ? "" : "primary"}" data-ns-toggle-feed="${escapeHtml(dom)}" data-ns-feed-enable="${isEnabled ? "0" : "1"}" data-ns-feed-url="${escapeHtml(feedUrl)}" data-ns-feed-title="${escapeHtml(title)}" data-ns-card="${escapeHtml(c.id)}" data-ns-msg="${escapeHtml(msgId)}" ${isPending ? "disabled" : ""}>${escapeHtml(
+                              isPending ? t("chat.ns_saving") : isEnabled ? t("chat.ns_disable_feed") : t("chat.ns_add_enable_feed")
                             )}</button>`
                           : `<span class="badge soft">${escapeHtml(`${eff.toFixed(1)}/10`)}</span>`
                       }
@@ -2238,12 +2245,14 @@ function renderSettingsUiCardsHtml(
     if (c.kind === "news_source_trust_card") {
       const d = (c.data ?? {}) as Record<string, unknown>;
       const dom = String(d.domain ?? "").trim();
-      const live = state.newsSources.find((s) => s.domain === dom);
+      const domKey = dom.toLowerCase().replace(/^www\./, "");
+      const live = state.newsSources.find((s) => s.domain.toLowerCase().replace(/^www\./, "") === domKey);
       const sysVal = Number(live?.system ?? d.system ?? 5.0);
       const rawPers = live?.personal ?? d.personal;
       const hasPers = rawPers !== null && rawPers !== undefined;
       const persVal = hasPers ? Number(rawPers) : sysVal;
       const effVal = hasPers ? 0.7 * sysVal + 0.3 * persVal : sysVal;
+      const isPending = Boolean(state.newsPendingTrustDomains[domKey]);
       return `
         <div class="card inset" data-settings-card-id="${escapeHtml(c.id)}" data-settings-card-kind="${escapeHtml(c.kind)}">
           <div class="card-h">
@@ -2266,10 +2275,11 @@ function renderSettingsUiCardsHtml(
               class="ns-trust-slider"
               data-ns-trust-range="${escapeHtml(c.id)}"
               data-ns-trust-sys="${sysVal.toFixed(2)}"
+              ${isPending ? "disabled" : ""}
             />
             <div class="chat-audit-row">
-              <button type="button" class="btn primary sm" data-ns-save-trust="${escapeHtml(c.id)}" data-ns-domain="${escapeHtml(dom)}" data-ns-msg="${escapeHtml(msgId)}">${escapeHtml(t("chat.ns_apply_trust"))}</button>
-              <button type="button" class="btn sm" data-ns-reset-trust="${escapeHtml(c.id)}" data-ns-domain="${escapeHtml(dom)}" data-ns-msg="${escapeHtml(msgId)}">${escapeHtml(t("chat.ns_reset_trust"))}</button>
+              <button type="button" class="btn primary sm" data-ns-save-trust="${escapeHtml(c.id)}" data-ns-domain="${escapeHtml(dom)}" data-ns-msg="${escapeHtml(msgId)}" ${isPending ? "disabled" : ""}>${escapeHtml(isPending ? t("chat.ns_saving") : t("chat.ns_apply_trust"))}</button>
+              <button type="button" class="btn sm" data-ns-reset-trust="${escapeHtml(c.id)}" data-ns-domain="${escapeHtml(dom)}" data-ns-msg="${escapeHtml(msgId)}" ${isPending ? "disabled" : ""}>${escapeHtml(t("chat.ns_reset_trust"))}</button>
             </div>
           </div>
         </div>
@@ -2279,7 +2289,9 @@ function renderSettingsUiCardsHtml(
     if (c.kind === "news_add_feed_card") {
       const d = (c.data ?? {}) as Record<string, unknown>;
       const dom = String(d.domain ?? "").trim();
+      const domKey = dom.toLowerCase().replace(/^www\./, "");
       const titleVal = String(d.title ?? dom);
+      const isPending = Boolean(state.newsPendingFeedKeys[`add:${c.id}`] || (domKey && state.newsPendingFeedKeys[domKey]));
       const suggs = Array.isArray(d.suggestions)
         ? (d.suggestions as Array<Record<string, unknown>>).filter(
             (sg) => Boolean(sg.has_starter_rss || sg.feed_url)
@@ -2292,17 +2304,21 @@ function renderSettingsUiCardsHtml(
           </div>
           ${cardSub ? `<div class="settings-card-note">${escapeHtml(cardSub)}</div>` : ""}
           <div class="ns-add-feed-form">
-            <input type="url" class="settings-card-input" placeholder="https://example.com/rss.xml" data-ns-feed-url-input="${escapeHtml(c.id)}" />
-            <input type="text" class="settings-card-input" placeholder="Source title (optional)" value="${escapeHtml(titleVal)}" data-ns-feed-title-input="${escapeHtml(c.id)}" />
-            <button type="button" class="btn primary sm" data-ns-submit-feed="${escapeHtml(c.id)}" data-ns-domain="${escapeHtml(dom)}" data-ns-msg="${escapeHtml(msgId)}">${escapeHtml(t("chat.ns_add_enable_feed"))}</button>
+            <input type="url" class="settings-card-input" placeholder="https://example.com/rss.xml" data-ns-feed-url-input="${escapeHtml(c.id)}" ${isPending ? "disabled" : ""} />
+            <input type="text" class="settings-card-input" placeholder="Source title (optional)" value="${escapeHtml(titleVal)}" data-ns-feed-title-input="${escapeHtml(c.id)}" ${isPending ? "disabled" : ""} />
+            <button type="button" class="btn primary sm" data-ns-submit-feed="${escapeHtml(c.id)}" data-ns-domain="${escapeHtml(dom)}" data-ns-msg="${escapeHtml(msgId)}" ${isPending ? "disabled" : ""}>${escapeHtml(isPending ? t("chat.ns_saving") : t("chat.ns_add_enable_feed"))}</button>
           </div>
           ${
             suggs.length > 0
               ? `<div class="ns-chip-list">${suggs
                   .slice(0, 6)
                   .map(
-                    (sg) =>
-                      `<button type="button" class="pill" data-ns-toggle-feed="${escapeHtml(String(sg.domain ?? ""))}" data-ns-feed-enable="1" data-ns-feed-url="${escapeHtml(String(sg.feed_url ?? ""))}" data-ns-feed-title="${escapeHtml(String(sg.title || sg.domain || ""))}" data-ns-card="${escapeHtml(c.id)}" data-ns-msg="${escapeHtml(msgId)}">${escapeHtml(String(sg.title || sg.domain || ""))}</button>`
+                    (sg) => {
+                      const sgDom = String(sg.domain ?? "");
+                      const sgKey = sgDom.trim().toLowerCase().replace(/^www\./, "");
+                      const sgPending = Boolean(state.newsPendingFeedKeys[sgKey]);
+                      return `<button type="button" class="pill" data-ns-toggle-feed="${escapeHtml(sgDom)}" data-ns-feed-enable="1" data-ns-feed-url="${escapeHtml(String(sg.feed_url ?? ""))}" data-ns-feed-title="${escapeHtml(String(sg.title || sgDom || ""))}" data-ns-card="${escapeHtml(c.id)}" data-ns-msg="${escapeHtml(msgId)}" ${sgPending ? "disabled" : ""}>${escapeHtml(String(sg.title || sgDom || ""))}</button>`;
+                    }
                   )
                   .join("")}</div>`
               : ""
@@ -2475,6 +2491,11 @@ export function renderMessageBlock(
           lastPromptHere
             ? `<button type="button" class="btn ${isErrorMsg ? "primary" : ""}" data-retry-prompt="${escapeHtml(lastPromptHere)}" data-msg-id="${escapeHtml(msgId)}">${escapeHtml(t("common.retry"))}</button>
                ${!isSettingsConv ? `<button type="button" class="btn" data-use-planck-prompt="${escapeHtml(lastPromptHere)}" data-msg-id="${escapeHtml(msgId)}">${escapeHtml(t("chat.use_planck"))}</button>` : ""}`
+            : ""
+        }
+        ${
+          isErrorMsg
+            ? `<button type="button" class="btn" data-open-models-settings>${escapeHtml(t("chat.open_models_settings"))}</button>`
             : ""
         }
         ${
@@ -4086,6 +4107,8 @@ function bindChatEvents(container: HTMLElement, actions: ChatActions): void {
       const titleVal = (titleEl?.value ?? "").trim();
       if (urlVal) {
         void actions.onNewsSettingsAddFeedUrl?.(mid, cid, urlVal, titleVal || undefined, dom || undefined);
+      } else {
+        urlEl?.focus();
       }
     });
   });
@@ -4225,6 +4248,14 @@ export function bindChatThreadEvents(
       } else {
         actions.onChangeModel("planck3 (web)");
         actions.onSendMessage(prompt);
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-open-models-settings]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (actions.onOpenModelsSettings) {
+        actions.onOpenModelsSettings();
       }
     });
   });

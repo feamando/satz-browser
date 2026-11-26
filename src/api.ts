@@ -29,10 +29,13 @@ import type {
   FindingItem,
   GoogleOAuthStatus,
   HarnessSignalPayload,
+  HfDownloadJob,
+  HfRepoSearchEntry,
   I18nBundleEntry,
   I18nStatusResponse,
   KnowledgeSummary,
   LocalModelId,
+  LocalModelsSnapshot,
   MailAccountItem,
   MailLaneResponse,
   MailPreset,
@@ -40,6 +43,7 @@ import type {
   ModelManagementConfig,
   AnswerMeta,
   NewsCategoryEntry,
+  NewsFollowedStory,
   NewsPerspectiveMatrix,
   NewsSourceEntry,
   NewsStoryCluster,
@@ -1136,114 +1140,173 @@ function _normalizeProfileSummary(data: {
   };
 }
 
-export async function sidecarCreateProfile(
-  name: string,
-  pin: string
-): Promise<{
+export interface UnlockStreamEvent {
+  phase?: string;
+  step?: string;
+  status?: string;
+  detail?: string;
+  count?: number;
+  total?: number;
+  done?: boolean;
+  ok?: boolean;
+  error?: string;
+  unlocked?: boolean;
+  active_profile_id?: string | null;
+  active_profile?: ProfileStatusSummary["active_profile"];
+  profiles?: ProfileStatusSummary["profiles"];
+  import_action?: "create" | "merge";
+  imported_profile_id?: string;
+  imported_profile_uuid?: string;
+  imported_profile_name?: string;
+}
+
+export interface ProfileAuthResult {
   ok: boolean;
   error?: string;
   profile?: ProfileStatusSummary;
-}> {
+  importAction?: "create" | "merge";
+  importedProfileId?: string;
+  importedProfileName?: string;
+}
+
+async function postProfileAuthWithProgress(
+  path: "/profile/create" | "/profile/unlock" | "/profile/unlock_keychain" | "/profile/import",
+  payload: Record<string, unknown>,
+  onProgress?: (ev: UnlockStreamEvent) => void,
+  timeoutMs: number = 25000
+): Promise<ProfileAuthResult> {
   try {
     const res = await sidecarFetch(
-      "/profile/create",
+      path,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, pin }),
+        body: JSON.stringify(onProgress ? { ...payload, stream: true } : payload),
       },
-      25000
+      timeoutMs
     );
-    const data = (await res.json()) as {
-      ok?: boolean;
-      error?: string;
-      unlocked?: boolean;
-      active_profile_id?: string | null;
-      active_profile?: ProfileStatusSummary["active_profile"];
-      profiles?: ProfileStatusSummary["profiles"];
-    };
+    const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
+    if (onProgress && contentType.includes("text/event-stream") && res.body) {
+      let finalPayload = null as UnlockStreamEvent | null;
+      await consumeSseStream<UnlockStreamEvent & Record<string, unknown>>(res, timeoutMs, (ev) => {
+        if (ev.done) {
+          finalPayload = ev;
+        } else {
+          onProgress(ev);
+        }
+      });
+      const data: UnlockStreamEvent = finalPayload ?? {
+        ok: false,
+        error: `Stream from ${path} ended unexpectedly`,
+      };
+      const ok = Boolean(res.ok && data.ok);
+      return {
+        ok,
+        error: data.error,
+        profile: ok ? _normalizeProfileSummary(data) : undefined,
+        importAction: data.import_action,
+        importedProfileId: data.imported_profile_id,
+        importedProfileName: data.imported_profile_name,
+      };
+    }
+
+    const data = (await res.json()) as UnlockStreamEvent;
     const ok = Boolean(res.ok && data.ok);
     return {
       ok,
       error: data.error,
       profile: ok ? _normalizeProfileSummary(data) : undefined,
+      importAction: data.import_action,
+      importedProfileId: data.imported_profile_id,
+      importedProfileName: data.imported_profile_name,
     };
   } catch (e) {
     return { ok: false, error: String(e) };
   }
+}
+
+export async function sidecarExportProfile(
+  profileId?: string,
+  pin?: string
+): Promise<{
+  ok: boolean;
+  profile_id?: string;
+  profile_uuid?: string;
+  profile_name?: string;
+  filename?: string;
+  bytes_len?: number;
+  bundle_b64?: string;
+  error?: string;
+}> {
+  try {
+    const res = await sidecarFetch(
+      "/profile/export",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...(profileId ? { profile_id: profileId } : {}),
+          ...(pin ? { pin } : {}),
+        }),
+      },
+      60000
+    );
+    const data = (await res.json()) as {
+      ok?: boolean;
+      profile_id?: string;
+      profile_uuid?: string;
+      profile_name?: string;
+      filename?: string;
+      bytes_len?: number;
+      bundle_b64?: string;
+      error?: string;
+    };
+    return { ...data, ok: Boolean(res.ok && data.ok) };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarImportProfile(
+  bundleB64: string,
+  pin: string,
+  opts?: { localPin?: string; activate?: boolean },
+  onProgress?: (ev: UnlockStreamEvent) => void
+): Promise<ProfileAuthResult> {
+  return postProfileAuthWithProgress(
+    "/profile/import",
+    {
+      bundle_b64: bundleB64,
+      pin,
+      ...(opts?.localPin ? { local_pin: opts.localPin } : {}),
+      activate: opts?.activate ?? true,
+    },
+    onProgress,
+    60000
+  );
+}
+
+export async function sidecarCreateProfile(
+  name: string,
+  pin: string,
+  onProgress?: (ev: UnlockStreamEvent) => void
+): Promise<ProfileAuthResult> {
+  return postProfileAuthWithProgress("/profile/create", { name, pin }, onProgress);
 }
 
 export async function sidecarUnlockProfile(
   profileId: string,
-  pin: string
-): Promise<{
-  ok: boolean;
-  error?: string;
-  profile?: ProfileStatusSummary;
-}> {
-  try {
-    const res = await sidecarFetch(
-      "/profile/unlock",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ profile_id: profileId, pin }),
-      },
-      25000
-    );
-    const data = (await res.json()) as {
-      ok?: boolean;
-      error?: string;
-      unlocked?: boolean;
-      active_profile_id?: string | null;
-      active_profile?: ProfileStatusSummary["active_profile"];
-      profiles?: ProfileStatusSummary["profiles"];
-    };
-    const ok = Boolean(res.ok && data.ok);
-    return {
-      ok,
-      error: data.error,
-      profile: ok ? _normalizeProfileSummary(data) : undefined,
-    };
-  } catch (e) {
-    return { ok: false, error: String(e) };
-  }
+  pin: string,
+  onProgress?: (ev: UnlockStreamEvent) => void
+): Promise<ProfileAuthResult> {
+  return postProfileAuthWithProgress("/profile/unlock", { profile_id: profileId, pin }, onProgress);
 }
 
 export async function sidecarUnlockProfileKeychain(
-  profileId: string
-): Promise<{
-  ok: boolean;
-  error?: string;
-  profile?: ProfileStatusSummary;
-}> {
-  try {
-    const res = await sidecarFetch(
-      "/profile/unlock_keychain",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ profile_id: profileId }),
-      },
-      25000
-    );
-    const data = (await res.json()) as {
-      ok?: boolean;
-      error?: string;
-      unlocked?: boolean;
-      active_profile_id?: string | null;
-      active_profile?: ProfileStatusSummary["active_profile"];
-      profiles?: ProfileStatusSummary["profiles"];
-    };
-    const ok = Boolean(res.ok && data.ok);
-    return {
-      ok,
-      error: data.error,
-      profile: ok ? _normalizeProfileSummary(data) : undefined,
-    };
-  } catch (e) {
-    return { ok: false, error: String(e) };
-  }
+  profileId: string,
+  onProgress?: (ev: UnlockStreamEvent) => void
+): Promise<ProfileAuthResult> {
+  return postProfileAuthWithProgress("/profile/unlock_keychain", { profile_id: profileId }, onProgress);
 }
 
 export async function sidecarLockProfile(): Promise<void> {
@@ -2629,6 +2692,204 @@ export async function sidecarUpdateModelConfig(
   }
 }
 
+export async function sidecarSearchHfModels(
+  query: string,
+  limit = 8
+): Promise<{ ok: boolean; results: HfRepoSearchEntry[]; error?: string }> {
+  try {
+    const qs = new URLSearchParams({ q: query, limit: String(limit) });
+    const res = await sidecarFetch(`/models/hf/search?${qs.toString()}`);
+    return await res.json();
+  } catch (e) {
+    return { ok: false, results: [], error: String(e) };
+  }
+}
+
+export async function sidecarInspectHfRepo(
+  repoId: string,
+  token = ""
+): Promise<{
+  ok: boolean;
+  repo_id?: string;
+  gated?: boolean;
+  private?: boolean;
+  pipeline_tag?: string;
+  file_count?: number;
+  total_bytes?: number;
+  files?: Array<{ path: string; size: number }>;
+  error?: string;
+}> {
+  try {
+    const res = await sidecarFetch("/models/hf/inspect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repo_id: repoId, token }),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarStartHfDownload(payload: {
+  repo_id: string;
+  token?: string;
+  target_dir?: string;
+  use_as_chat?: boolean;
+}): Promise<{ ok: boolean; download?: HfDownloadJob; already_running?: boolean; error?: string }> {
+  try {
+    const res = await sidecarFetch("/models/hf/download", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarCancelHfDownload(
+  downloadId: string
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await sidecarFetch("/models/hf/cancel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ download_id: downloadId }),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarListHfDownloads(): Promise<{
+  ok: boolean;
+  downloads: HfDownloadJob[];
+}> {
+  try {
+    const res = await sidecarFetch("/models/hf/downloads");
+    if (!res.ok) return { ok: false, downloads: [] };
+    return await res.json();
+  } catch {
+    return { ok: false, downloads: [] };
+  }
+}
+
+export async function sidecarGetLocalModels(): Promise<{
+  ok: boolean;
+  local_models?: LocalModelsSnapshot;
+}> {
+  try {
+    const res = await sidecarFetch("/models/local");
+    if (!res.ok) return { ok: false };
+    return await res.json();
+  } catch {
+    return { ok: false };
+  }
+}
+
+export async function sidecarPointLocalModel(payload: {
+  role_slot: string;
+  path: string;
+  label?: string;
+  set_active?: boolean;
+}): Promise<ModelManagementConfig & { model_id?: string; message?: string }> {
+  try {
+    const res = await sidecarFetch("/models/local/add", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (e) {
+    return {
+      ok: false,
+      roles: {
+        chat: "gemma-4-e4b",
+        web_answer: "planck3 (web)",
+        reader: "hertz (reader)",
+        mail_classifier: "local",
+        brain_encoder: "planck13 (local)",
+      },
+      cloud_providers: [],
+      error: String(e),
+    };
+  }
+}
+
+export async function sidecarRemoveLocalModel(payload: {
+  model_id?: string;
+  role_slot?: string;
+  delete_files?: boolean;
+}): Promise<ModelManagementConfig & { message?: string }> {
+  try {
+    const res = await sidecarFetch("/models/local/remove", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (e) {
+    return {
+      ok: false,
+      roles: {
+        chat: "gemma-4-e4b",
+        web_answer: "planck3 (web)",
+        reader: "hertz (reader)",
+        mail_classifier: "local",
+        brain_encoder: "planck13 (local)",
+      },
+      cloud_providers: [],
+      error: String(e),
+    };
+  }
+}
+
+export async function sidecarSaveHfToken(
+  token: string,
+  clear = false
+): Promise<ModelManagementConfig & { hf_token_configured?: boolean; hf_token_masked?: string }> {
+  try {
+    const res = await sidecarFetch("/models/local/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, clear }),
+    });
+    return await res.json();
+  } catch (e) {
+    return {
+      ok: false,
+      roles: {
+        chat: "gemma-4-e4b",
+        web_answer: "planck3 (web)",
+        reader: "hertz (reader)",
+        mail_classifier: "local",
+        brain_encoder: "planck13 (local)",
+      },
+      cloud_providers: [],
+      error: String(e),
+    };
+  }
+}
+
+export async function sidecarBrowseLocalModel(
+  mode: "directory" | "file" = "directory",
+  title = "Select local model"
+): Promise<{ ok: boolean; path?: string; cancelled?: boolean; error?: string }> {
+  try {
+    const res = await sidecarFetch("/models/browse", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode, title }),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
 export async function sidecarFetchNewsStories(
   lane: string = "top",
   topic: string = "",
@@ -2962,6 +3223,7 @@ export async function sidecarStreamNewsPerspectives(
   callbacks: NewsSseCallbacks,
   opts?: {
     clusterId?: string;
+    followedStoryId?: string;
     roles?: Record<string, string>;
     messages?: Array<{ role: string; content: string }>;
     stallTimeoutMs?: number;
@@ -2975,6 +3237,7 @@ export async function sidecarStreamNewsPerspectives(
       body: JSON.stringify({
         topic,
         cluster_id: opts?.clusterId ?? "",
+        followed_story_id: opts?.followedStoryId ?? "",
         roles: opts?.roles,
         messages: opts?.messages ?? [],
       }),
@@ -3181,6 +3444,93 @@ export async function sidecarHideNewsCluster(clusterId: string): Promise<boolean
     return res.ok;
   } catch {
     return false;
+  }
+}
+
+export async function sidecarFetchFollowedStories(
+  includeUpdates = true
+): Promise<{ ok: boolean; stories: NewsFollowedStory[]; error?: string }> {
+  try {
+    const qs = includeUpdates ? "include_updates=1" : "include_updates=0";
+    const res = await sidecarFetch(`/news/followed_stories?${qs}`);
+    if (!res.ok) return { ok: false, stories: [] };
+    return await res.json();
+  } catch (e) {
+    return { ok: false, stories: [], error: String(e) };
+  }
+}
+
+export async function sidecarPinFollowedStory(payload: {
+  cluster_id?: string;
+  title?: string;
+  url?: string;
+  article_id?: string;
+  keywords?: string[];
+}): Promise<{
+  ok: boolean;
+  already_pinned?: boolean;
+  story?: NewsFollowedStory | null;
+  error?: string;
+}> {
+  try {
+    const res = await sidecarFetch("/news/followed_stories/pin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarUnpinFollowedStory(
+  storyId: string
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await sidecarFetch("/news/followed_stories/unpin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ story_id: storyId }),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarMarkFollowedStoryRead(
+  storyId: string
+): Promise<{ ok: boolean }> {
+  try {
+    const res = await sidecarFetch("/news/followed_stories/read", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ story_id: storyId }),
+    });
+    return await res.json();
+  } catch {
+    return { ok: false };
+  }
+}
+
+export async function sidecarRefreshFollowedStories(
+  storyId = ""
+): Promise<{
+  ok: boolean;
+  new_updates_added?: number;
+  stories: NewsFollowedStory[];
+  error?: string;
+}> {
+  try {
+    const res = await sidecarFetch("/news/followed_stories/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ story_id: storyId }),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, stories: [], error: String(e) };
   }
 }
 

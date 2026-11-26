@@ -1,0 +1,10 @@
+{
+  "format": "torch_sharded_v1",
+  "parts": [
+    "model.pt.part000",
+    "model.pt.part001"
+  ],
+  "total_bytes": 138889258,
+  "sha256": "c58f6173e5c67e328bda324b402805e64839cc418b17c269616f3602024c4fa7",
+  "precision": "fp16_hybrid"
+}

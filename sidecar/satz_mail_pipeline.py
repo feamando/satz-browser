@@ -1891,11 +1891,19 @@ class SatzMailPipeline:
 
     def _reader_fallback(self, question: str, new_text: str) -> tuple[str, float]:
         """
-        Calls Hertz (`runtime.run_read("hertz (reader)", ...)`) over `new_text` as a single source.
+        Calls Hertz (or shipped Planck reader fallback) over `new_text` as a single source.
         """
+        reader_id = "hertz (reader)"
+        if (
+            hasattr(self.runtime, "_hertz_reader_ckpt")
+            and self.runtime._hertz_reader_ckpt() is None
+            and hasattr(self.runtime, "_planck_reader_ckpt")
+            and self.runtime._planck_reader_ckpt() is not None
+        ):
+            reader_id = "planck (reader)"
         try:
             res = self.runtime.run_read(
-                "hertz (reader)",
+                reader_id,
                 question,
                 [{"id": "mail-inline", "url": "https://mail.local", "title": "Email", "full_text": new_text}],
             )

@@ -37,5 +37,13 @@
       "icons/icon.ico",
       "icons/icon.png"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZERDMyMDNCMEM4OTZEQTQKUldTa2JZa01PeURUL1ZNUkIxNURqTDNwZ1RqZkdpVHplRUEycFBuYXkwd0JRb3RyckdNdUpMbmcK",
+      "endpoints": [
+        "https://github.com/feamando/satz-browser/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

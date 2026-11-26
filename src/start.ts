@@ -2,6 +2,10 @@ import { startDitherLoaderAnimation } from "./design-system/brand";
 import { icon, type IconName } from "./design-system/icons";
 import { formatLocaleDateLine, t, tCount } from "./i18n";
 import {
+  bindProfileUploadSectionEvents,
+  renderProfileUploadSectionHtml,
+} from "./profile_prompt";
+import {
   escapeHtml,
   formatRelativeTime,
   getAvailableModelsForPicker,
@@ -25,6 +29,7 @@ export interface StartScreenActions {
   onRefreshDigest?: () => void;
   onUnlockProfile?: (profileId: string, pin: string) => void;
   onCreateProfile?: (name: string, pin: string) => void;
+  onImportProfileFile?: (bundleB64: string, pin: string, localPin?: string) => void;
 }
 
 function digestKindMeta(kind?: string): { ico: IconName; label: string } {
@@ -510,6 +515,7 @@ export function renderStartScreen(
             <button id="start-create-profile-btn" class="btn" type="button" ${unlockDisabledAttr}>${escapeHtml(unlockBusy ? t("profile.creating") : t("profile.create_unlock"))}</button>
           </div>
         </div>
+        ${renderProfileUploadSectionHtml("start")}
       </div>
     `
     : "";
@@ -633,6 +639,8 @@ export function renderStartScreen(
         triggerStartCreate();
       }
     });
+
+  bindProfileUploadSectionEvents(container, "start", actions.onImportProfileFile);
 
   container
     .querySelector("#start-refresh-digest-btn")
@@ -882,6 +890,58 @@ function bindBigBarEvents(
 
 let stopPostUnlockDither: (() => void) | null = null;
 
+function syncGlassLoadStepList(listEl: HTMLElement): void {
+  const steps = state.unlockSteps ?? [];
+  const existingRows = Array.from(listEl.children) as HTMLElement[];
+  const needsRebuild =
+    existingRows.length !== steps.length ||
+    steps.some((st, idx) => existingRows[idx]?.getAttribute("data-step-id") !== st.id);
+
+  if (needsRebuild) {
+    listEl.innerHTML = steps
+      .map((st) => {
+        const markHtml =
+          st.status === "done"
+            ? icon("check", "ico-sm")
+            : `<span class="glass-step-dot" aria-hidden="true"></span>`;
+        return `
+          <li class="glass-load-step" data-step-id="${escapeHtml(st.id)}" data-status="${escapeHtml(st.status)}">
+            <span class="glass-step-mark" aria-hidden="true">${markHtml}</span>
+            <span class="glass-step-label">${escapeHtml(st.label)}</span>
+            <span class="glass-step-detail">${escapeHtml(st.detail ?? "")}</span>
+          </li>
+        `;
+      })
+      .join("");
+    return;
+  }
+
+  for (let i = 0; i < steps.length; i++) {
+    const st = steps[i];
+    const li = existingRows[i];
+    const prevStatus = li.getAttribute("data-status");
+    if (prevStatus !== st.status) {
+      li.setAttribute("data-status", st.status);
+      const markEl = li.querySelector(".glass-step-mark");
+      if (markEl && (prevStatus === "done" || st.status === "done")) {
+        markEl.innerHTML =
+          st.status === "done"
+            ? icon("check", "ico-sm")
+            : `<span class="glass-step-dot" aria-hidden="true"></span>`;
+      }
+    }
+    const lblEl = li.querySelector(".glass-step-label");
+    if (lblEl && lblEl.textContent !== st.label) {
+      lblEl.textContent = st.label;
+    }
+    const detEl = li.querySelector(".glass-step-detail");
+    const nextDetail = st.detail ?? "";
+    if (detEl && detEl.textContent !== nextDetail) {
+      detEl.textContent = nextDetail;
+    }
+  }
+}
+
 export function renderPostUnlockGlassOverlay(): void {
   const existing = document.getElementById("post-unlock-glass-overlay");
   if (!state.postUnlockLoading) {
@@ -896,6 +956,7 @@ export function renderPostUnlockGlassOverlay(): void {
   const labelText = state.postUnlockLabel || t("profile.syncing_vault");
   const activeName =
     state.knowledge.profile?.active_profile?.name ||
+    state.postUnlockTitle ||
     state.knowledge.profile?.active_profile_id ||
     t("profile.unlocking_short");
 
@@ -907,6 +968,10 @@ export function renderPostUnlockGlassOverlay(): void {
     const titleEl = document.getElementById("post-unlock-profile-title");
     if (titleEl && titleEl.textContent !== activeName) {
       titleEl.textContent = activeName;
+    }
+    const listEl = document.getElementById("post-unlock-step-list");
+    if (listEl) {
+      syncGlassLoadStepList(listEl);
     }
     return;
   }
@@ -924,9 +989,15 @@ export function renderPostUnlockGlassOverlay(): void {
       <canvas id="post-unlock-dither-canvas" aria-hidden="true"></canvas>
       <div id="post-unlock-profile-title" class="glass-load-title">${escapeHtml(activeName)}</div>
       <div id="post-unlock-status-text" class="glass-load-status">${escapeHtml(labelText)}</div>
+      <ul id="post-unlock-step-list" class="glass-load-steps"></ul>
     </div>
   `;
   document.body.appendChild(overlay);
+
+  const listEl = document.getElementById("post-unlock-step-list");
+  if (listEl) {
+    syncGlassLoadStepList(listEl);
+  }
 
   const cv = document.getElementById("post-unlock-dither-canvas") as HTMLCanvasElement | null;
   if (cv) {
@@ -940,6 +1011,7 @@ export function renderPostUnlockGlassOverlay(): void {
 export function renderProfileUnlockOverlay(actions: {
   onUnlockProfile?: (profileId: string, pin: string) => void;
   onCreateProfile?: (name: string, pin: string) => void;
+  onImportProfileFile?: (bundleB64: string, pin: string, localPin?: string) => void;
   onDismissProfilePrompt?: () => void;
 }): void {
   let overlay = document.getElementById("profile-unlock-overlay");
@@ -1046,6 +1118,7 @@ export function renderProfileUnlockOverlay(actions: {
           <button id="profile-modal-create-btn" class="btn" type="button" ${disabledAttr}>${escapeHtml(unlockBusy ? t("profile.creating") : t("profile.create_unlock"))}</button>
         </div>
       </div>
+      ${renderProfileUploadSectionHtml("modal")}
     </div>
   `;
 
@@ -1120,4 +1193,6 @@ export function renderProfileUnlockOverlay(actions: {
         doCreate();
       }
     });
+
+  bindProfileUploadSectionEvents(overlay, "modal", actions.onImportProfileFile);
 }

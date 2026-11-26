@@ -5,9 +5,12 @@ use db::{
     BookmarkItem, BrowserTab, ChatMessage, Conversation, ConversationDetail, DbState,
 };
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+
+static SIDE_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "macos")]
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
@@ -77,6 +80,32 @@ pub struct SidecarState {
     pub base_url: String,
     pub bridge_url: Option<String>,
     pub bridge_token: String,
+    pub resource_dir: Option<PathBuf>,
+}
+
+fn stop_sidecar_child(sidecar: &SidecarState) {
+    SIDE_SHUTTING_DOWN.store(true, Ordering::SeqCst);
+    if let Ok(mut guard) = sidecar.child.lock() {
+        if let Some(mut child) = guard.take() {
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x08000000;
+                let _ = Command::new("taskkill")
+                    .args(["/F", "/T", "/PID", &child.id().to_string()])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output();
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+#[tauri::command]
+fn prepare_for_update(sidecar: State<'_, SidecarState>) -> Result<(), String> {
+    stop_sidecar_child(&sidecar);
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -533,7 +562,7 @@ fn generate_sidecar_token() -> String {
     out
 }
 
-fn resolve_repo_root(settings: Option<&SatzSettings>) -> PathBuf {
+pub fn resolve_repo_root(settings: Option<&SatzSettings>, resource_dir: Option<&Path>) -> PathBuf {
     if let Some(cfg) = settings {
         if let Some(ref custom_root) = cfg.repo_root {
             let p = PathBuf::from(custom_root);
@@ -556,6 +585,15 @@ fn resolve_repo_root(settings: Option<&SatzSettings>) -> PathBuf {
             }
         }
     }
+    if let Some(res_dir) = resource_dir {
+        if res_dir.join("sidecar").join("satz_models.py").exists() {
+            return res_dir.to_path_buf();
+        }
+        let nested_staged = res_dir.join("target").join("staged-resources");
+        if nested_staged.join("sidecar").join("satz_models.py").exists() {
+            return nested_staged;
+        }
+    }
     std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
@@ -570,32 +608,81 @@ pub fn normalize_rel_path_for_os(raw: &str) -> String {
     }
 }
 
-pub fn resolve_python_executable(repo_root: &std::path::Path, configured_python: &str) -> String {
+fn find_bundled_python_in_root(base: &Path) -> Option<PathBuf> {
+    #[cfg(windows)]
+    let cands = [
+        base.join("python-runtime").join("python.exe"),
+        base.join("target").join("staged-resources").join("python-runtime").join("python.exe"),
+    ];
+    #[cfg(not(windows))]
+    let cands = [
+        base.join("python-runtime").join("bin").join("python3"),
+        base.join("python-runtime").join("bin").join("python3.12"),
+        base.join("python-runtime").join("bin").join("python"),
+        base.join("target").join("staged-resources").join("python-runtime").join("bin").join("python3"),
+    ];
+    for cand in cands {
+        if cand.exists() {
+            return Some(cand);
+        }
+    }
+    None
+}
+
+pub fn resolve_python_executable_with_resources(
+    repo_root: &Path,
+    resource_dir: Option<&Path>,
+    configured_python: &str,
+) -> (String, bool) {
     let normalized = normalize_rel_path_for_os(configured_python);
-    let primary = repo_root.join(&normalized);
+    let primary_path = PathBuf::from(&normalized);
+    let primary = if primary_path.is_absolute() {
+        primary_path
+    } else {
+        repo_root.join(&normalized)
+    };
     if primary.exists() {
-        return primary.to_string_lossy().to_string();
+        return (primary.to_string_lossy().to_string(), false);
+    }
+    #[cfg(windows)]
+    let repo_venv = repo_root.join(".venv\\Scripts\\python.exe");
+    #[cfg(not(windows))]
+    let repo_venv = repo_root.join(".venv/bin/python");
+    if repo_venv.exists() {
+        return (repo_venv.to_string_lossy().to_string(), false);
     }
     #[cfg(windows)]
     let os_venv = repo_root.join("..\\sgs\\.venv\\Scripts\\python.exe");
     #[cfg(not(windows))]
     let os_venv = repo_root.join("../sgs/.venv/bin/python");
     if os_venv.exists() {
-        return os_venv.to_string_lossy().to_string();
+        return (os_venv.to_string_lossy().to_string(), false);
+    }
+    if let Some(res_dir) = resource_dir {
+        if let Some(bundled) = find_bundled_python_in_root(res_dir) {
+            return (bundled.to_string_lossy().to_string(), true);
+        }
+    }
+    if let Some(bundled) = find_bundled_python_in_root(repo_root) {
+        return (bundled.to_string_lossy().to_string(), true);
     }
     #[cfg(not(windows))]
     {
         for bin in ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"] {
-            if std::path::Path::new(bin).exists() {
-                return bin.to_string();
+            if Path::new(bin).exists() {
+                return (bin.to_string(), false);
             }
         }
-        return "python3".to_string();
+        ("python3".to_string(), false)
     }
     #[cfg(windows)]
     {
-        "python".to_string()
+        ("python".to_string(), false)
     }
+}
+
+pub fn resolve_python_executable(repo_root: &Path, configured_python: &str) -> String {
+    resolve_python_executable_with_resources(repo_root, None, configured_python).0
 }
 
 fn kill_stale_sidecar_on_port(port: u16) {
@@ -644,11 +731,15 @@ fn kill_stale_sidecar_on_port(port: u16) {
 fn spawn_sidecar(
     settings: &SatzSettings,
     app_data_dir: &PathBuf,
+    resource_dir: Option<&Path>,
     token: &str,
     bridge_url: Option<&str>,
     bridge_token: &str,
 ) -> Option<Child> {
-    let repo_root = resolve_repo_root(Some(settings));
+    if SIDE_SHUTTING_DOWN.load(Ordering::SeqCst) {
+        return None;
+    }
+    let repo_root = resolve_repo_root(Some(settings), resource_dir);
     let script_path = repo_root.join("sidecar").join("satz_models.py");
     if !script_path.exists() {
         return None;
@@ -656,7 +747,8 @@ fn spawn_sidecar(
 
     kill_stale_sidecar_on_port(settings.port);
 
-    let python_bin = resolve_python_executable(&repo_root, &settings.python);
+    let (python_bin, is_bundled_py) =
+        resolve_python_executable_with_resources(&repo_root, resource_dir, &settings.python);
 
     let normalized_sgs = normalize_rel_path_for_os(&settings.sgs_root);
     let sgs_candidate = repo_root.join(&normalized_sgs);
@@ -674,6 +766,9 @@ fn spawn_sidecar(
         .env("PYTHONIOENCODING", "utf-8")
         .env("HF_HUB_DISABLE_PROGRESS_BARS", "1")
         .env("TQDM_DISABLE", "1");
+    if is_bundled_py {
+        cmd.env("PYTHONNOUSERSITE", "1").env("PYTHONUTF8", "1");
+    }
     if let Some(b_url) = bridge_url {
         cmd.env("SATZ_WEBVIEW_BRIDGE_URL", b_url)
             .env("SATZ_WEBVIEW_BRIDGE_TOKEN", bridge_token);
@@ -853,7 +948,7 @@ fn ensure_default_desktop_on_windows() {
                         .encode_utf16()
                         .chain(std::iter::once(0))
                         .collect();
-                    let repo_root = resolve_repo_root(None);
+                    let repo_root = resolve_repo_root(None, exe_path.parent());
                     let cwd_wide: Vec<u16> = repo_root
                         .to_string_lossy()
                         .encode_utf16()
@@ -952,6 +1047,8 @@ pub fn run() {
     ensure_default_desktop_on_windows();
 
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .register_uri_scheme_protocol("satzmail", |ctx, request| {
             let uri_str = request.uri().to_string();
             // Extract `<id>` from `satzmail://message/<id>` or `satzmail://localhost/message/<id>`
@@ -994,10 +1091,12 @@ pub fn run() {
             app.manage(db_state);
             app.manage(wv_manager);
 
+            let resource_dir = app.path().resource_dir().ok();
             let bridge_url = start_webview_bridge(app.handle().clone(), bridge_token.clone());
             let child_proc = spawn_sidecar(
                 &settings,
                 &app_data_dir,
+                resource_dir.as_deref(),
                 &token,
                 bridge_url.as_deref(),
                 &bridge_token,
@@ -1010,6 +1109,7 @@ pub fn run() {
                 base_url,
                 bridge_url: bridge_url.clone(),
                 bridge_token: bridge_token.clone(),
+                resource_dir: resource_dir.clone(),
             });
 
             // Auto-restart watchdog: if the Python sidecar ever exits unexpectedly, respawn it
@@ -1017,6 +1117,9 @@ pub fn run() {
             let watchdog_data_dir = app_data_dir.clone();
             std::thread::spawn(move || loop {
                 std::thread::sleep(std::time::Duration::from_secs(3));
+                if SIDE_SHUTTING_DOWN.load(Ordering::SeqCst) {
+                    break;
+                }
                 if let Some(sc) = app_handle_watchdog.try_state::<SidecarState>() {
                     if let Ok(mut guard) = sc.child.lock() {
                         let exited = match guard.as_mut() {
@@ -1027,6 +1130,7 @@ pub fn run() {
                             *guard = spawn_sidecar(
                                 &sc.settings,
                                 &watchdog_data_dir,
+                                sc.resource_dir.as_deref(),
                                 &sc.token,
                                 sc.bridge_url.as_deref(),
                                 &sc.bridge_token,
@@ -1095,6 +1199,7 @@ pub fn run() {
             remove_bookmark,
             get_db_path,
             get_sidecar_config,
+            prepare_for_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building satz application");
@@ -1102,20 +1207,7 @@ pub fn run() {
     app.run(|app_handle, event| {
         if let RunEvent::Exit = event {
             if let Some(sidecar) = app_handle.try_state::<SidecarState>() {
-                if let Ok(mut guard) = sidecar.child.lock() {
-                    if let Some(mut child) = guard.take() {
-                        #[cfg(windows)]
-                        {
-                            use std::os::windows::process::CommandExt;
-                            const CREATE_NO_WINDOW: u32 = 0x08000000;
-                            let _ = Command::new("taskkill")
-                                .args(["/F", "/T", "/PID", &child.id().to_string()])
-                                .creation_flags(CREATE_NO_WINDOW)
-                                .output();
-                        }
-                        let _ = child.kill();
-                    }
-                }
+                stop_sidecar_child(&sidecar);
             }
         }
     });
@@ -1149,5 +1241,57 @@ mod tests {
                 "../sgs/.venv/Scripts/python.exe"
             );
         }
+    }
+
+    #[test]
+    fn test_resolve_bundled_resources_and_python_precedence() {
+        let tmp = std::env::temp_dir().join(format!("satz_res_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let res_dir = tmp.join("resources");
+        let sidecar_dir = res_dir.join("sidecar");
+        std::fs::create_dir_all(&sidecar_dir).unwrap();
+        std::fs::write(sidecar_dir.join("satz_models.py"), "# test").unwrap();
+
+        #[cfg(windows)]
+        let bundled_py = res_dir.join("python-runtime").join("python.exe");
+        #[cfg(not(windows))]
+        let bundled_py = res_dir.join("python-runtime").join("bin").join("python3");
+        std::fs::create_dir_all(bundled_py.parent().unwrap()).unwrap();
+        std::fs::write(&bundled_py, "").unwrap();
+
+        let (resolved_py, is_bundled) = resolve_python_executable_with_resources(
+            &res_dir,
+            Some(&res_dir),
+            "..\\sgs\\.venv\\Scripts\\python.exe",
+        );
+        assert!(is_bundled);
+        assert_eq!(PathBuf::from(resolved_py), bundled_py);
+
+        let dev_repo = tmp.join("dev_repo");
+        #[cfg(windows)]
+        let dev_venv = dev_repo.join(".venv").join("Scripts").join("python.exe");
+        #[cfg(not(windows))]
+        let dev_venv = dev_repo.join(".venv").join("bin").join("python");
+        std::fs::create_dir_all(dev_venv.parent().unwrap()).unwrap();
+        std::fs::write(&dev_venv, "").unwrap();
+
+        let (resolved_dev, is_bundled_dev) = resolve_python_executable_with_resources(
+            &dev_repo,
+            Some(&res_dir),
+            "..\\sgs\\.venv\\Scripts\\python.exe",
+        );
+        assert!(!is_bundled_dev);
+        assert_eq!(PathBuf::from(resolved_dev), dev_venv);
+
+        let custom_root = resolve_repo_root(
+            Some(&SatzSettings {
+                repo_root: Some(res_dir.to_string_lossy().to_string()),
+                ..SatzSettings::default()
+            }),
+            None,
+        );
+        assert_eq!(custom_root, res_dir);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

@@ -780,6 +780,87 @@ class TestSatzNewsEngine(unittest.TestCase):
         self.assertTrue(fb_done["ok"])
         self.assertIn("European power grid", fb_done["answer"])
 
+    def test_pin_followed_story_auto_index_evolution_and_perspectives(self) -> None:
+        now = time.time()
+        self.rt.passwords.create_profile("Stories Prof", "123456")
+        self.rt._refresh_active_profile_brain()
+
+        # 1. Initial article clustered as a Top Story
+        self.rt.news.upsert_article(
+            {
+                "url": "https://www.bbc.com/news/north-sea-wind-cable-1",
+                "domain": "bbc.com",
+                "title": "North Sea wind interconnector agreement signed in Hamburg",
+                "snippet": "Five nations signed the initial framework for high-voltage North Sea wind cables.",
+                "body_text": "Five nations signed the initial framework for high-voltage North Sea wind cables.",
+                "published_at": now - 7200,
+            },
+            language="en",
+        )
+        self.rt.news.recluster_and_rank()
+        stories = self.rt.news.get_stories(lane="top")["stories"]
+        self.assertEqual(len(stories), 1)
+        cid = stories[0]["cluster_id"]
+
+        # 2. Pin the story to the Stories tab
+        pin_res = self.rt.news.pin_followed_story(cluster_id=cid)
+        self.assertTrue(pin_res["ok"])
+        story = pin_res["story"]
+        self.assertIsNotNone(story)
+        sid = story["story_id"]
+        self.assertEqual(story["update_count"], 1)
+        self.assertEqual(story["unread_updates"], 0)
+        self.assertEqual(self.rt.news.get_status()["followed_stories"], 1)
+
+        # 3. Auto-indexing discovers new updates across sources (English + foreign translated)
+        aid2 = self.rt.news.upsert_article(
+            {
+                "url": "https://www.dw.com/en/north-sea-wind-cable-2",
+                "domain": "dw.com",
+                "title": "Germany and Norway expand North Sea wind interconnector funding",
+                "snippet": "Ministers committed 12 billion EUR to accelerate North Sea wind cable grid links.",
+                "body_text": "Ministers committed 12 billion EUR to accelerate North Sea wind cable grid links.",
+                "published_at": now - 1800,
+            },
+            language="en",
+        )
+        # Recluster runs auto-index sync on followed stories automatically
+        self.rt.news.recluster_and_rank()
+        listed = self.rt.news.list_followed_stories()["stories"]
+        self.assertEqual(len(listed), 1)
+        s_updated = listed[0]
+        self.assertEqual(s_updated["story_id"], sid)
+        self.assertEqual(s_updated["update_count"], 2)
+        self.assertEqual(s_updated["unread_updates"], 1)
+        self.assertGreaterEqual(s_updated["independent_families"], 2)
+        self.assertIn("New update", s_updated["summary_overview"])
+        self.assertEqual(self.rt.news.get_status()["unread_story_updates"], 1)
+        self.assertTrue(any(u["article_id"] == aid2 and u["is_new"] for u in s_updated["updates"]))
+
+        # 4. Mark story read clears unread counter
+        self.assertTrue(self.rt.news.mark_followed_story_read(sid)["ok"])
+        listed2 = self.rt.news.list_followed_stories()["stories"]
+        self.assertEqual(listed2[0]["unread_updates"], 0)
+        self.assertEqual(self.rt.news.get_status()["unread_story_updates"], 0)
+
+        # 5. Perspectives compares across all updates in the pinned story cleanly
+        with mock.patch.object(self.rt.web, "search", return_value=[]):
+            evs = list(
+                self.rt.news.stream_topic_perspectives(
+                    topic=s_updated["title"],
+                    followed_story_id=sid,
+                )
+            )
+        done = [e for e in evs if e.get("done")][-1]
+        self.assertTrue(done["ok"])
+        doms = {src["domain"] for src in done["sources"]}
+        self.assertIn("bbc.com", doms)
+        self.assertIn("dw.com", doms)
+
+        # 6. Unpinning cleans up story and updates
+        self.assertTrue(self.rt.news.unpin_followed_story(sid)["ok"])
+        self.assertEqual(self.rt.news.list_followed_stories()["stories"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

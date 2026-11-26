@@ -44,6 +44,8 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import uuid
+import zlib
 from datetime import datetime, timezone
 from email.header import decode_header
 from pathlib import Path
@@ -303,6 +305,182 @@ def decrypt_vault_payload(envelope: dict[str, Any], pin: str, device_key: bytes)
     return pt
 
 
+PORTABLE_BUNDLE_FORMAT = "satz-profile-v1"
+PORTABLE_BUNDLE_AAD = b"satz-profile-export-v1"
+VAULT_META_TS_PREFIX = "# @satz-meta-ts "
+
+
+def _empty_vault_meta_ts() -> dict[str, dict[str, float]]:
+    return {"k": {}, "d": {}}
+
+
+def derive_export_key(
+    pin: str,
+    salt16: bytes,
+    *,
+    time_cost: int = INTERACTIVE_ARGON2_TIME_COST,
+    memory_cost: int = INTERACTIVE_ARGON2_MEMORY_COST,
+    parallelism: int = INTERACTIVE_ARGON2_PARALLELISM,
+) -> bytes:
+    """
+    Derives a standalone portable 256-bit export key solely from the 6-digit PIN and salt
+    so `.satzprofile` bundles can be opened offline on another device without source OS keychain state.
+    """
+    clean_pin = (pin or "").strip()
+    if not PIN_REGEX.match(clean_pin):
+        raise ValueError("PIN must be exactly 6 digits (000000-999999).")
+    if len(salt16) != 16:
+        raise ValueError("salt16 must be 16 bytes")
+    k_pin = hash_secret_raw(
+        secret=clean_pin.encode("utf-8"),
+        salt=salt16,
+        time_cost=max(1, int(time_cost)),
+        memory_cost=max(8192, int(memory_cost)),
+        parallelism=max(1, int(parallelism)),
+        hash_len=32,
+        type=Type.ID,
+    )
+    hkdf = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=None,
+        info=PORTABLE_BUNDLE_AAD,
+    )
+    return hkdf.derive(k_pin)
+
+
+def encrypt_portable_bundle(
+    payload_bytes: bytes,
+    pin: str,
+    *,
+    time_cost: int = INTERACTIVE_ARGON2_TIME_COST,
+    memory_cost: int = INTERACTIVE_ARGON2_MEMORY_COST,
+    parallelism: int = INTERACTIVE_ARGON2_PARALLELISM,
+) -> bytes:
+    """Compresses and AES-256-GCM encrypts a serialized profile bundle with no plaintext metadata outside ciphertext."""
+    salt = os.urandom(16)
+    nonce = os.urandom(12)
+    key = derive_export_key(
+        pin,
+        salt,
+        time_cost=time_cost,
+        memory_cost=memory_cost,
+        parallelism=parallelism,
+    )
+    compressed = zlib.compress(payload_bytes, level=6)
+    ct = AESGCM(key).encrypt(nonce, compressed, PORTABLE_BUNDLE_AAD)
+    envelope = {
+        "v": 1,
+        "format": PORTABLE_BUNDLE_FORMAT,
+        "kdf": {"t": int(time_cost), "m": int(memory_cost), "p": int(parallelism)},
+        "salt": base64.b64encode(salt).decode("ascii"),
+        "nonce": base64.b64encode(nonce).decode("ascii"),
+        "ct": base64.b64encode(ct).decode("ascii"),
+    }
+    return json.dumps(envelope, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def decrypt_portable_bundle(raw_bytes: bytes, pin: str) -> bytes:
+    """Decrypts and decompresses a `.satzprofile` portable bundle using the user's 6-digit PIN."""
+    clean_pin = (pin or "").strip()
+    if not PIN_REGEX.match(clean_pin):
+        raise ValueError("PIN must be exactly 6 digits.")
+    try:
+        envelope = json.loads((raw_bytes or b"").decode("utf-8"))
+        if not isinstance(envelope, dict) or envelope.get("v") != 1 or envelope.get("format") != PORTABLE_BUNDLE_FORMAT:
+            raise ValueError("Unsupported profile file format.")
+        t, m, p = _envelope_kdf_params(envelope)
+        salt = base64.b64decode(envelope["salt"])
+        nonce = base64.b64decode(envelope["nonce"])
+        ct = base64.b64decode(envelope["ct"])
+        key = derive_export_key(clean_pin, salt, time_cost=t, memory_cost=m, parallelism=p)
+        compressed = AESGCM(key).decrypt(nonce, ct, PORTABLE_BUNDLE_AAD)
+        return zlib.decompress(compressed)
+    except ValueError as exc:
+        if "Unsupported" in str(exc) or "6 digits" in str(exc):
+            raise
+        raise ValueError("Invalid 6-digit PIN or corrupted profile file.") from exc
+    except (InvalidTag, KeyError, json.JSONDecodeError, UnicodeDecodeError, zlib.error, Exception) as exc:
+        raise ValueError("Invalid 6-digit PIN or corrupted profile file.") from exc
+
+
+def merge_vault_env_by_timestamps(
+    local_env: dict[str, str],
+    local_meta_ts: dict[str, Any] | None,
+    incoming_env: dict[str, str],
+    incoming_meta_ts: dict[str, Any] | None,
+) -> tuple[dict[str, str], dict[str, dict[str, float]]]:
+    """Merges two credential vault maps taking whichever live edit or deletion tombstone is newer."""
+    l_k = dict((local_meta_ts or {}).get("k") or {})
+    l_d = dict((local_meta_ts or {}).get("d") or {})
+    r_k = dict((incoming_meta_ts or {}).get("k") or {})
+    r_d = dict((incoming_meta_ts or {}).get("d") or {})
+
+    all_keys = (
+        set(local_env.keys())
+        | set(incoming_env.keys())
+        | set(l_k.keys())
+        | set(l_d.keys())
+        | set(r_k.keys())
+        | set(r_d.keys())
+    )
+    merged_env: dict[str, str] = {}
+    merged_meta = _empty_vault_meta_ts()
+
+    for key in sorted(all_keys):
+        in_loc = key in local_env
+        in_inc = key in incoming_env
+        loc_live_ts = float(l_k.get(key) or 0.0) if in_loc else -1.0
+        loc_del_ts = float(l_d.get(key) or 0.0)
+        inc_live_ts = float(r_k.get(key) or 0.0) if in_inc else -1.0
+        inc_del_ts = float(r_d.get(key) or 0.0)
+
+        if in_loc and loc_del_ts > loc_live_ts:
+            loc_del_ts = 0.0
+        if in_inc and inc_del_ts > inc_live_ts:
+            inc_del_ts = 0.0
+
+        loc_event_ts = loc_live_ts if in_loc else loc_del_ts
+        inc_event_ts = inc_live_ts if in_inc else inc_del_ts
+        loc_present = in_loc or loc_del_ts > 0.0
+        inc_present = in_inc or inc_del_ts > 0.0
+
+        if loc_present and (not inc_present or loc_event_ts > inc_event_ts):
+            win_is_live = in_loc
+            win_val = local_env.get(key, "")
+            win_ts = loc_event_ts
+        elif inc_present and (not loc_present or inc_event_ts > loc_event_ts):
+            win_is_live = in_inc
+            win_val = incoming_env.get(key, "")
+            win_ts = inc_event_ts
+        else:
+            if in_loc and in_inc:
+                win_is_live = True
+                win_val = local_env[key]
+                win_ts = max(loc_event_ts, inc_event_ts)
+            elif in_loc:
+                win_is_live = True
+                win_val = local_env[key]
+                win_ts = loc_event_ts
+            elif in_inc:
+                win_is_live = True
+                win_val = incoming_env[key]
+                win_ts = inc_event_ts
+            else:
+                win_is_live = False
+                win_val = ""
+                win_ts = max(loc_del_ts, inc_del_ts)
+
+        if win_is_live:
+            merged_env[key] = win_val
+            if win_ts > 0.0:
+                merged_meta["k"][key] = float(win_ts)
+        elif win_ts > 0.0:
+            merged_meta["d"][key] = float(win_ts)
+
+    return merged_env, merged_meta
+
+
 def _secure_zero_and_unlink(path: Path) -> None:
     if not path.exists() or not path.is_file():
         return
@@ -339,10 +517,20 @@ class ProfilePasswordManager:
         self._unlock_in_progress: bool = False
         self._active_pin: str | None = None
         self._unlocked_env_cache: dict[str, str] = {}
+        self._unlocked_meta_ts_cache: dict[str, dict[str, float]] = _empty_vault_meta_ts()
         self._last_activity_ts: float = 0.0
         self.on_profile_change: Any = None
+        self.on_progress: Any = None
 
         self._ensure_layout()
+
+    def _emit_progress(self, step: str, status: str, detail: str | None = None) -> None:
+        cb = getattr(self, "on_progress", None)
+        if callable(cb):
+            try:
+                cb(step, status, detail)
+            except Exception:
+                pass
 
     def _notify_profile_change(self) -> None:
         cb = getattr(self, "on_profile_change", None)
@@ -428,6 +616,20 @@ class ProfilePasswordManager:
         return None
 
     # ── Registry & Layout ────────────────────────────────────────────────
+    def _ensure_registry_uuids(self, reg: dict[str, Any]) -> bool:
+        changed = False
+        for p in reg.get("profiles", []):
+            if not isinstance(p, dict):
+                continue
+            raw_uid = str(p.get("uuid") or "").strip()
+            if not raw_uid:
+                p["uuid"] = str(uuid.uuid4())
+                changed = True
+            if not str(p.get("updated_at") or "").strip():
+                p["updated_at"] = str(p.get("last_active_at") or p.get("created_at") or _utc_iso())
+                changed = True
+        return changed
+
     def _ensure_layout(self) -> None:
         with self.lock:
             self.profiles_dir.mkdir(parents=True, exist_ok=True)
@@ -435,11 +637,16 @@ class ProfilePasswordManager:
                 if self.legacy_registry_file.exists():
                     try:
                         data = json.loads(self.legacy_registry_file.read_text(encoding="utf-8"))
+                        self._ensure_registry_uuids(data)
                         self._save_registry(data)
                         return
                     except Exception:
                         pass
                 self._save_registry({"profiles": [], "last_profile_id": None})
+            else:
+                data = self._load_registry()
+                if self._ensure_registry_uuids(data):
+                    self._save_registry(data)
 
     def _load_registry(self) -> dict[str, Any]:
         target_file = self.registry_file if self.registry_file.exists() else self.legacy_registry_file
@@ -556,6 +763,8 @@ class ProfilePasswordManager:
         with self.lock:
             did_lock = self._check_autolock_locked()
             reg = self._load_registry()
+            if self._ensure_registry_uuids(reg):
+                self._save_registry(reg)
             profiles_public = []
             active_profile = None
             now_ts = time.time()
@@ -569,8 +778,10 @@ class ProfilePasswordManager:
                 retry_after = max(0, int(round(lockout_until - now_ts))) if lockout_until > now_ts else 0
                 item = {
                     "id": pid,
+                    "uuid": str(p.get("uuid") or ""),
                     "name": p.get("name"),
                     "created_at": p.get("created_at"),
+                    "updated_at": str(p.get("updated_at") or p.get("last_active_at") or p.get("created_at") or ""),
                     "last_active_at": p.get("last_active_at"),
                     "credential_services_count": cred_count,
                     "is_active": is_act,
@@ -603,6 +814,7 @@ class ProfilePasswordManager:
         with self._lifecycle_lock:
             prev_prog = self._unlock_in_progress
             self._unlock_in_progress = True
+            self._emit_progress("vault", "running", "creating_vault")
             try:
                 with self.lock:
                     reg = self._load_registry()
@@ -632,8 +844,10 @@ class ProfilePasswordManager:
                     # Notice: No pin_hash stored! PIN verification is "does vault.enc decrypt".
                     profile_entry = {
                         "id": pid,
+                        "uuid": str(uuid.uuid4()),
                         "name": clean_name,
                         "created_at": now,
+                        "updated_at": now,
                         "last_active_at": now,
                         "credential_services_count": 0,
                         "failed_attempts": 0,
@@ -647,10 +861,12 @@ class ProfilePasswordManager:
                     self.unlocked = True
                     self._active_pin = clean_pin
                     self._unlocked_env_cache = {}
+                    self._unlocked_meta_ts_cache = _empty_vault_meta_ts()
                     self._last_activity_ts = time.time()
                     self._save_touchid_pin(pid, clean_pin)
                     self._save_cached_vault_key(pid, vault_kdf_signature(envelope), vault_key)
                     res = self.list_profiles()
+                self._emit_progress("vault", "done", None)
                 self._notify_profile_change()
                 res["unlocking"] = False
                 return res
@@ -666,16 +882,18 @@ class ProfilePasswordManager:
             target["lockout_until"] = time.time() + wait_sec
         self._save_registry(reg)
 
-    def _decrypt_profile_vault_with_key(
+    def _decrypt_profile_vault_full(
         self,
         reg: dict[str, Any],
         target: dict[str, Any],
         profile_id: str,
         clean_pin: str,
-    ) -> tuple[dict[str, str], str | None, bytes | None]:
+        *,
+        record_failure: bool = True,
+    ) -> tuple[dict[str, str], dict[str, dict[str, float]], str | None, bytes | None]:
         """
         Verifies lockout, then attempts to decrypt `vault.enc` (or migrate a legacy v0.3 `.env`).
-        Returns `(env_map, kdf_signature, derived_key)` on success.
+        Returns `(env_map, meta_ts, kdf_signature, derived_key)` on success.
         """
         now_ts = time.time()
         lockout_until = float(target.get("lockout_until") or 0.0)
@@ -689,26 +907,30 @@ class ProfilePasswordManager:
         if vault_path and vault_path.exists():
             device_key = self._get_device_key(profile_id, create_if_missing=False)
             if not device_key:
-                self._record_failed_pin(reg, target)
+                if record_failure:
+                    self._record_failed_pin(reg, target)
                 raise ValueError("Device key missing from OS keychain; vault cannot be unlocked on this account.")
             try:
                 envelope = json.loads(vault_path.read_text(encoding="utf-8"))
                 plaintext, derived_key = decrypt_vault_payload_and_key(envelope, clean_pin, device_key)
                 kdf_sig = vault_kdf_signature(envelope)
             except (InvalidTag, ValueError, KeyError, json.JSONDecodeError):
-                self._record_failed_pin(reg, target)
+                if record_failure:
+                    self._record_failed_pin(reg, target)
                 raise ValueError("Invalid 6-digit PIN for this profile.")
 
             # Clean up any leftover legacy .env if present
             if legacy_env and legacy_env.exists():
                 _secure_zero_and_unlink(legacy_env)
-            return self._parse_env_text(plaintext), kdf_sig, derived_key
+            env_map, meta_ts = self._parse_env_with_meta(plaintext)
+            return env_map, meta_ts, kdf_sig, derived_key
 
         # Legacy v0.3 migration path
         expected_hash = target.get("pin_hash")
         salt = target.get("salt", "")
         if not expected_hash or _legacy_hash_pin(clean_pin, str(salt)) != expected_hash:
-            self._record_failed_pin(reg, target)
+            if record_failure:
+                self._record_failed_pin(reg, target)
             raise ValueError("Invalid 6-digit PIN for this profile.")
 
         raw_legacy = ""
@@ -727,7 +949,24 @@ class ProfilePasswordManager:
 
         target.pop("pin_hash", None)
         target.pop("salt", None)
-        return self._parse_env_text(raw_legacy), vault_kdf_signature(envelope), derived_key
+        env_map, meta_ts = self._parse_env_with_meta(raw_legacy)
+        return env_map, meta_ts, vault_kdf_signature(envelope), derived_key
+
+    def _decrypt_profile_vault_with_key(
+        self,
+        reg: dict[str, Any],
+        target: dict[str, Any],
+        profile_id: str,
+        clean_pin: str,
+    ) -> tuple[dict[str, str], str | None, bytes | None]:
+        """
+        Verifies lockout, then attempts to decrypt `vault.enc` (or migrate a legacy v0.3 `.env`).
+        Returns `(env_map, kdf_signature, derived_key)` on success.
+        """
+        env_map, _meta_ts, kdf_sig, derived_key = self._decrypt_profile_vault_full(
+            reg, target, profile_id, clean_pin
+        )
+        return env_map, kdf_sig, derived_key
 
     def _decrypt_profile_vault_or_migrate(
         self,
@@ -749,6 +988,7 @@ class ProfilePasswordManager:
         *,
         kdf_sig: str | None = None,
         vault_key: bytes | None = None,
+        meta_ts: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         target["failed_attempts"] = 0
         target["lockout_until"] = 0.0
@@ -761,6 +1001,11 @@ class ProfilePasswordManager:
         self.unlocked = True
         self._active_pin = clean_pin
         self._unlocked_env_cache = dict(env_map)
+        self._unlocked_meta_ts_cache = (
+            {"k": dict(meta_ts.get("k") or {}), "d": dict(meta_ts.get("d") or {})}
+            if isinstance(meta_ts, dict)
+            else _empty_vault_meta_ts()
+        )
         self._last_activity_ts = time.time()
         self._save_touchid_pin(profile_id, clean_pin)
         if kdf_sig and vault_key:
@@ -775,6 +1020,7 @@ class ProfilePasswordManager:
         with self._lifecycle_lock:
             prev_prog = self._unlock_in_progress
             self._unlock_in_progress = True
+            self._emit_progress("vault", "running", "verifying_pin")
             try:
                 with self.lock:
                     reg = self._load_registry()
@@ -782,7 +1028,9 @@ class ProfilePasswordManager:
                     if not target:
                         raise ValueError(f"Profile '{profile_id}' not found.")
 
-                    env_map, kdf_sig, vault_key = self._decrypt_profile_vault_with_key(reg, target, profile_id, clean_pin)
+                    env_map, meta_ts, kdf_sig, vault_key = self._decrypt_profile_vault_full(
+                        reg, target, profile_id, clean_pin
+                    )
                     res = self._finalize_unlocked_profile(
                         reg,
                         target,
@@ -791,7 +1039,9 @@ class ProfilePasswordManager:
                         env_map,
                         kdf_sig=kdf_sig,
                         vault_key=vault_key,
+                        meta_ts=meta_ts,
                     )
+                self._emit_progress("vault", "done", None)
                 self._notify_profile_change()
                 res["unlocking"] = False
                 return res
@@ -807,6 +1057,7 @@ class ProfilePasswordManager:
         pid = (profile_id or "").strip()
         if not pid:
             raise ValueError("profile_id is required.")
+        self._emit_progress("vault", "running", "checking_keychain")
         stored_pin = self._get_touchid_pin(pid)
         if not stored_pin:
             raise ValueError("Unlock this profile with its 6-digit PIN once to enable Touch ID / keychain unlock.")
@@ -852,8 +1103,10 @@ class ProfilePasswordManager:
                     cached_key = self._get_cached_vault_key(pid, sig)
                     if cached_key:
                         plaintext = decrypt_vault_payload_with_key(envelope, cached_key)
-                        env_map = self._parse_env_text(plaintext)
-                        res = self._finalize_unlocked_profile(reg, target, pid, stored_pin, env_map)
+                        env_map, meta_ts = self._parse_env_with_meta(plaintext)
+                        res = self._finalize_unlocked_profile(
+                            reg, target, pid, stored_pin, env_map, meta_ts=meta_ts
+                        )
                         # Notify outside lock below
                         vault_fast_ok = True
                     else:
@@ -871,6 +1124,7 @@ class ProfilePasswordManager:
             self._unlock_in_progress = True
             try:
                 if vault_fast_ok:
+                    self._emit_progress("vault", "done", None)
                     self._notify_profile_change()
                     res["unlocking"] = False
                     return res
@@ -885,6 +1139,7 @@ class ProfilePasswordManager:
                 self.active_profile_id = None
                 self._active_pin = None
                 self._unlocked_env_cache.clear()
+                self._unlocked_meta_ts_cache = _empty_vault_meta_ts()
                 self._last_activity_ts = 0.0
                 res = self.list_profiles()
             self._notify_profile_change()
@@ -924,11 +1179,29 @@ class ProfilePasswordManager:
             return res
 
     # ── Vault Parsing & Encrypted Persistence ────────────────────────────
-    def _parse_env_text(self, raw_text: str) -> dict[str, str]:
+    def _parse_env_with_meta(self, raw_text: str) -> tuple[dict[str, str], dict[str, dict[str, float]]]:
         env_map: dict[str, str] = {}
+        meta_ts = _empty_vault_meta_ts()
         for line in (raw_text or "").splitlines():
             stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
+            if not stripped:
+                continue
+            if stripped.startswith(VAULT_META_TS_PREFIX):
+                try:
+                    raw_meta = json.loads(stripped[len(VAULT_META_TS_PREFIX) :].strip())
+                    if isinstance(raw_meta, dict):
+                        for bucket in ("k", "d"):
+                            b_map = raw_meta.get(bucket)
+                            if isinstance(b_map, dict):
+                                meta_ts[bucket] = {
+                                    str(k): float(v)
+                                    for k, v in b_map.items()
+                                    if k and isinstance(v, (int, float))
+                                }
+                except Exception:
+                    pass
+                continue
+            if stripped.startswith("#"):
                 continue
             if stripped.startswith("export "):
                 stripped = stripped[7:].strip()
@@ -939,14 +1212,32 @@ class ProfilePasswordManager:
                 if len(v) >= 2 and ((v[0] == '"' and v[-1] == '"') or (v[0] == "'" and v[-1] == "'")):
                     v = v[1:-1]
                 env_map[k] = v
+        return env_map, meta_ts
+
+    def _parse_env_text(self, raw_text: str) -> dict[str, str]:
+        env_map, _ = self._parse_env_with_meta(raw_text)
         return env_map
 
-    def _serialize_env_map(self, env_map: dict[str, str]) -> str:
+    def _serialize_env_map(
+        self,
+        env_map: dict[str, str],
+        meta_ts: dict[str, Any] | None = None,
+        profile_id: str | None = None,
+    ) -> str:
+        pid = profile_id or self.active_profile_id
         lines = [
-            f"# Satz Profile Encrypted Vault ({self.active_profile_id})",
+            f"# Satz Profile Encrypted Vault ({pid})",
             f"# Updated: {_utc_iso()}",
-            "",
         ]
+        eff_meta = meta_ts if meta_ts is not None else self._unlocked_meta_ts_cache
+        if isinstance(eff_meta, dict) and (eff_meta.get("k") or eff_meta.get("d")):
+            compact_meta = json.dumps(
+                {"k": eff_meta.get("k") or {}, "d": eff_meta.get("d") or {}},
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            lines.append(f"{VAULT_META_TS_PREFIX}{compact_meta}")
+        lines.append("")
         for k, v in sorted(env_map.items()):
             safe_val = v.replace("\n", " ").strip()
             if " " in safe_val or "#" in safe_val or '"' in safe_val:
@@ -954,7 +1245,11 @@ class ProfilePasswordManager:
             lines.append(f"{k}={safe_val}")
         return "\n".join(lines) + "\n"
 
-    def _persist_active_vault(self, env_map: dict[str, str]) -> None:
+    def _persist_active_vault(
+        self,
+        env_map: dict[str, str],
+        meta_ts: dict[str, dict[str, float]] | None = None,
+    ) -> None:
         with self.lock:
             if not self.unlocked or not self.active_profile_id or not self._active_pin:
                 raise PermissionError("Profile is locked.")
@@ -962,6 +1257,27 @@ class ProfilePasswordManager:
             assert vault_path is not None
             device_key = self._get_device_key(self.active_profile_id, create_if_missing=True)
             assert device_key is not None
+
+            if meta_ts is None:
+                now_epoch = time.time()
+                next_meta = {
+                    "k": dict(self._unlocked_meta_ts_cache.get("k") or {}),
+                    "d": dict(self._unlocked_meta_ts_cache.get("d") or {}),
+                }
+                prev_env = self._unlocked_env_cache
+                for k, v in env_map.items():
+                    if prev_env.get(k) != v or k not in prev_env:
+                        next_meta["k"][k] = now_epoch
+                        next_meta["d"].pop(k, None)
+                for k in list(prev_env.keys()):
+                    if k not in env_map:
+                        next_meta["k"].pop(k, None)
+                        next_meta["d"][k] = now_epoch
+            else:
+                next_meta = {
+                    "k": dict((meta_ts or {}).get("k") or {}),
+                    "d": dict((meta_ts or {}).get("d") or {}),
+                }
 
             salt16: bytes | None = None
             if vault_path.exists():
@@ -973,21 +1289,263 @@ class ProfilePasswordManager:
                 except Exception:
                     salt16 = None
 
-            serialized = self._serialize_env_map(env_map)
+            serialized = self._serialize_env_map(env_map, meta_ts=next_meta)
             envelope, vault_key = encrypt_vault_payload_with_key(
                 serialized, self._active_pin, device_key, salt16=salt16
             )
             vault_path.write_text(json.dumps(envelope, indent=2) + "\n", encoding="utf-8")
             self._save_cached_vault_key(self.active_profile_id, vault_kdf_signature(envelope), vault_key)
             self._unlocked_env_cache = dict(env_map)
+            self._unlocked_meta_ts_cache = next_meta
             self._last_activity_ts = time.time()
 
+            now_iso = _utc_iso()
             reg = self._load_registry()
             for p in reg.get("profiles", []):
                 if p.get("id") == self.active_profile_id:
                     p["credential_services_count"] = len(self._group_credentials(env_map))
-                    p["last_active_at"] = _utc_iso()
+                    p["last_active_at"] = now_iso
+                    p["updated_at"] = now_iso
             self._save_registry(reg)
+
+    def export_profile_vault(
+        self,
+        profile_id: str | None = None,
+        pin: str | None = None,
+    ) -> tuple[dict[str, Any], dict[str, str], dict[str, dict[str, float]], str]:
+        """
+        Returns `(profile_entry_copy, env_map, meta_ts, verified_pin)` for portable encrypted export.
+        If `pin` is omitted and the target profile is already unlocked, uses the active unlocked session PIN.
+        """
+        with self.lock:
+            self._check_autolock()
+            reg = self._load_registry()
+            if self._ensure_registry_uuids(reg):
+                self._save_registry(reg)
+            pid = (profile_id or "").strip() or (self.active_profile_id or "")
+            if not pid:
+                raise PermissionError("Unlock or specify a profile before exporting.")
+            target = next((p for p in reg.get("profiles", []) if p.get("id") == pid), None)
+            if not target:
+                raise ValueError(f"Profile '{pid}' not found.")
+
+            clean_pin = (pin or "").strip()
+            if clean_pin:
+                if not PIN_REGEX.match(clean_pin):
+                    raise ValueError("PIN must be exactly 6 digits.")
+                env_map, meta_ts, _, _ = self._decrypt_profile_vault_full(reg, target, pid, clean_pin)
+                verified_pin = clean_pin
+            elif self.unlocked and self.active_profile_id == pid and self._active_pin:
+                env_map = dict(self._unlocked_env_cache)
+                meta_ts = {
+                    "k": dict(self._unlocked_meta_ts_cache.get("k") or {}),
+                    "d": dict(self._unlocked_meta_ts_cache.get("d") or {}),
+                }
+                verified_pin = self._active_pin
+            else:
+                raise PermissionError("Enter the profile's 6-digit PIN or unlock it before exporting.")
+
+            return dict(target), env_map, meta_ts, verified_pin
+
+    def prepare_profile_import(
+        self,
+        manifest: dict[str, Any],
+        incoming_env: dict[str, str],
+        incoming_meta_ts: dict[str, Any],
+        pin: str,
+        local_pin: str = "",
+    ) -> dict[str, Any]:
+        """
+        Resolves UUID collision vs fresh install and prepares merged vault credentials + target slug.
+        """
+        clean_pin = (pin or "").strip()
+        if not PIN_REGEX.match(clean_pin):
+            raise ValueError("PIN must be exactly 6 digits.")
+        in_uuid = str(manifest.get("uuid") or "").strip()
+        if not in_uuid:
+            in_uuid = str(uuid.uuid4())
+        in_name = str(manifest.get("name") or manifest.get("id") or "Imported Profile").strip() or "Imported Profile"
+        in_slug_hint = str(manifest.get("id") or in_name).strip()
+        in_created = str(manifest.get("created_at") or _utc_iso())
+        in_updated = str(manifest.get("updated_at") or manifest.get("last_active_at") or in_created)
+
+        with self.lock:
+            reg = self._load_registry()
+            if self._ensure_registry_uuids(reg):
+                self._save_registry(reg)
+            existing = next((p for p in reg.get("profiles", []) if str(p.get("uuid") or "").strip() == in_uuid), None)
+
+            if existing is not None:
+                pid = str(existing.get("id") or "")
+                loc_updated = str(existing.get("updated_at") or existing.get("last_active_at") or existing.get("created_at") or "")
+                loc_created = str(existing.get("created_at") or in_created)
+
+                local_env: dict[str, str]
+                local_meta_ts: dict[str, dict[str, float]]
+                resolved_local_pin = ""
+
+                if self.unlocked and self.active_profile_id == pid and self._active_pin:
+                    local_env = dict(self._unlocked_env_cache)
+                    local_meta_ts = {
+                        "k": dict(self._unlocked_meta_ts_cache.get("k") or {}),
+                        "d": dict(self._unlocked_meta_ts_cache.get("d") or {}),
+                    }
+                    resolved_local_pin = self._active_pin
+                else:
+                    tried_pins = []
+                    for candidate in (clean_pin, (local_pin or "").strip()):
+                        if candidate and PIN_REGEX.match(candidate) and candidate not in tried_pins:
+                            tried_pins.append(candidate)
+                    dec_ok = False
+                    last_err: Exception | None = None
+                    local_env = {}
+                    local_meta_ts = _empty_vault_meta_ts()
+                    for candidate in tried_pins:
+                        try:
+                            local_env, local_meta_ts, _, _ = self._decrypt_profile_vault_full(
+                                reg,
+                                existing,
+                                pid,
+                                candidate,
+                                record_failure=False,
+                            )
+                            resolved_local_pin = candidate
+                            dec_ok = True
+                            break
+                        except Exception as exc:
+                            last_err = exc
+                    if not dec_ok:
+                        raise ValueError(
+                            f"Local profile '{existing.get('name') or pid}' uses a different 6-digit PIN; provide its local PIN to merge."
+                        ) from last_err
+
+                merged_env, merged_meta_ts = merge_vault_env_by_timestamps(
+                    local_env,
+                    local_meta_ts,
+                    incoming_env or {},
+                    incoming_meta_ts or {},
+                )
+                incoming_newer = in_updated >= loc_updated
+                final_name = in_name if incoming_newer else str(existing.get("name") or in_name)
+                final_updated = max(loc_updated, in_updated)
+                final_pin = clean_pin if (incoming_newer or not resolved_local_pin) else resolved_local_pin
+                pdir = self.get_profile_dir(pid)
+                return {
+                    "action": "merge",
+                    "pid": pid,
+                    "uuid": in_uuid,
+                    "name": final_name,
+                    "created_at": min(loc_created, in_created) if loc_created and in_created else (loc_created or in_created),
+                    "updated_at": final_updated,
+                    "local_updated_at": loc_updated,
+                    "incoming_updated_at": in_updated,
+                    "incoming_newer": incoming_newer,
+                    "merged_env": merged_env,
+                    "merged_meta_ts": merged_meta_ts,
+                    "seal_pin": final_pin,
+                    "pdir": pdir,
+                }
+
+            # Fresh UUID: allocate a unique local profile slug directory
+            base_slug = _slugify_profile(in_slug_hint)
+            existing_ids = {str(p.get("id") or "") for p in reg.get("profiles", [])}
+            pid = base_slug
+            counter = 2
+            while pid in existing_ids:
+                pid = f"{base_slug}-{counter}"
+                counter += 1
+            pdir = self.get_profile_dir(pid)
+            (pdir / "brain").mkdir(parents=True, exist_ok=True)
+            merged_env, merged_meta_ts = merge_vault_env_by_timestamps(
+                {}, _empty_vault_meta_ts(), incoming_env or {}, incoming_meta_ts or {}
+            )
+            return {
+                "action": "create",
+                "pid": pid,
+                "uuid": in_uuid,
+                "name": in_name,
+                "created_at": in_created,
+                "updated_at": in_updated,
+                "local_updated_at": "",
+                "incoming_updated_at": in_updated,
+                "incoming_newer": True,
+                "merged_env": merged_env,
+                "merged_meta_ts": merged_meta_ts,
+                "seal_pin": clean_pin,
+                "pdir": pdir,
+            }
+
+    def finalize_profile_import(
+        self,
+        prepared: dict[str, Any],
+        *,
+        activate: bool = True,
+    ) -> dict[str, Any]:
+        """Seals the local `vault.enc` with the device's OS keychain secret, updates registry, and optionally unlocks."""
+        pid = str(prepared["pid"])
+        in_uuid = str(prepared["uuid"])
+        name = str(prepared["name"])
+        seal_pin = str(prepared["seal_pin"])
+        merged_env = dict(prepared.get("merged_env") or {})
+        merged_meta_ts = dict(prepared.get("merged_meta_ts") or _empty_vault_meta_ts())
+
+        with self.lock:
+            pdir = self.get_profile_dir(pid)
+            (pdir / "brain").mkdir(parents=True, exist_ok=True)
+            device_key = self._get_device_key(pid, create_if_missing=True)
+            assert device_key is not None
+
+            serialized = self._serialize_env_map(merged_env, meta_ts=merged_meta_ts, profile_id=pid)
+            envelope, vault_key = encrypt_vault_payload_with_key(serialized, seal_pin, device_key)
+            vault_path = pdir / "vault.enc"
+            vault_path.write_text(json.dumps(envelope, indent=2) + "\n", encoding="utf-8")
+
+            reg = self._load_registry()
+            self._ensure_registry_uuids(reg)
+            existing = next((p for p in reg.get("profiles", []) if p.get("id") == pid), None)
+            now_iso = _utc_iso()
+            cred_count = len(self._group_credentials(merged_env))
+
+            if existing is not None:
+                existing["uuid"] = in_uuid
+                existing["name"] = name
+                existing["updated_at"] = str(prepared.get("updated_at") or now_iso)
+                existing["last_active_at"] = now_iso if activate else str(existing.get("last_active_at") or now_iso)
+                existing["credential_services_count"] = cred_count
+                existing["failed_attempts"] = 0
+                existing["lockout_until"] = 0.0
+                target = existing
+            else:
+                target = {
+                    "id": pid,
+                    "uuid": in_uuid,
+                    "name": name,
+                    "created_at": str(prepared.get("created_at") or now_iso),
+                    "updated_at": str(prepared.get("updated_at") or now_iso),
+                    "last_active_at": now_iso,
+                    "credential_services_count": cred_count,
+                    "failed_attempts": 0,
+                    "lockout_until": 0.0,
+                }
+                reg["profiles"].append(target)
+
+            if activate:
+                res = self._finalize_unlocked_profile(
+                    reg,
+                    target,
+                    pid,
+                    seal_pin,
+                    merged_env,
+                    kdf_sig=vault_kdf_signature(envelope),
+                    vault_key=vault_key,
+                    meta_ts=merged_meta_ts,
+                )
+            else:
+                self._save_registry(reg)
+                res = self.list_profiles()
+        if activate:
+            self._notify_profile_change()
+        return res
 
     def _group_credentials(self, env_map: dict[str, str]) -> list[dict[str, Any]]:
         """

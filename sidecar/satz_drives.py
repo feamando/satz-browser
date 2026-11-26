@@ -995,9 +995,12 @@ class SatzDrivesManager:
     def rebind_profile(self, defer_sync_start: bool = False) -> None:
         is_unlocked = bool(self.passwords.unlocked and self.passwords.active_profile_id)
         pid = str(self.passwords.active_profile_id) if is_unlocked else None
+        emit = getattr(self.runtime, "emit_unlock_progress", None)
         with self._db_lock:
             if self._bound_profile_id == pid and self._conn is not None:
                 return
+            if is_unlocked and callable(emit):
+                emit("drives", "running", detail="opening_drives_db")
             self._close_conn_locked()
             db_path = self.passwords.get_profile_drives_db_path(pid)
             db_target = ":memory:" if str(db_path) == ":memory:" else str(db_path)
@@ -1105,6 +1108,37 @@ class SatzDrivesManager:
                 owner_email,
                 core_summary
             );
+            """
+        )
+        ds_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(drive_sync_state)").fetchall()}
+        if "updated_at" not in ds_cols:
+            conn.execute("ALTER TABLE drive_sync_state ADD COLUMN updated_at REAL NOT NULL DEFAULT 0.0")
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS drive_sync_tombstones (
+                table_name TEXT NOT NULL,
+                row_key TEXT NOT NULL,
+                deleted_at REAL NOT NULL DEFAULT 0.0,
+                PRIMARY KEY (table_name, row_key)
+            );
+            CREATE TRIGGER IF NOT EXISTS trg_drive_state_ai AFTER INSERT ON drive_sync_state
+            BEGIN
+                DELETE FROM drive_sync_tombstones WHERE table_name = 'drive_sync_state' AND row_key = NEW.provider;
+                UPDATE drive_sync_state SET updated_at = (julianday('now') - 2440587.5) * 86400.0
+                WHERE provider = NEW.provider AND COALESCE(updated_at, 0.0) <= 0.0;
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_drive_state_au AFTER UPDATE OF account_email, account_name, root_remote_id ON drive_sync_state
+            WHEN COALESCE(NEW.updated_at, 0.0) <= COALESCE(OLD.updated_at, 0.0)
+            BEGIN
+                UPDATE drive_sync_state SET updated_at = (julianday('now') - 2440587.5) * 86400.0
+                WHERE provider = NEW.provider;
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_drive_state_ad AFTER DELETE ON drive_sync_state
+            BEGIN
+                INSERT INTO drive_sync_tombstones (table_name, row_key, deleted_at)
+                VALUES ('drive_sync_state', OLD.provider, (julianday('now') - 2440587.5) * 86400.0)
+                ON CONFLICT(table_name, row_key) DO UPDATE SET deleted_at = excluded.deleted_at;
+            END;
             """
         )
         conn.commit()

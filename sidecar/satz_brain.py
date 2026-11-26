@@ -32,8 +32,12 @@ try:
     import yaml
 
     HAS_YAML = True
+    _YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+    _YAML_DUMPER = getattr(yaml, "CSafeDumper", yaml.SafeDumper)
 except ImportError:
     HAS_YAML = False
+    _YAML_LOADER = None
+    _YAML_DUMPER = None
 
 
 ENTITY_TYPE_DIRS: dict[str, str] = {
@@ -228,7 +232,7 @@ def slugify(value: str) -> str:
 
 def _dump_yaml(data: dict[str, Any]) -> str:
     if HAS_YAML:
-        return yaml.safe_dump(data, sort_keys=False, allow_unicode=True).strip()
+        return yaml.dump(data, Dumper=_YAML_DUMPER, sort_keys=False, allow_unicode=True).strip()
     return json.dumps(data, indent=2, ensure_ascii=False)
 
 
@@ -237,7 +241,7 @@ def _load_yaml(text: str) -> dict[str, Any]:
         return {}
     if HAS_YAML:
         try:
-            res = yaml.safe_load(text)
+            res = yaml.load(text, Loader=_YAML_LOADER)
             return res if isinstance(res, dict) else {}
         except Exception:
             pass
@@ -273,9 +277,16 @@ _SHARED_ENCODER_LOCK = threading.RLock()
 class SatzBrain:
     """Manages the local Satz Brain knowledge graph on disk."""
 
-    def __init__(self, brain_dir: Path, sgs_root: Path | None = None, locked: bool = False):
+    def __init__(
+        self,
+        brain_dir: Path,
+        sgs_root: Path | None = None,
+        locked: bool = False,
+        local_models: Any = None,
+    ):
         self.brain_dir = brain_dir
         self.sgs_root = sgs_root
+        self.local_models = local_models
         self.locked = bool(locked)
         self.lock = threading.RLock()
         self.registry_path = self.brain_dir / "registry.yaml"
@@ -286,6 +297,11 @@ class SatzBrain:
         self._summary_cache: dict[str, Any] | None = None
         self._summary_cache_mtime: float = -1.0
         self._summary_cache_brain_mtime: float = -1.0
+        self._registry_cache: dict[str, Any] | None = None
+        self._registry_cache_sig: tuple[int, int] | None = None
+        self._pii_cache_sig: tuple[int, int] | None = None
+        self._pii_person_res: list[re.Pattern[str]] = []
+        self._pii_emails: tuple[str, ...] = ()
         self._encoder: Any = None
         self._entity_emb_cache: dict[str, tuple[str, Any]] = {}
         if not self.locked:
@@ -306,20 +322,43 @@ class SatzBrain:
             self._summary_cache = None
             self._summary_cache_mtime = -1.0
             self._summary_cache_brain_mtime = -1.0
+            self._registry_cache = None
+            self._registry_cache_sig = None
+            self._pii_cache_sig = None
+
+    def _resolve_planck13_paths(self) -> tuple[Path | None, Path | None, str]:
+        if self.local_models is not None:
+            try:
+                ckpt, tok, src = self.local_models.resolve_planck13_encoder()
+                if ckpt is not None and tok is not None:
+                    return ckpt, tok, src
+            except Exception:
+                pass
+        sgs_base = self.sgs_root or (Path(__file__).resolve().parent.parent.parent / "sgs")
+        sgs_ckpt = sgs_base / "checkpoints" / "planck13" / "best.pt"
+        sgs_tok = sgs_base / "data" / "wikipedia" / "tokenizer.model"
+        if sgs_ckpt.is_file() and sgs_tok.is_file():
+            return sgs_ckpt, sgs_tok, "local_sgs"
+        side_models = Path(__file__).resolve().parent / "models" / "planck"
+        ship_ckpt = side_models / "planck13" / "manifest.json"
+        ship_tok = side_models / "tokenizer.model"
+        if ship_ckpt.is_file() and ship_tok.is_file():
+            return ship_ckpt, ship_tok, "shipped"
+        return None, None, "missing"
 
     def get_encoder_status(self) -> dict[str, Any]:
-        sgs_base = self.sgs_root or (Path(__file__).resolve().parent.parent.parent / "sgs")
-        ckpt = sgs_base / "checkpoints" / "planck13" / "best.pt"
-        tok = sgs_base / "data" / "wikipedia" / "tokenizer.model"
-        if ckpt.exists() and tok.exists():
+        ckpt, tok, src = self._resolve_planck13_paths()
+        if ckpt is not None and tok is not None:
             return {
                 "mode": "planck13",
                 "state": "ready",
+                "source": src,
                 "label": "brain ranking: semantic (planck13)",
             }
         return {
             "mode": "lexical",
             "state": "missing",
+            "source": "lexical",
             "label": "brain ranking: lexical (planck13 missing)",
         }
 
@@ -332,14 +371,12 @@ class SatzBrain:
             try:
                 from src.planck3.encoders import make_encoder
 
-                sgs_base = self.sgs_root or (Path(__file__).resolve().parent.parent.parent / "sgs")
-                ckpt = sgs_base / "checkpoints" / "planck13" / "best.pt"
-                tok = sgs_base / "data" / "wikipedia" / "tokenizer.model"
-                cache_key = f"{ckpt}::{tok}" if (ckpt.exists() and tok.exists()) else "hash"
+                ckpt, tok, _src = self._resolve_planck13_paths()
+                cache_key = f"{ckpt}::{tok}" if (ckpt is not None and tok is not None) else "hash"
                 if cache_key in _SHARED_ENCODERS:
                     self._encoder = _SHARED_ENCODERS[cache_key]
                     return self._encoder
-                if ckpt.exists() and tok.exists():
+                if ckpt is not None and tok is not None:
                     self._encoder = make_encoder(
                         "planck",
                         checkpoint=str(ckpt),
@@ -395,31 +432,46 @@ class SatzBrain:
             if not self.brain_md_path.exists():
                 self.regenerate_brain_md()
 
-    def _load_registry(self) -> dict[str, Any]:
-        if not self.registry_path.exists():
-            return {
-                "$schema": "brain://registry/v2",
-                "$version": 2,
-                "$updated": _utc_iso(),
-                "entities": {},
-                "alias_index": {},
-            }
-        try:
-            raw = self.registry_path.read_text(encoding="utf-8")
-            data = _load_yaml(raw)
-            if "entities" not in data or not isinstance(data["entities"], dict):
-                data["entities"] = {}
-            if "alias_index" not in data or not isinstance(data["alias_index"], dict):
-                data["alias_index"] = {}
-            return data
-        except Exception:
-            return {
-                "$schema": "brain://registry/v2",
-                "$version": 2,
-                "$updated": _utc_iso(),
-                "entities": {},
-                "alias_index": {},
-            }
+    def _load_registry(self, copy_for_write: bool = False) -> dict[str, Any]:
+        with self.lock:
+            if not self.registry_path.exists():
+                return {
+                    "$schema": "brain://registry/v2",
+                    "$version": 2,
+                    "$updated": _utc_iso(),
+                    "entities": {},
+                    "alias_index": {},
+                }
+            try:
+                st = self.registry_path.stat()
+                sig = (int(st.st_mtime_ns), int(st.st_size))
+                if self._registry_cache is not None and sig == self._registry_cache_sig:
+                    data = self._registry_cache
+                else:
+                    raw = self.registry_path.read_text(encoding="utf-8")
+                    data = _load_yaml(raw)
+                    if "entities" not in data or not isinstance(data["entities"], dict):
+                        data["entities"] = {}
+                    if "alias_index" not in data or not isinstance(data["alias_index"], dict):
+                        data["alias_index"] = {}
+                    self._registry_cache = data
+                    self._registry_cache_sig = sig
+                    self._pii_cache_sig = None
+                if copy_for_write:
+                    return {
+                        **data,
+                        "entities": dict(data.get("entities") or {}),
+                        "alias_index": dict(data.get("alias_index") or {}),
+                    }
+                return data
+            except Exception:
+                return {
+                    "$schema": "brain://registry/v2",
+                    "$version": 2,
+                    "$updated": _utc_iso(),
+                    "entities": {},
+                    "alias_index": {},
+                }
 
     def _save_registry(self, reg: dict[str, Any]) -> None:
         reg["$updated"] = _utc_iso()
@@ -434,6 +486,14 @@ class SatzBrain:
                     alias_idx[al_norm] = slug
         reg["alias_index"] = alias_idx
         self.registry_path.write_text(_dump_yaml(reg) + "\n", encoding="utf-8")
+        try:
+            st = self.registry_path.stat()
+            self._registry_cache = reg
+            self._registry_cache_sig = (int(st.st_mtime_ns), int(st.st_size))
+        except OSError:
+            self._registry_cache = None
+            self._registry_cache_sig = None
+        self._pii_cache_sig = None
 
     def _parse_entity_file(self, path: Path) -> tuple[dict[str, Any], str]:
         if not path.exists():
@@ -478,7 +538,7 @@ class SatzBrain:
         slug = slugify(clean_name)
 
         with self.lock:
-            reg = self._load_registry()
+            reg = self._load_registry(copy_for_write=True)
             # Resolve via alias_index if already registered under an alias
             alias_idx = reg.get("alias_index") or {}
             if clean_name.lower() in alias_idx:
@@ -765,7 +825,7 @@ class SatzBrain:
             return 0
         removed = 0
         with self.lock:
-            reg = self._load_registry()
+            reg = self._load_registry(copy_for_write=True)
             entities = reg.get("entities") or {}
             to_delete: list[str] = []
             for slug, meta in entities.items():
@@ -802,7 +862,7 @@ class SatzBrain:
         if self.locked:
             return ""
         with self.lock:
-            reg = self._load_registry()
+            reg = self._load_registry(copy_for_write=True)
             entities: dict[str, dict[str, Any]] = reg.get("entities") or {}
 
             tier1_rows: list[str] = []
@@ -879,7 +939,7 @@ class SatzBrain:
         if not key:
             return None
         with self.lock:
-            reg = self._load_registry()
+            reg = self._load_registry(copy_for_write=True)
             entities = reg.get("entities") or {}
             meta = entities.get(key)
             if meta is None:
@@ -949,7 +1009,7 @@ class SatzBrain:
         if not key:
             return None
         with self.lock:
-            reg = self._load_registry()
+            reg = self._load_registry(copy_for_write=True)
             entities = reg.get("entities") or {}
             resolved_slug = key if key in entities else (reg.get("alias_index") or {}).get(key.lower(), "")
             if not resolved_slug:
@@ -1011,21 +1071,22 @@ class SatzBrain:
 
             reg = self._load_registry()
             brain_md = self.get_cached_brain_md()
-            entities_out: list[dict[str, Any]] = []
+            entities_items = list((reg.get("entities") or {}).items())
             now_snap = time.time()
-            for slug, meta in sorted(
-                (reg.get("entities") or {}).items(),
+            sorted_items = sorted(
+                entities_items,
                 key=lambda kv: (_entity_event_ts(kv[1]), str(kv[1].get("updated") or "")),
                 reverse=True,
-            ):
-                entities_out.append(
-                    self._build_entity_record(slug, meta, now_snap=now_snap, body_limit=600)
-                )
+            )
+            entities_out = [
+                self._build_entity_record(slug, meta, now_snap=now_snap, body_limit=600)
+                for slug, meta in sorted_items[:120]
+            ]
             summary_payload = {
                 "brain_dir": str(self.brain_dir),
                 "brain_md": brain_md,
-                "entity_count": len(entities_out),
-                "entities": entities_out[:120],
+                "entity_count": len(entities_items),
+                "entities": entities_out,
                 "locked": False,
                 "encoder": enc_status,
                 "brain_ranking": enc_status["label"],
@@ -1118,7 +1179,7 @@ class SatzBrain:
         if self.locked:
             return []
         with self.lock:
-            reg = self._load_registry()
+            reg = self._load_registry(copy_for_write=True)
             entities = reg.get("entities") or {}
             if not entities:
                 return []
@@ -1305,7 +1366,7 @@ class SatzBrain:
                 [],
             )
         with self.lock:
-            reg = self._load_registry()
+            reg = self._load_registry(copy_for_write=True)
             entities = reg.get("entities") or {}
             if not entities:
                 return (
@@ -1558,6 +1619,39 @@ class SatzBrain:
                 actor="user/proposal_accept",
             )
 
+    def _get_pii_scrub_rules(self) -> tuple[list[re.Pattern[str]], tuple[str, ...]]:
+        with self.lock:
+            reg = self._load_registry()
+            if self._pii_cache_sig is not None and self._pii_cache_sig == self._registry_cache_sig:
+                return self._pii_person_res, self._pii_emails
+            entities = reg.get("entities") or {}
+            person_names: set[str] = set()
+            emails: set[str] = set()
+            for _slug, meta in entities.items():
+                etype = str(meta.get("$type") or "").lower()
+                attrs = meta.get("attributes") or {}
+                if etype == "person" and not attrs.get("public_figure"):
+                    for nm in [meta.get("name"), *(meta.get("aliases") or [])]:
+                        nm_s = str(nm or "").strip()
+                        if len(nm_s) >= 3:
+                            person_names.add(nm_s)
+                elif etype == "account":
+                    em = str(attrs.get("email") or "").strip()
+                    if em:
+                        emails.add(em)
+            sorted_names = sorted(person_names, key=len, reverse=True)
+            patterns: list[re.Pattern[str]] = []
+            for i in range(0, len(sorted_names), 200):
+                chunk = sorted_names[i : i + 200]
+                if chunk:
+                    patterns.append(
+                        re.compile(r"\b(?:" + "|".join(re.escape(nm_s) for nm_s in chunk) + r")\b", re.IGNORECASE)
+                    )
+            self._pii_person_res = patterns
+            self._pii_emails = tuple(sorted(emails, key=len, reverse=True))
+            self._pii_cache_sig = self._registry_cache_sig
+            return self._pii_person_res, self._pii_emails
+
     def scrub_pii_for_external_query(self, raw_query: str) -> str:
         """
         Strips personal identifiers (emails, street addresses, booking/order codes,
@@ -1574,26 +1668,11 @@ class SatzBrain:
 
         if not self.locked:
             try:
-                with self.lock:
-                    reg = self._load_registry()
-                entities = reg.get("entities") or {}
-                for _slug, meta in entities.items():
-                    etype = str(meta.get("$type") or "").lower()
-                    attrs = meta.get("attributes") or {}
-                    if etype == "person" and not attrs.get("public_figure"):
-                        for nm in [meta.get("name"), *(meta.get("aliases") or [])]:
-                            nm_s = str(nm or "").strip()
-                            if len(nm_s) >= 3:
-                                cleaned = re.sub(
-                                    rf"\b{re.escape(nm_s)}\b",
-                                    " ",
-                                    cleaned,
-                                    flags=re.IGNORECASE,
-                                )
-                    elif etype == "account":
-                        em = str(attrs.get("email") or "").strip()
-                        if em:
-                            cleaned = cleaned.replace(em, " ")
+                person_res, emails = self._get_pii_scrub_rules()
+                for pat in person_res:
+                    cleaned = pat.sub(" ", cleaned)
+                for em in emails:
+                    cleaned = cleaned.replace(em, " ")
             except Exception:
                 pass
 

@@ -9,7 +9,7 @@ export type ConversationOrigin =
   | "news_perspectives";
 export type ConversationStatus = "active" | "archived";
 export type TabKind = "site" | "mail" | "compose";
-export type NewsLane = "stories" | "perspectives";
+export type NewsLane = "stories" | "tracked" | "perspectives";
 export type SettingsLane =
   | "profiles"
   | "models"
@@ -338,6 +338,51 @@ export interface NewsStoryCluster {
   articles: NewsArticleItem[];
 }
 
+export interface NewsFollowedStoryUpdate {
+  article_id: string;
+  url: string;
+  domain: string;
+  family: string;
+  title: string;
+  title_tr?: string | null;
+  snippet: string;
+  snippet_tr?: string | null;
+  translated_text?: string | null;
+  translation_source_lang?: string | null;
+  translation_target_lang?: string | null;
+  language: string;
+  image_url: string;
+  published_at: number;
+  added_at: number;
+  trust_system: number;
+  trust_effective: number;
+  conflict: boolean;
+  is_seed: boolean;
+  is_new: boolean;
+}
+
+export interface NewsFollowedStory {
+  story_id: string;
+  title: string;
+  summary_overview: string;
+  summary_model: string;
+  keywords: string[];
+  seed_cluster_id: string;
+  anchor_domain: string;
+  lead_image: string;
+  confidence10: number;
+  band: string;
+  band_label: string;
+  independent_families: number;
+  update_count: number;
+  unread_updates: number;
+  status: string;
+  created_at: number;
+  updated_at: number;
+  last_synthesized_at: number;
+  updates: NewsFollowedStoryUpdate[];
+}
+
 export interface NewsPerspectiveFraming {
   label: string;
   sources: Array<{
@@ -505,7 +550,79 @@ export interface DoctorRoleEntry {
   state: "ready" | "missing" | "cpu_only";
   device: string;
   path?: string;
+  source?: string;
+  label?: string;
   fix: string;
+}
+
+export interface HfCuratedCatalogEntry {
+  repo_id: string;
+  label: string;
+  approx_size: string;
+  gated: boolean;
+  notes: string;
+}
+
+export interface HfRepoSearchEntry {
+  repo_id: string;
+  label: string;
+  approx_size?: string;
+  downloads?: number;
+  likes?: number;
+  gated?: boolean;
+  private?: boolean;
+  pipeline_tag?: string;
+  notes?: string;
+}
+
+export interface HfDownloadJob {
+  download_id: string;
+  repo_id: string;
+  target_dir: string;
+  state: "queued" | "downloading" | "completed" | "error" | "cancelled";
+  files_total: number;
+  files_done: number;
+  current_file: string;
+  downloaded_bytes: number;
+  total_bytes: number;
+  pct: number;
+  speed_bps: number;
+  error: string;
+  started_at: number;
+  finished_at: number;
+  use_as_chat: boolean;
+  model_id: string;
+}
+
+export interface LocalCustomLlmEntry {
+  id: string;
+  label: string;
+  repo_id?: string;
+  path: string;
+  source: string;
+  ready: boolean;
+  error?: string;
+  size_bytes: number;
+  added_at: number;
+}
+
+export interface LocalModelsSnapshot {
+  models_dir: string;
+  gemma_path: string;
+  gemma_ready: boolean;
+  local_llm_ready: boolean;
+  planck_reader_source: "custom" | "local_sgs" | "shipped" | "missing" | string;
+  planck_reader_path: string;
+  planck13_source: "custom" | "local_sgs" | "shipped" | "missing" | string;
+  planck13_path: string;
+  hertz_reader_path: string;
+  hertz_ready: boolean;
+  custom_llms: LocalCustomLlmEntry[];
+  overrides: Record<string, string>;
+  hf_catalog: HfCuratedCatalogEntry[];
+  hf_token_configured: boolean;
+  hf_token_masked: string;
+  downloads: HfDownloadJob[];
 }
 
 export interface CloudProviderInfo {
@@ -526,6 +643,7 @@ export interface ModelManagementConfig {
   ok: boolean;
   roles: {
     chat: string;
+    effective_chat?: string;
     web_answer: string;
     reader: string;
     news_planner?: string;
@@ -536,6 +654,7 @@ export interface ModelManagementConfig {
     brain_encoder: string;
   };
   cloud_providers: CloudProviderInfo[];
+  local_models?: LocalModelsSnapshot | null;
   test_ok?: boolean;
   test_message?: string;
   error?: string;
@@ -555,6 +674,8 @@ export interface SidecarHealth {
     feeds_enabled: number;
     topics: number;
     brain_stories?: number;
+    followed_stories?: number;
+    unread_story_updates?: number;
     sync_interval_seconds?: number;
     last_sync_at?: number;
     next_sync_at?: number;
@@ -724,8 +845,10 @@ export interface BookmarkIndexStatus {
 
 export interface UserProfileItem {
   id: string;
+  uuid?: string;
   name: string;
   created_at: string;
+  updated_at?: string;
   last_active_at: string;
   credential_services_count: number;
   is_active: boolean;

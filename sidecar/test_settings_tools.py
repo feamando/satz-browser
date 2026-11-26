@@ -864,6 +864,37 @@ class TestSettingsToolsAndRegistry(unittest.TestCase):
             self.assertTrue(done.get("ui_cards"))
             self.assertEqual(done["ui_cards"][0]["kind"], "news_topic_suggestions_card")
 
+    def test_brain_registry_cache_pii_scrub_and_manage_topic(self):
+        self.rt.passwords.create_profile("Test User", "123456")
+        self.rt.brain.upsert_entity(
+            entity_type="person",
+            name="Kaspar Lindqvist",
+            attributes={"role": "colleague"},
+            tier=1,
+            actor="user/test",
+        )
+        self.rt.brain.upsert_entity(
+            entity_type="account",
+            name="Work Mail",
+            attributes={"email": "kaspar.private@example.com"},
+            tier=1,
+            actor="user/test",
+        )
+        _ = self.rt.brain.scrub_pii_for_external_query("Kaspar Lindqvist energy news")
+        with mock.patch("satz_brain._load_yaml", side_effect=AssertionError("registry.yaml should be cached")):
+            for _ in range(10):
+                cleaned = self.rt.brain.scrub_pii_for_external_query(
+                    "Kaspar Lindqvist kaspar.private@example.com semiconductor news"
+                )
+                self.assertEqual(cleaned, "semiconductor news")
+        res = self.rt.news.manage_topic(
+            {"action": "add", "name": "AI & Foundation Models", "keywords": "ai, llm", "watch": True}
+        )
+        self.assertTrue(res["ok"])
+        self.assertTrue(
+            any(t["name"] == "AI & Foundation Models" for t in self.rt.news.list_topics()["topics"])
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

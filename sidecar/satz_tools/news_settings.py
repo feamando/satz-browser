@@ -80,6 +80,14 @@ _DOMAIN_ALIASES: dict[str, str] = {
 }
 
 
+def _safe_store_trust(runtime: Any, dom: str, personal: bool = True) -> dict[str, Any]:
+    lock = getattr(runtime, "store_lock", None)
+    if lock is not None:
+        with lock:
+            return runtime.store.trust(dom, personal=personal)
+    return runtime.store.trust(dom, personal=personal)
+
+
 def _collect_news_settings_state(runtime: Any) -> dict[str, Any]:
     topics = (runtime.news.list_topics().get("topics") or []) if getattr(runtime, "news", None) else []
     src_data = runtime.news.list_sources() if getattr(runtime, "news", None) else {"sources": [], "categories": []}
@@ -99,7 +107,7 @@ def _collect_news_settings_state(runtime: Any) -> dict[str, Any]:
     available_starter: list[dict[str, Any]] = []
     for sf in overlay_feeds:
         dom = str(sf.get("domain") or "").lower().removeprefix("www.")
-        trec = runtime.store.trust(dom, personal=True)
+        trec = _safe_store_trust(runtime, dom, personal=True)
         existing_f = feed_by_domain.get(dom)
         available_starter.append(
             {
@@ -220,15 +228,28 @@ def _build_topic_suggestions(runtime: Any, hint: str = "", limit: int = 8) -> li
     # 3. Current top clustered stories (only if hint matches or if still under limit)
     if getattr(runtime, "store", None) is not None:
         try:
-            rows = runtime.store.db.execute(
-                """
-                SELECT headline, independent_families, confidence10
-                FROM satz_news_clusters
-                WHERE is_hidden = 0 AND LENGTH(TRIM(headline)) > 0
-                ORDER BY story_rank DESC, updated_at DESC
-                LIMIT 12
-                """
-            ).fetchall()
+            lock = getattr(runtime, "store_lock", None)
+            if lock is not None:
+                with lock:
+                    rows = runtime.store.db.execute(
+                        """
+                        SELECT headline, independent_families, confidence10
+                        FROM satz_news_clusters
+                        WHERE is_hidden = 0 AND LENGTH(TRIM(headline)) > 0
+                        ORDER BY story_rank DESC, updated_at DESC
+                        LIMIT 12
+                        """
+                    ).fetchall()
+            else:
+                rows = runtime.store.db.execute(
+                    """
+                    SELECT headline, independent_families, confidence10
+                    FROM satz_news_clusters
+                    WHERE is_hidden = 0 AND LENGTH(TRIM(headline)) > 0
+                    ORDER BY story_rank DESC, updated_at DESC
+                    LIMIT 12
+                    """
+                ).fetchall()
             for r in rows:
                 hl = str(r["headline"] or "").strip()
                 if hint_terms and not any(tok in hl.lower() for tok in hint_terms):
@@ -695,7 +716,7 @@ def news_settings_manage_source_feed(
         if not target_fid:
             return {"model_payload": {"ok": False, "error": f"No configured feed found to pause for '{domain or fid}'."}}
         res = runtime.news.add_or_toggle_feed({"action": "toggle", "feed_id": target_fid, "enabled": False})
-        trec = runtime.store.trust(matched_feed["domain"] if matched_feed else dom)
+        trec = _safe_store_trust(runtime, matched_feed["domain"] if matched_feed else dom)
         return {
             "model_payload": {
                 "ok": bool(res.get("ok")),
@@ -710,7 +731,7 @@ def news_settings_manage_source_feed(
     if matched_feed and not raw_url:
         res = runtime.news.add_or_toggle_feed({"action": "toggle", "feed_id": matched_feed["feed_id"], "enabled": True})
         dom = matched_feed["domain"]
-        trec = runtime.store.trust(dom)
+        trec = _safe_store_trust(runtime, dom)
         return {
             "model_payload": {
                 "ok": bool(res.get("ok")),
@@ -735,7 +756,7 @@ def news_settings_manage_source_feed(
                 }
             )
             eff_dom = str(res.get("domain") or dom)
-            trec = runtime.store.trust(eff_dom)
+            trec = _safe_store_trust(runtime, eff_dom)
             return {
                 "model_payload": {
                     "ok": bool(res.get("ok")),
@@ -752,7 +773,7 @@ def news_settings_manage_source_feed(
             return {"model_payload": {"ok": False, "error": str(exc)}}
 
     # No feed URL and not in starter catalog -> emit inline card so user can paste RSS URL or inspect suggestions
-    trec = runtime.store.trust(dom) if dom else None
+    trec = _safe_store_trust(runtime, dom) if dom else None
     suggs = _build_source_suggestions(runtime, query=domain, limit=6)
     card = {
         "id": f"card_{secrets.token_hex(4)}",
@@ -820,7 +841,7 @@ def news_settings_set_source_trust(
         res = runtime.set_domain_trust(dom, clamped)
         mode_note = "updated"
     else:
-        t_rec = runtime.store.trust(dom)
+        t_rec = _safe_store_trust(runtime, dom)
         res = {
             "ok": True,
             "domain": dom,

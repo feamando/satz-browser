@@ -1,0 +1,1097 @@
+{
+  "_note": "System layer of source trust, scored by hand on a 0-10 scale (2026-10-09). A domain gets its category's score unless it has an explicit 'score'. 'family' groups copies of one source (Wikipedia and its mirrors): agreement inside a family counts once. Rows marked PROPOSED extend the owner's rubric and await review. Scores are dated on purpose: the US-agency score reflects the current administration (owner, 2026-10-09).",
+  "as_of": "2026-10-09",
+  "bands": {
+    "9-10": "high trust, high confidence",
+    "7-8": "good trust and confidence, might have bias",
+    "5-6": "low trust and confidence, frequent bias",
+    "0-4": "treat with scepticism; can be propaganda"
+  },
+  "unscored": {
+    "score": 5,
+    "label": "unscored: not yet reviewed"
+  },
+  "categories": {
+    "general_info": {
+      "score": 10,
+      "rubric": "owner",
+      "what": "general information / service sites: airports, ports, transit and service updates, globally"
+    },
+    "science": {
+      "score": 10,
+      "rubric": "owner",
+      "what": "scientific journals and publishers"
+    },
+    "independent": {
+      "score": 10,
+      "rubric": "owner",
+      "what": "verifiable independent media and reference works, incl. public broadcasters funded outside the state budget with independence in law (DW, ARD, ZDF: licence fee, Basic Law)"
+    },
+    "health_reference": {
+      "score": 10,
+      "rubric": "owner",
+      "what": "clinical / public-health references (NHS, Mayo Clinic)"
+    },
+    "encyclopedia": {
+      "score": 9,
+      "rubric": "owner",
+      "what": "Wikipedia (all languages) and other encyclopedias; Britannica is an explicit 10"
+    },
+    "eu_gov": {
+      "score": 9,
+      "rubric": "owner",
+      "what": "governmental sources of the EU and its member states"
+    },
+    "us_agency": {
+      "score": 9,
+      "rubric": "owner",
+      "what": "US federal agencies that publish technical / statistical data semi-independently (10 historically; -1 for the current administration)"
+    },
+    "intergov": {
+      "score": 9,
+      "rubric": "PROPOSED",
+      "what": "intergovernmental agencies (WHO, UN statistics, IMF data)"
+    },
+    "european_gov_non_eu": {
+      "score": 9,
+      "rubric": "PROPOSED",
+      "what": "governments of UK, Norway, Switzerland, Iceland (treated like EU)"
+    },
+    "primary_official": {
+      "score": 9,
+      "rubric": "PROPOSED",
+      "what": "the organiser or governing body on its OWN events and results (FIFA, UEFA, olympics.com, Formula 1, World Athletics, parliaments on their own votes)"
+    },
+    "us_gov": {
+      "score": 8,
+      "rubric": "owner",
+      "what": "other US government sources (departments, general .gov information)"
+    },
+    "news_eu": {
+      "score": 8,
+      "rubric": "owner",
+      "what": "large EU news sources"
+    },
+    "public_broadcaster": {
+      "score": 8,
+      "rubric": "PROPOSED",
+      "what": "public broadcasters with legal independence outside Germany and the UK (CBC, ABC Australia, NOS, YLE, SVT, NRK, ORF, SRF)"
+    },
+    "company_self": {
+      "score": 8,
+      "rubric": "PROPOSED",
+      "what": "a company's own site about itself (founding, leadership, products): primary but self-interested"
+    },
+    "reference_db": {
+      "score": 8,
+      "rubric": "PROPOSED",
+      "what": "curated libraries and archives (Google Books, Internet Archive, EBSCO, encyclopedia.com)"
+    },
+    "news_us_uk": {
+      "score": 7,
+      "rubric": "owner",
+      "what": "large US / UK news sources, incl. wire services (max 7)"
+    },
+    "news_other": {
+      "score": 7,
+      "rubric": "PROPOSED",
+      "what": "large news sources from other democracies (Canada, Australia, Japan, India, Latin America)"
+    },
+    "specialist_db": {
+      "score": 7,
+      "rubric": "PROPOSED",
+      "what": "curated specialist databases (sports statistics, peaks, company registries with editors)"
+    },
+    "politicized": {
+      "score": 6,
+      "rubric": "owner",
+      "what": "politicized news sources (Fox News, Breitbart, The Atlantic)"
+    },
+    "aggregator": {
+      "score": 6,
+      "rubric": "PROPOSED",
+      "what": "commercial aggregators and user-curated databases (Goodreads, IMDb, Yahoo Sports, contributor platforms)"
+    },
+    "us_state_controlled": {
+      "score": 5,
+      "rubric": "owner",
+      "what": "sources directly controlled by the US government (White House communications, VOA, RFE/RL, Stars and Stripes)"
+    },
+    "fan_blog": {
+      "score": 5,
+      "rubric": "PROPOSED",
+      "what": "fan sites, affiliate sites and personal blogs"
+    },
+    "scraped_db": {
+      "score": 5,
+      "rubric": "PROPOSED",
+      "what": "scraped business / people databases (ZoomInfo, RocketReach, Tracxn)"
+    },
+    "pressure_jurisdiction": {
+      "score": 4,
+      "rubric": "owner",
+      "what": "media located in Russia, China, Gulf states or Israel, state-controlled or not: they can be pressured by those governments"
+    },
+    "ai_generated": {
+      "score": 4,
+      "rubric": "owner",
+      "what": "purely AI-generated reference content (Grokipedia)"
+    },
+    "content_farm": {
+      "score": 4,
+      "rubric": "PROPOSED",
+      "what": "SEO content farms and scraped biography / trivia sites"
+    },
+    "betting": {
+      "score": 4,
+      "rubric": "PROPOSED",
+      "what": "betting and odds sites"
+    },
+    "state_media_authoritarian": {
+      "score": 2,
+      "rubric": "owner",
+      "what": "state media of Russia, China, Gulf states (RT, TASS, Sputnik, Xinhua, CGTN, Global Times)"
+    },
+    "user_generated": {
+      "score": 3,
+      "rubric": "owner",
+      "what": "posts on Reddit, X and other social / user-generated platforms (incl. LinkedIn, YouTube, Facebook, fandom wikis)"
+    },
+    "gov_other": {
+      "score": 8,
+      "rubric": "PROPOSED",
+      "what": "governments of other democracies (Australia, Japan, South Africa, Brazil, Mexico, Singapore, Kenya, Canada, India...), like US government sources"
+    },
+    "edu": {
+      "score": 8,
+      "rubric": "PROPOSED",
+      "what": "universities (.edu, .ac.uk)"
+    }
+  },
+  "suffix_rules": [
+    {
+      "suffix": ".wikipedia.org",
+      "category": "encyclopedia",
+      "family": "wikimedia"
+    },
+    {
+      "suffix": "europa.eu",
+      "category": "eu_gov"
+    },
+    {
+      "suffix": ".gouv.fr",
+      "category": "eu_gov"
+    },
+    {
+      "suffix": ".bund.de",
+      "category": "eu_gov"
+    },
+    {
+      "suffix": ".gov.ie",
+      "category": "eu_gov"
+    },
+    {
+      "suffix": ".gov.uk",
+      "category": "european_gov_non_eu"
+    },
+    {
+      "suffix": ".gov",
+      "category": "us_gov"
+    },
+    {
+      "suffix": ".ru",
+      "category": "pressure_jurisdiction"
+    },
+    {
+      "suffix": ".cn",
+      "category": "pressure_jurisdiction"
+    },
+    {
+      "suffix": ".fandom.com",
+      "category": "user_generated"
+    },
+    {
+      "suffix": ".gob.es",
+      "category": "eu_gov"
+    },
+    {
+      "suffix": ".gv.at",
+      "category": "eu_gov"
+    },
+    {
+      "suffix": ".overheid.nl",
+      "category": "eu_gov"
+    },
+    {
+      "suffix": ".gov.it",
+      "category": "eu_gov"
+    },
+    {
+      "suffix": ".gov.pl",
+      "category": "eu_gov"
+    },
+    {
+      "suffix": ".gov.pt",
+      "category": "eu_gov"
+    },
+    {
+      "suffix": ".gov.gr",
+      "category": "eu_gov"
+    },
+    {
+      "suffix": ".gov.lv",
+      "category": "eu_gov"
+    },
+    {
+      "suffix": ".gov.lt",
+      "category": "eu_gov"
+    },
+    {
+      "suffix": ".gov.au",
+      "category": "gov_other"
+    },
+    {
+      "suffix": ".go.jp",
+      "category": "gov_other"
+    },
+    {
+      "suffix": ".gov.za",
+      "category": "gov_other"
+    },
+    {
+      "suffix": ".gov.br",
+      "category": "gov_other"
+    },
+    {
+      "suffix": ".gob.mx",
+      "category": "gov_other"
+    },
+    {
+      "suffix": ".gov.sg",
+      "category": "gov_other"
+    },
+    {
+      "suffix": ".go.ke",
+      "category": "gov_other"
+    },
+    {
+      "suffix": ".gc.ca",
+      "category": "gov_other"
+    },
+    {
+      "suffix": ".canada.ca",
+      "category": "gov_other"
+    },
+    {
+      "suffix": ".gov.in",
+      "category": "gov_other"
+    },
+    {
+      "suffix": ".govt.nz",
+      "category": "gov_other"
+    },
+    {
+      "suffix": ".int",
+      "category": "intergov"
+    },
+    {
+      "suffix": ".edu",
+      "category": "edu"
+    },
+    {
+      "suffix": ".ac.uk",
+      "category": "edu"
+    },
+    {
+      "suffix": ".gov.cn",
+      "category": "state_media_authoritarian"
+    },
+    {
+      "suffix": ".gov.ru",
+      "category": "state_media_authoritarian"
+    }
+  ],
+  "domains": {
+    "en.wikipedia.org": {
+      "category": "encyclopedia",
+      "family": "wikimedia",
+      "score": 9,
+      "why": "owner: Wikipedia 9"
+    },
+    "simple.wikipedia.org": {
+      "category": "encyclopedia",
+      "family": "wikimedia"
+    },
+    "wikidata.org": {
+      "category": "encyclopedia",
+      "family": "wikimedia",
+      "why": "Wikimedia structured data; same community as Wikipedia"
+    },
+    "dbpedia.org": {
+      "category": "encyclopedia",
+      "family": "wikimedia",
+      "why": "extracted from Wikipedia"
+    },
+    "wikiwand.com": {
+      "category": "encyclopedia",
+      "family": "wikimedia",
+      "why": "Wikipedia mirror"
+    },
+    "everything.explained.today": {
+      "category": "encyclopedia",
+      "family": "wikimedia",
+      "why": "Wikipedia mirror"
+    },
+    "en-academic.com": {
+      "category": "encyclopedia",
+      "family": "wikimedia",
+      "why": "Wikipedia mirror"
+    },
+    "wiki2.org": {
+      "category": "encyclopedia",
+      "family": "wikimedia",
+      "why": "Wikipedia mirror"
+    },
+    "handwiki.org": {
+      "category": "encyclopedia",
+      "family": "wikimedia",
+      "why": "Wikipedia-derived"
+    },
+    "justapedia.org": {
+      "category": "encyclopedia",
+      "family": "wikimedia",
+      "why": "Wikipedia fork"
+    },
+    "theinfolist.com": {
+      "category": "encyclopedia",
+      "family": "wikimedia",
+      "why": "Wikipedia mirror"
+    },
+    "reference.org": {
+      "category": "encyclopedia",
+      "family": "wikimedia",
+      "why": "Wikipedia mirror"
+    },
+    "alchetron.com": {
+      "category": "content_farm",
+      "family": "wikimedia",
+      "why": "copies Wikipedia text with ads; not independent"
+    },
+    "peoplepill.com": {
+      "category": "content_farm",
+      "family": "wikimedia",
+      "why": "copies Wikipedia biographies"
+    },
+    "grokipedia.com": {
+      "category": "ai_generated",
+      "family": "wikimedia",
+      "why": "owner: AI-generated, largely Wikipedia-derived; not independent"
+    },
+    "britannica.com": {
+      "category": "encyclopedia",
+      "score": 10,
+      "why": "owner: 10"
+    },
+    "snl.no": {
+      "category": "encyclopedia",
+      "why": "Store norske leksikon (edited encyclopedia)"
+    },
+    "encyclopedia.com": {
+      "category": "reference_db"
+    },
+    "meduza.io": {
+      "category": "independent",
+      "score": 10,
+      "why": "owner: Russian-language, independent, outside Russia"
+    },
+    "kyivindependent.com": {
+      "category": "independent",
+      "score": 10,
+      "why": "owner: 10"
+    },
+    "novayagazeta.eu": {
+      "category": "independent",
+      "why": "exiled Novaya Gazeta Europe, outside Russia (same logic as Meduza)"
+    },
+    "dw.com": {
+      "category": "independent",
+      "score": 10,
+      "why": "owner: licence-fee funded, independence in the Basic Law"
+    },
+    "tagesschau.de": {
+      "category": "independent",
+      "why": "ARD news; owner: ARD as DW"
+    },
+    "ard.de": {
+      "category": "independent",
+      "why": "owner: as DW"
+    },
+    "zdf.de": {
+      "category": "independent",
+      "why": "owner: as DW"
+    },
+    "nature.com": {
+      "category": "science",
+      "score": 10,
+      "why": "owner: 10"
+    },
+    "science.org": {
+      "category": "science"
+    },
+    "thelancet.com": {
+      "category": "science"
+    },
+    "nejm.org": {
+      "category": "science"
+    },
+    "bmj.com": {
+      "category": "science"
+    },
+    "cell.com": {
+      "category": "science"
+    },
+    "pnas.org": {
+      "category": "science"
+    },
+    "plos.org": {
+      "category": "science"
+    },
+    "arxiv.org": {
+      "category": "science",
+      "score": 8,
+      "why": "PROPOSED: preprints, not peer reviewed"
+    },
+    "nhs.uk": {
+      "category": "health_reference",
+      "score": 10,
+      "why": "owner: 10"
+    },
+    "mayoclinic.org": {
+      "category": "health_reference",
+      "score": 10,
+      "why": "owner: 10"
+    },
+    "cdc.gov": {
+      "category": "us_agency",
+      "score": 9,
+      "why": "owner: 9 (10 historically, -1 current administration)"
+    },
+    "nih.gov": {
+      "category": "us_agency"
+    },
+    "fda.gov": {
+      "category": "us_agency"
+    },
+    "noaa.gov": {
+      "category": "us_agency"
+    },
+    "weather.gov": {
+      "category": "us_agency"
+    },
+    "nasa.gov": {
+      "category": "us_agency"
+    },
+    "census.gov": {
+      "category": "us_agency"
+    },
+    "bls.gov": {
+      "category": "us_agency"
+    },
+    "usgs.gov": {
+      "category": "us_agency"
+    },
+    "faa.gov": {
+      "category": "us_agency"
+    },
+    "who.int": {
+      "category": "intergov"
+    },
+    "un.org": {
+      "category": "intergov"
+    },
+    "imf.org": {
+      "category": "intergov"
+    },
+    "stortinget.no": {
+      "category": "primary_official",
+      "why": "Norwegian parliament on its own members and votes"
+    },
+    "croydon.gov.uk": {
+      "category": "european_gov_non_eu"
+    },
+    "whitehouse.gov": {
+      "category": "us_state_controlled"
+    },
+    "voanews.com": {
+      "category": "us_state_controlled"
+    },
+    "rferl.org": {
+      "category": "us_state_controlled"
+    },
+    "stripes.com": {
+      "category": "us_state_controlled",
+      "why": "Stars and Stripes: US Department of Defense outlet"
+    },
+    "bbc.com": {
+      "category": "news_us_uk",
+      "family": "bbc",
+      "score": 7,
+      "why": "owner: 7 (US/UK news max 7); stays at 7 despite licence-fee funding like DW, because of reported weaknesses in the robustness of its editorial process"
+    },
+    "bbc.co.uk": {
+      "category": "news_us_uk",
+      "family": "bbc",
+      "score": 7,
+      "why": "owner: 7 (US/UK news max 7); stays at 7 despite licence-fee funding like DW, because of reported weaknesses in the robustness of its editorial process (same family as bbc.com)"
+    },
+    "cnn.com": {
+      "category": "news_us_uk",
+      "score": 7,
+      "why": "owner: 7"
+    },
+    "reuters.com": {
+      "category": "news_us_uk"
+    },
+    "apnews.com": {
+      "category": "news_us_uk"
+    },
+    "nytimes.com": {
+      "category": "news_us_uk"
+    },
+    "theguardian.com": {
+      "category": "news_us_uk"
+    },
+    "washingtonpost.com": {
+      "category": "news_us_uk"
+    },
+    "espn.com": {
+      "category": "news_us_uk"
+    },
+    "si.com": {
+      "category": "news_us_uk"
+    },
+    "foxsports.com": {
+      "category": "news_us_uk",
+      "why": "sports, not Fox News"
+    },
+    "ew.com": {
+      "category": "news_us_uk"
+    },
+    "cyclingnews.com": {
+      "category": "news_us_uk"
+    },
+    "rouleur.cc": {
+      "category": "news_us_uk"
+    },
+    "foxnews.com": {
+      "category": "politicized",
+      "score": 6,
+      "why": "owner: 6"
+    },
+    "breitbart.com": {
+      "category": "politicized",
+      "score": 6,
+      "why": "owner: 6"
+    },
+    "theatlantic.com": {
+      "category": "politicized",
+      "score": 6,
+      "why": "owner: 6"
+    },
+    "lemonde.fr": {
+      "category": "news_eu"
+    },
+    "spiegel.de": {
+      "category": "news_eu"
+    },
+    "elpais.com": {
+      "category": "news_eu"
+    },
+    "wielerflits.nl": {
+      "category": "news_eu"
+    },
+    "euronews.com": {
+      "category": "news_eu"
+    },
+    "cbc.ca": {
+      "category": "public_broadcaster"
+    },
+    "abc.net.au": {
+      "category": "public_broadcaster"
+    },
+    "nos.nl": {
+      "category": "public_broadcaster"
+    },
+    "yle.fi": {
+      "category": "public_broadcaster"
+    },
+    "svt.se": {
+      "category": "public_broadcaster"
+    },
+    "nrk.no": {
+      "category": "public_broadcaster"
+    },
+    "orf.at": {
+      "category": "public_broadcaster"
+    },
+    "srf.ch": {
+      "category": "public_broadcaster"
+    },
+    "antonygreen.com.au": {
+      "category": "public_broadcaster",
+      "why": "ABC Australia's election analyst"
+    },
+    "asahi.com": {
+      "category": "news_other"
+    },
+    "saltwire.com": {
+      "category": "news_other"
+    },
+    "sundayguardianlive.com": {
+      "category": "news_other",
+      "score": 5,
+      "why": "PROPOSED: partisan Indian weekly"
+    },
+    "forbes.com": {
+      "category": "aggregator",
+      "why": "contributor platform"
+    },
+    "aljazeera.com": {
+      "category": "pressure_jurisdiction",
+      "why": "Qatar"
+    },
+    "timesofisrael.com": {
+      "category": "pressure_jurisdiction"
+    },
+    "haaretz.com": {
+      "category": "pressure_jurisdiction"
+    },
+    "jpost.com": {
+      "category": "pressure_jurisdiction"
+    },
+    "arabnews.com": {
+      "category": "pressure_jurisdiction"
+    },
+    "gulfnews.com": {
+      "category": "pressure_jurisdiction"
+    },
+    "thenationalnews.com": {
+      "category": "pressure_jurisdiction"
+    },
+    "scmp.com": {
+      "category": "pressure_jurisdiction",
+      "why": "Hong Kong"
+    },
+    "baike.baidu.com": {
+      "category": "pressure_jurisdiction",
+      "score": 3,
+      "why": "China, user-edited"
+    },
+    "rt.com": {
+      "category": "state_media_authoritarian"
+    },
+    "tass.com": {
+      "category": "state_media_authoritarian"
+    },
+    "sputnikglobe.com": {
+      "category": "state_media_authoritarian"
+    },
+    "xinhuanet.com": {
+      "category": "state_media_authoritarian"
+    },
+    "news.cn": {
+      "category": "state_media_authoritarian"
+    },
+    "cgtn.com": {
+      "category": "state_media_authoritarian"
+    },
+    "globaltimes.cn": {
+      "category": "state_media_authoritarian"
+    },
+    "olympics.com": {
+      "category": "primary_official"
+    },
+    "fifa.com": {
+      "category": "primary_official"
+    },
+    "uefa.com": {
+      "category": "primary_official"
+    },
+    "formula1.com": {
+      "category": "primary_official"
+    },
+    "worldathletics.org": {
+      "category": "primary_official"
+    },
+    "wtatennis.com": {
+      "category": "primary_official"
+    },
+    "atptour.com": {
+      "category": "primary_official"
+    },
+    "nascar.com": {
+      "category": "primary_official"
+    },
+    "fiba.basketball": {
+      "category": "primary_official"
+    },
+    "lta.org.uk": {
+      "category": "primary_official"
+    },
+    "marathon.tokyo": {
+      "category": "primary_official"
+    },
+    "giroditaliawomen.it": {
+      "category": "primary_official"
+    },
+    "bnxtleague.com": {
+      "category": "primary_official"
+    },
+    "ikea.com": {
+      "category": "company_self"
+    },
+    "moller.no": {
+      "category": "company_self"
+    },
+    "transfermarkt.com": {
+      "category": "specialist_db",
+      "family": "transfermarkt"
+    },
+    "transfermarkt.us": {
+      "category": "specialist_db",
+      "family": "transfermarkt"
+    },
+    "transfermarkt.co.uk": {
+      "category": "specialist_db",
+      "family": "transfermarkt"
+    },
+    "transfermarkt.de": {
+      "category": "specialist_db",
+      "family": "transfermarkt"
+    },
+    "footballdatabase.eu": {
+      "category": "specialist_db"
+    },
+    "fbref.com": {
+      "category": "specialist_db"
+    },
+    "worldfootball.net": {
+      "category": "specialist_db"
+    },
+    "playmakerstats.com": {
+      "category": "specialist_db"
+    },
+    "procyclingstats.com": {
+      "category": "specialist_db"
+    },
+    "flashscore.com": {
+      "category": "specialist_db"
+    },
+    "tennis-db.com": {
+      "category": "specialist_db"
+    },
+    "the-sports.org": {
+      "category": "specialist_db"
+    },
+    "eurobasket.com": {
+      "category": "specialist_db"
+    },
+    "uselectionatlas.org": {
+      "category": "specialist_db"
+    },
+    "ballotpedia.org": {
+      "category": "specialist_db"
+    },
+    "electionresults.uk": {
+      "category": "specialist_db"
+    },
+    "peakvisor.com": {
+      "category": "specialist_db"
+    },
+    "peakbagger.com": {
+      "category": "specialist_db"
+    },
+    "mapcarta.com": {
+      "category": "specialist_db",
+      "family": "wikimedia",
+      "why": "built from OpenStreetMap + Wikidata: not independent of Wikidata"
+    },
+    "pitchbook.com": {
+      "category": "specialist_db"
+    },
+    "crunchbase.com": {
+      "category": "specialist_db"
+    },
+    "cbinsights.com": {
+      "category": "specialist_db"
+    },
+    "stockanalysis.com": {
+      "category": "specialist_db"
+    },
+    "imdb.com": {
+      "category": "aggregator"
+    },
+    "goodreads.com": {
+      "category": "aggregator"
+    },
+    "sports.yahoo.com": {
+      "category": "aggregator"
+    },
+    "yahoo.com": {
+      "category": "aggregator"
+    },
+    "bleacherreport.com": {
+      "category": "aggregator"
+    },
+    "amazon.com": {
+      "category": "aggregator"
+    },
+    "alltrails.com": {
+      "category": "aggregator"
+    },
+    "mountain-forecast.com": {
+      "category": "aggregator"
+    },
+    "tennislive.net": {
+      "category": "aggregator"
+    },
+    "bikeraceinfo.com": {
+      "category": "aggregator"
+    },
+    "cyclingflash.com": {
+      "category": "aggregator"
+    },
+    "gymnastics-now.com": {
+      "category": "aggregator"
+    },
+    "americanliterature.com": {
+      "category": "aggregator"
+    },
+    "books.google.com": {
+      "category": "reference_db"
+    },
+    "archive.org": {
+      "category": "reference_db"
+    },
+    "ebsco.com": {
+      "category": "reference_db"
+    },
+    "tracxn.com": {
+      "category": "scraped_db"
+    },
+    "zoominfo.com": {
+      "category": "scraped_db"
+    },
+    "rocketreach.co": {
+      "category": "scraped_db"
+    },
+    "thecompanycheck.com": {
+      "category": "scraped_db"
+    },
+    "emis.com": {
+      "category": "scraped_db"
+    },
+    "mergr.com": {
+      "category": "scraped_db"
+    },
+    "financecharts.com": {
+      "category": "scraped_db"
+    },
+    "corpdigest.com": {
+      "category": "scraped_db"
+    },
+    "startupintros.com": {
+      "category": "scraped_db"
+    },
+    "founders.io": {
+      "category": "scraped_db"
+    },
+    "mon-maire.fr": {
+      "category": "scraped_db"
+    },
+    "peakery.com": {
+      "category": "fan_blog"
+    },
+    "summitpost.org": {
+      "category": "fan_blog"
+    },
+    "trek.zone": {
+      "category": "fan_blog"
+    },
+    "cyclingstage.com": {
+      "category": "fan_blog"
+    },
+    "domestiquecycling.com": {
+      "category": "fan_blog"
+    },
+    "cyclinguptodate.com": {
+      "category": "fan_blog"
+    },
+    "watchcycling.com": {
+      "category": "fan_blog"
+    },
+    "watchathletics.com": {
+      "category": "fan_blog"
+    },
+    "f1-fansite.com": {
+      "category": "fan_blog"
+    },
+    "formula1archive.com": {
+      "category": "fan_blog"
+    },
+    "tennistale.com": {
+      "category": "fan_blog"
+    },
+    "tennistourcalendar.com": {
+      "category": "fan_blog"
+    },
+    "topendsports.com": {
+      "category": "fan_blog"
+    },
+    "speedwaycollective.com": {
+      "category": "fan_blog"
+    },
+    "marathonballot.com": {
+      "category": "fan_blog"
+    },
+    "andrewteale.me.uk": {
+      "category": "fan_blog",
+      "score": 6,
+      "why": "PROPOSED: established election-results analyst"
+    },
+    "britain.votes.now": {
+      "category": "fan_blog"
+    },
+    "tobychristie.com": {
+      "category": "fan_blog"
+    },
+    "ustc.dk": {
+      "category": "fan_blog"
+    },
+    "mapy.com": {
+      "category": "aggregator"
+    },
+    "worldatlas.com": {
+      "category": "content_farm"
+    },
+    "mappr.co": {
+      "category": "content_farm"
+    },
+    "ask-oracle.com": {
+      "category": "content_farm"
+    },
+    "entityfacts.com": {
+      "category": "content_farm"
+    },
+    "company-histories.com": {
+      "category": "content_farm"
+    },
+    "companieshistory.com": {
+      "category": "content_farm"
+    },
+    "celebrity-birthdays.com": {
+      "category": "content_farm"
+    },
+    "bornglorious.com": {
+      "category": "content_farm"
+    },
+    "prabook.com": {
+      "category": "content_farm"
+    },
+    "famousfix.com": {
+      "category": "content_farm"
+    },
+    "biographies.net": {
+      "category": "content_farm"
+    },
+    "populartimelines.com": {
+      "category": "content_farm"
+    },
+    "notablepeopleproject.org": {
+      "category": "content_farm"
+    },
+    "happyhappybirthday.net": {
+      "category": "content_farm"
+    },
+    "aroundus.com": {
+      "category": "content_farm"
+    },
+    "worldmeasure.com": {
+      "category": "content_farm"
+    },
+    "playback.fm": {
+      "category": "content_farm"
+    },
+    "worldcupwiki.com": {
+      "category": "content_farm"
+    },
+    "soccerpunter.com": {
+      "category": "content_farm"
+    },
+    "peakify.ai": {
+      "category": "ai_generated"
+    },
+    "lines.com": {
+      "category": "betting"
+    },
+    "reddit.com": {
+      "category": "user_generated"
+    },
+    "x.com": {
+      "category": "user_generated"
+    },
+    "twitter.com": {
+      "category": "user_generated"
+    },
+    "facebook.com": {
+      "category": "user_generated"
+    },
+    "youtube.com": {
+      "category": "user_generated"
+    },
+    "linkedin.com": {
+      "category": "user_generated"
+    },
+    "quora.com": {
+      "category": "user_generated"
+    },
+    "tiktok.com": {
+      "category": "user_generated",
+      "score": 2
+    },
+    "instagram.com": {
+      "category": "user_generated"
+    },
+    "medium.com": {
+      "category": "user_generated",
+      "score": 4,
+      "why": "PROPOSED: blogging platform, mixed authors"
+    }
+  },
+  "keyword_rules": [
+    {
+      "contains": "airport",
+      "category": "general_info"
+    },
+    {
+      "contains": "airways",
+      "category": "general_info"
+    },
+    {
+      "contains": "airlines",
+      "category": "general_info"
+    },
+    {
+      "contains": "ferries",
+      "category": "general_info"
+    },
+    {
+      "contains": "railway",
+      "category": "general_info"
+    },
+    {
+      "contains": "museum",
+      "category": "general_info"
+    }
+  ]
+}

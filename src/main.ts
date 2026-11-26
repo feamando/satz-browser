@@ -38,6 +38,8 @@ import {
   sidecarAddWatch,
   sidecarAppendTaskStep,
   sidecarBackfillTranslations,
+  sidecarBrowseLocalModel,
+  sidecarCancelHfDownload,
   sidecarCancelTaskStep,
   sidecarCaptureFailureEval,
   sidecarCancelI18nTranslate,
@@ -60,6 +62,7 @@ import {
   sidecarExecuteMailUnsubscribe,
   sidecarExecuteSetDefaultProvider,
   sidecarExportI18n,
+  sidecarExportProfile,
   sidecarFetchConversationPreviews,
   sidecarFetchDigest,
   sidecarFetchDoctor,
@@ -72,13 +75,17 @@ import {
   sidecarGetMailAccounts,
   sidecarGetMailAttachmentData,
   sidecarGetMailCodes,
+  sidecarGetMailStatus,
   sidecarGetModelConfig,
   sidecarGetProviders,
   sidecarGetTranslationConfig,
   sidecarHideMailSender,
   sidecarImportEnvFile,
   sidecarImportI18n,
+  sidecarImportProfile,
   sidecarInferProvider,
+  sidecarInspectHfRepo,
+  sidecarListHfDownloads,
   sidecarListTasks,
   sidecarListWatches,
   sidecarLockProfile,
@@ -89,6 +96,11 @@ import {
   sidecarManageNewsFeed,
   sidecarManageNewsTopic,
   sidecarMineSkillProposals,
+  sidecarPointLocalModel,
+  sidecarRemoveLocalModel,
+  sidecarSaveHfToken,
+  sidecarSearchHfModels,
+  sidecarStartHfDownload,
   sidecarStreamNewsChat,
   sidecarStreamNewsPerspectives,
   sidecarOverrideI18n,
@@ -243,6 +255,20 @@ import type {
   TabNewWindowEvent,
   TabPageEvent,
 } from "./types";
+import {
+  type ProfileAuthResult,
+  type UnlockStreamEvent,
+} from "./api";
+import type {
+  UnlockProgressStep,
+  UnlockStepId,
+  UnlockStepStatus,
+} from "./state";
+import {
+  checkForAppUpdate,
+  downloadAndInstallAppUpdate,
+  getInstalledAppVersion,
+} from "./updater";
 
 let resizeObserver: ResizeObserver | null = null;
 let streamingTimerId: number | null = null;
@@ -529,83 +555,385 @@ async function refreshContentTranslationConfig(unlocked: boolean): Promise<void>
   }
 }
 
+const UNLOCK_HEADLINE_PRIORITY: UnlockStepId[] = [
+  "mail",
+  "news",
+  "drives",
+  "vault_brain",
+  "digest",
+];
+let unlockHeadlineByStep: Partial<Record<UnlockStepId, string>> = {};
+
+function createUnlockSteps(preDoneVault = false): UnlockProgressStep[] {
+  return [
+    {
+      id: "vault_brain",
+      label: t("profile.step_vault_brain"),
+      status: preDoneVault ? "running" : "pending",
+      detail: preDoneVault ? t("profile.detail_hydrating_brain") : "",
+    },
+    { id: "mail", label: t("profile.step_mail"), status: "pending", detail: "" },
+    { id: "news", label: t("profile.step_news"), status: "pending", detail: "" },
+    { id: "drives", label: t("profile.step_drives"), status: "pending", detail: "" },
+    { id: "digest", label: t("profile.step_digest"), status: "pending", detail: "" },
+  ];
+}
+
+function initPostUnlockHydrationSteps(profileTitle = ""): void {
+  unlockHeadlineByStep = {};
+  state.postUnlockTitle = profileTitle;
+  state.unlockSteps = createUnlockSteps(true);
+  unlockHeadlineByStep.vault_brain = t("profile.status_hydrating_brain");
+  state.postUnlockLabel = t("profile.status_hydrating_brain");
+}
+
+function clearUnlockOverlayState(): void {
+  unlockHeadlineByStep = {};
+  state.postUnlockLoading = false;
+  state.postUnlockLabel = "";
+  state.postUnlockTitle = "";
+  state.unlockSteps = [];
+}
+
+function updateUnlockStep(
+  id: UnlockStepId,
+  status: UnlockStepStatus,
+  detail?: string,
+  headline?: string
+): void {
+  if (!state.postUnlockLoading) return;
+  if (state.unlockSteps.length === 0) {
+    state.unlockSteps = createUnlockSteps(false);
+  }
+  const idx = state.unlockSteps.findIndex((s) => s.id === id);
+  if (idx >= 0) {
+    const nextDetail = detail !== undefined ? detail : (state.unlockSteps[idx].detail ?? "");
+    state.unlockSteps[idx] = {
+      ...state.unlockSteps[idx],
+      status,
+      detail: nextDetail,
+    };
+  }
+  if (status === "running" && headline) {
+    unlockHeadlineByStep[id] = headline;
+  } else if (status !== "running") {
+    delete unlockHeadlineByStep[id];
+  }
+
+  let nextLabel = "";
+  for (const candId of UNLOCK_HEADLINE_PRIORITY) {
+    const cand = state.unlockSteps.find((s) => s.id === candId && s.status === "running");
+    if (cand) {
+      nextLabel =
+        unlockHeadlineByStep[candId] ||
+        (cand.detail ? `${cand.label}: ${cand.detail}` : t("profile.syncing_vault"));
+      break;
+    }
+  }
+  if (nextLabel) {
+    state.postUnlockLabel = nextLabel;
+    state.profileUnlockLabel = nextLabel;
+  } else if (!state.postUnlockLabel) {
+    state.postUnlockLabel = t("profile.syncing_vault");
+  }
+  renderPostUnlockGlassOverlay();
+}
+
+function applySidecarUnlockStreamEvent(ev: UnlockStreamEvent): void {
+  const step = String(ev.step || "").toLowerCase();
+  const status = String(ev.status || "running").toLowerCase();
+  const detail = String(ev.detail || "").toLowerCase();
+  if (step === "vault") {
+    if (status === "running") {
+      if (detail === "checking_keychain") {
+        updateUnlockStep(
+          "vault_brain",
+          "running",
+          t("profile.detail_checking_keychain"),
+          t("profile.status_checking_keychain")
+        );
+      } else if (detail === "decrypting_bundle") {
+        updateUnlockStep(
+          "vault_brain",
+          "running",
+          t("profile.detail_decrypting_bundle"),
+          t("profile.status_decrypting_bundle")
+        );
+      } else if (detail === "merging_profile") {
+        updateUnlockStep(
+          "vault_brain",
+          "running",
+          t("profile.detail_merging_profile"),
+          t("profile.status_merging_profile")
+        );
+      } else if (detail === "creating_vault") {
+        updateUnlockStep(
+          "vault_brain",
+          "running",
+          t("profile.detail_creating_vault"),
+          t("profile.status_creating_vault")
+        );
+      } else {
+        updateUnlockStep(
+          "vault_brain",
+          "running",
+          t("profile.detail_verifying_pin"),
+          t("profile.status_verifying_pin")
+        );
+      }
+    } else if (status === "done") {
+      updateUnlockStep(
+        "vault_brain",
+        "running",
+        t("profile.detail_opening_store"),
+        t("profile.status_opening_store")
+      );
+    }
+  } else if (step === "store") {
+    if (status === "running") {
+      updateUnlockStep(
+        "vault_brain",
+        "running",
+        t("profile.detail_opening_store"),
+        t("profile.status_opening_store")
+      );
+    } else if (status === "done") {
+      updateUnlockStep(
+        "vault_brain",
+        "running",
+        t("profile.detail_hydrating_brain"),
+        t("profile.status_hydrating_brain")
+      );
+    }
+  } else if (step === "mail") {
+    if (detail === "repairing_calendar") {
+      updateUnlockStep(
+        "mail",
+        "running",
+        t("profile.detail_repairing_calendar"),
+        t("profile.status_repairing_calendar")
+      );
+    } else {
+      updateUnlockStep(
+        "mail",
+        "running",
+        t("profile.detail_opening_mail_db"),
+        t("profile.status_opening_mail")
+      );
+    }
+  } else if (step === "drives") {
+    updateUnlockStep(
+      "drives",
+      "running",
+      t("profile.detail_drives_sync"),
+      t("profile.status_loading_drives")
+    );
+  }
+}
+
 async function performProfileUnlockOrCreate(opts: {
-  mode: "unlock" | "keychain" | "create";
+  mode: "unlock" | "keychain" | "create" | "import";
   profileId?: string;
   name?: string;
   pin?: string;
+  bundleB64?: string;
+  localPin?: string;
   closeModalOnSuccess?: boolean;
 }): Promise<{ ok: boolean; error: string }> {
   if (state.profileUnlocking) {
     return { ok: false, error: t("profile.unlocking_progress") };
   }
+  const prevPromptOpen = state.profilePromptOpen;
+  const matchedProfName =
+    opts.mode === "create"
+      ? (opts.name ?? "").trim()
+      : opts.mode === "import"
+        ? state.profileImportDraft?.filename ?? t("profile.upload_btn")
+        : (state.knowledge.profile?.profiles.find((p) => p.id === opts.profileId)?.name ??
+            opts.profileId ??
+            "");
+
   state.revealedPasswords = {};
   state.profileUnlocking = true;
   state.profileUnlockLabel =
     opts.mode === "create"
-      ? t("main.profile_creating", { name: opts.name ?? "" })
-      : opts.mode === "keychain"
-        ? t("main.profile_unlocking_keychain", { id: opts.profileId ?? "" })
-        : t("main.profile_unlocking", { id: opts.profileId ?? "" });
+      ? t("profile.status_creating_vault")
+      : opts.mode === "import"
+        ? t("profile.status_decrypting_bundle")
+        : opts.mode === "keychain"
+          ? t("profile.status_checking_keychain")
+          : t("profile.status_verifying_pin");
   state.profileStatusMessage = "";
+  state.profilePromptOpen = false;
+  state.postUnlockLoading = true;
+  state.postUnlockTitle = matchedProfName;
+  unlockHeadlineByStep = {};
+  state.unlockSteps = createUnlockSteps(false);
+  updateUnlockStep(
+    "vault_brain",
+    "running",
+    opts.mode === "create"
+      ? t("profile.detail_creating_vault")
+      : opts.mode === "import"
+        ? t("profile.detail_decrypting_bundle")
+        : opts.mode === "keychain"
+          ? t("profile.detail_checking_keychain")
+          : t("profile.detail_verifying_pin"),
+    state.profileUnlockLabel
+  );
   renderProfileUnlockOverlay(getProfilePromptActions());
+  renderPostUnlockGlassOverlay();
   renderAllRegions();
+  scheduleWebviewLayoutSync();
   let ok = false;
   let errMsg = "";
   try {
-    const res =
+    const res: ProfileAuthResult =
       opts.mode === "create"
-        ? await sidecarCreateProfile(opts.name ?? "", opts.pin ?? "")
-        : opts.mode === "keychain"
-          ? await sidecarUnlockProfileKeychain(opts.profileId ?? "")
-          : await sidecarUnlockProfile(opts.profileId ?? "", opts.pin ?? "");
+        ? await sidecarCreateProfile(opts.name ?? "", opts.pin ?? "", applySidecarUnlockStreamEvent)
+        : opts.mode === "import"
+          ? await sidecarImportProfile(
+              opts.bundleB64 ?? "",
+              opts.pin ?? "",
+              { localPin: opts.localPin, activate: true },
+              applySidecarUnlockStreamEvent
+            )
+          : opts.mode === "keychain"
+            ? await sidecarUnlockProfileKeychain(opts.profileId ?? "", applySidecarUnlockStreamEvent)
+            : await sidecarUnlockProfile(opts.profileId ?? "", opts.pin ?? "", applySidecarUnlockStreamEvent);
     ok = Boolean(res.ok);
     if (ok && res.profile) {
       state.knowledge = { ...state.knowledge, profile: res.profile };
+      state.profileImportDraft = null;
+      state.profilePromptOpen = false;
       if (opts.closeModalOnSuccess) {
-        state.profilePromptOpen = false;
         state.profilePromptDismissed = false;
       }
+      const importedDisplayName =
+        res.importedProfileName || res.profile.active_profile?.name || res.importedProfileId || matchedProfName;
       state.profileStatusMessage =
         opts.mode === "create"
           ? t("main.profile_created", { name: opts.name ?? "" })
-          : opts.mode === "keychain"
-            ? t("main.profile_unlocked_keychain", { id: opts.profileId ?? "" })
-            : t("main.profile_unlocked", { id: opts.profileId ?? "" });
+          : opts.mode === "import"
+            ? res.importAction === "merge"
+              ? t("main.profile_merged", { name: importedDisplayName })
+              : t("main.profile_imported", { name: importedDisplayName })
+            : opts.mode === "keychain"
+              ? t("main.profile_unlocked_keychain", { id: opts.profileId ?? "" })
+              : t("main.profile_unlocked", { id: opts.profileId ?? "" });
       state.profileUnlocking = false;
       state.profileUnlockLabel = "";
-      state.postUnlockLoading = true;
-      state.postUnlockLabel = t("profile.syncing_vault");
-      renderProfileUnlockOverlay(getProfilePromptActions());
-      renderPostUnlockGlassOverlay();
-      scheduleWebviewLayoutSync();
       try {
         await syncAfterProfileAuthChange(true);
       } finally {
-        state.postUnlockLoading = false;
-        state.postUnlockLabel = "";
+        clearUnlockOverlayState();
       }
     } else {
+      clearUnlockOverlayState();
+      renderPostUnlockGlassOverlay();
+      if (prevPromptOpen || opts.closeModalOnSuccess) {
+        state.profilePromptOpen = prevPromptOpen;
+      }
       errMsg =
         res.error ??
         (opts.mode === "create"
           ? t("main.profile_err_create")
-          : opts.mode === "keychain"
-            ? t("main.profile_err_keychain")
-            : t("mail.err_invalid_pin"));
+          : opts.mode === "import"
+            ? t("main.profile_err_import")
+            : opts.mode === "keychain"
+              ? t("main.profile_err_keychain")
+              : t("mail.err_invalid_pin"));
+      if (opts.mode === "import" && state.profileImportDraft && errMsg.toLowerCase().includes("local pin")) {
+        state.profileImportDraft = { ...state.profileImportDraft, needLocalPin: true };
+      }
       state.profileStatusMessage = `${t("common.error_prefix")} ${errMsg}`;
       await syncAfterProfileAuthChange(false);
     }
   } finally {
     state.profileUnlocking = false;
     state.profileUnlockLabel = "";
-    state.postUnlockLoading = false;
-    state.postUnlockLabel = "";
+    clearUnlockOverlayState();
   }
   renderProfileUnlockOverlay(getProfilePromptActions());
   renderAllRegions();
   scheduleWebviewLayoutSync();
   return { ok, error: errMsg };
+}
+
+function decodeBase64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const len = bin.length;
+  const out = new Uint8Array(len);
+  for (let i = 0; i < len; i += 1) {
+    out[i] = bin.charCodeAt(i);
+  }
+  return out;
+}
+
+async function handleExportProfile(profileId: string, pin?: string): Promise<void> {
+  if (state.profileExportBusyId || state.profileUnlocking) return;
+  state.profileExportBusyId = profileId;
+  renderViewportRegion();
+  try {
+    const res = await sidecarExportProfile(profileId, pin);
+    if (!res.ok || !res.bundle_b64) {
+      const msg = `${t("common.error_prefix")} ${res.error ?? t("main.profile_err_export")}`;
+      state.profileStatusMessage = msg;
+      showAppToast(msg, "danger");
+      return;
+    }
+    const filename = res.filename || `${profileId}.satzprofile`;
+    const bytes = decodeBase64ToBytes(res.bundle_b64);
+    const blob = new Blob([bytes.buffer as ArrayBuffer], { type: "application/octet-stream" });
+
+    let saved = false;
+    const pickerFn = (
+      window as unknown as {
+        showSaveFilePicker?: (opts: {
+          suggestedName?: string;
+          types?: Array<{ description?: string; accept: Record<string, string[]> }>;
+        }) => Promise<{
+          createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }>;
+        }>;
+      }
+    ).showSaveFilePicker;
+    if (typeof pickerFn === "function") {
+      try {
+        const handle = await pickerFn({
+          suggestedName: filename,
+          types: [{ description: "Satz Profile Backup", accept: { "application/octet-stream": [".satzprofile"] } }],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        saved = true;
+      } catch (err) {
+        if ((err as { name?: string })?.name === "AbortError") {
+          return;
+        }
+      }
+    }
+    if (!saved) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+    }
+
+    const okMsg = t("main.profile_exported", {
+      name: res.profile_name || profileId,
+      filename,
+    });
+    state.profileStatusMessage = okMsg;
+    showAppToast(okMsg, "info");
+  } finally {
+    state.profileExportBusyId = null;
+    renderViewportRegion();
+  }
 }
 
 async function syncAfterProfileAuthChange(unlocked: boolean): Promise<void> {
@@ -625,6 +953,10 @@ async function syncAfterProfileAuthChange(unlocked: boolean): Promise<void> {
     state.drivesFolderKey = "";
     state.drivesParentKey = null;
     state.drivesBreadcrumbs = [{ key: "", name: "Drives" }];
+    state.newsFollowedStories = [];
+    state.newsPendingTopicKeys = {};
+    state.newsPendingFeedKeys = {};
+    state.newsPendingTrustDomains = {};
     state.newsPerspectivesDetail = null;
     state.newsPerspectivesStream = null;
     state.googleOAuthSessionId = null;
@@ -639,7 +971,10 @@ async function syncAfterProfileAuthChange(unlocked: boolean): Promise<void> {
       refreshDigest(null),
     ]);
     if (kb) state.knowledge = kb;
-    if (mCfg) syncConfiguredChatModel(mCfg, false);
+    if (mCfg) {
+    syncConfiguredChatModel(mCfg, false);
+    ensureHfDownloadPolling();
+  }
     if (pol && pol.ok) state.routingPolicy = pol;
     state.providerRegistry = null;
     state.googleOAuthStatus = null;
@@ -649,62 +984,184 @@ async function syncAfterProfileAuthChange(unlocked: boolean): Promise<void> {
     return;
   }
 
-  const heavyHydratePromise = Promise.allSettled([
-    refreshMailState(),
-    refreshNewsState(state.newsActiveLane || "stories"),
-    refreshDrivesState(false),
-  ]);
-  const [kb, mCfg, healthRes, acctsRes, , , gStatus, pol, provReg] = await Promise.all([
-    sidecarFetchKnowledge(),
-    sidecarGetModelConfig(),
-    sidecarFetchHealth(),
-    sidecarGetMailAccounts(),
-    refreshContentTranslationConfig(true),
-    refreshLists(),
-    sidecarFetchGoogleOAuthStatus().catch(() => null),
-    sidecarFetchRoutingPolicy().catch(() => null),
-    sidecarGetProviders().catch(() => null),
-    refreshDigest(null),
-    Promise.race([
-      heavyHydratePromise,
-      new Promise<void>((resolve) => window.setTimeout(resolve, 4500)),
-    ]),
-  ]);
-  if (kb) state.knowledge = kb;
-  if (mCfg) syncConfiguredChatModel(mCfg, true);
-  if (gStatus !== undefined) state.googleOAuthStatus = gStatus;
-  if (pol && pol.ok) state.routingPolicy = pol;
-  if (provReg !== undefined) {
-    state.providerRegistry = provReg;
-    state.providerCredOpenId = "";
-    state.providerInferredDraft = {};
-  }
-  if (healthRes.online) {
-    state.sidecar = healthRes;
-    if (healthRes.mail?.counts) state.mailCounts = healthRes.mail.counts;
-    if (healthRes.drives && !state.drivesStatus) state.drivesStatus = healthRes.drives;
-  }
-  if (acctsRes.unlocked && state.mailAccounts.length === 0) {
-    state.mailAccounts = acctsRes.accounts ?? [];
-    if (acctsRes.presets?.length) state.mailPresets = acctsRes.presets;
-    const totalAcctUnread = state.mailAccounts.reduce(
-      (acc, a) => acc + (a.inbox_unread ?? 0),
-      0
+  if (state.postUnlockLoading && state.unlockSteps.length === 0) {
+    initPostUnlockHydrationSteps(
+      state.knowledge.profile?.active_profile?.name ??
+        state.knowledge.profile?.active_profile_id ??
+        ""
     );
-    if (totalAcctUnread > 0 && state.mailCounts.inbox_unread === 0) {
-      state.mailCounts = { ...state.mailCounts, inbox_unread: totalAcctUnread };
+  }
+
+  let liveMailPollId: number | null = null;
+  if (state.postUnlockLoading) {
+    liveMailPollId = window.setInterval(async () => {
+      if (!state.postUnlockLoading) return;
+      try {
+        const st = await sidecarGetMailStatus();
+        if (!state.postUnlockLoading || !st.unlocked) return;
+        if ((st.processing_total ?? 0) > (st.processing_done ?? 0)) {
+          const done = String(st.processing_done ?? 0);
+          const total = String(st.processing_total ?? 0);
+          updateUnlockStep(
+            "mail",
+            "running",
+            t("profile.detail_mail_indexing", { done, total }),
+            t("profile.status_indexing_mail", { done, total })
+          );
+        }
+      } catch {
+        // Ignore transient status poll errors
+      }
+    }, 550);
+  }
+
+  try {
+    const mailTask = (async () => {
+      updateUnlockStep(
+        "mail",
+        "running",
+        t("profile.detail_mail_accounts"),
+        t("profile.status_loading_mail")
+      );
+      try {
+        await refreshMailState((detail, headline) =>
+          updateUnlockStep("mail", "running", detail, headline)
+        );
+        updateUnlockStep("mail", "done", t("profile.detail_ready"));
+      } catch (err) {
+        updateUnlockStep("mail", "error");
+        throw err;
+      }
+    })();
+
+    const newsTask = (async () => {
+      updateUnlockStep(
+        "news",
+        "running",
+        t("profile.detail_news_fetch"),
+        t("profile.status_loading_news")
+      );
+      try {
+        await refreshNewsState(state.newsActiveLane || "stories", (detail, headline) =>
+          updateUnlockStep("news", "running", detail, headline)
+        );
+        updateUnlockStep("news", "done", t("profile.detail_ready"));
+      } catch (err) {
+        updateUnlockStep("news", "error");
+        throw err;
+      }
+    })();
+
+    const drivesTask = (async () => {
+      updateUnlockStep(
+        "drives",
+        "running",
+        t("profile.detail_drives_sync"),
+        t("profile.status_loading_drives")
+      );
+      try {
+        await refreshDrivesState(false);
+        updateUnlockStep("drives", "done", t("profile.detail_ready"));
+      } catch (err) {
+        updateUnlockStep("drives", "error");
+        throw err;
+      }
+    })();
+
+    const brainCoreTask = (async () => {
+      updateUnlockStep(
+        "vault_brain",
+        "running",
+        t("profile.detail_hydrating_brain"),
+        t("profile.status_hydrating_brain")
+      );
+      try {
+        const res = await Promise.all([
+          sidecarFetchKnowledge(),
+          sidecarGetModelConfig(),
+          sidecarFetchHealth(),
+          refreshContentTranslationConfig(true),
+          refreshLists(),
+          sidecarFetchRoutingPolicy().catch(() => null),
+          sidecarGetProviders().catch(() => null),
+        ]);
+        updateUnlockStep("vault_brain", "done", t("profile.detail_ready"));
+        return res;
+      } catch (err) {
+        updateUnlockStep("vault_brain", "error");
+        throw err;
+      }
+    })();
+
+    const digestTask = (async () => {
+      updateUnlockStep(
+        "digest",
+        "running",
+        t("profile.detail_digest_build"),
+        t("profile.status_building_digest")
+      );
+      try {
+        await refreshDigest(null);
+        updateUnlockStep("digest", "done", t("profile.detail_ready"));
+      } catch (err) {
+        updateUnlockStep("digest", "error");
+        throw err;
+      }
+    })();
+
+    const heavyHydratePromise = Promise.allSettled([mailTask, newsTask, drivesTask]);
+    const [coreRes, acctsRes, gStatus] = await Promise.all([
+      brainCoreTask,
+      sidecarGetMailAccounts(),
+      sidecarFetchGoogleOAuthStatus().catch(() => null),
+      digestTask,
+      Promise.race([
+        heavyHydratePromise,
+        new Promise<void>((resolve) => window.setTimeout(resolve, 4500)),
+      ]),
+    ]);
+
+    const [kb, mCfg, healthRes, , , pol, provReg] = coreRes;
+    if (kb) state.knowledge = kb;
+    if (mCfg) syncConfiguredChatModel(mCfg, true);
+    if (gStatus !== undefined) state.googleOAuthStatus = gStatus;
+    if (pol && pol.ok) state.routingPolicy = pol;
+    if (provReg !== undefined) {
+      state.providerRegistry = provReg;
+      state.providerCredOpenId = "";
+      state.providerInferredDraft = {};
+    }
+    if (healthRes.online) {
+      state.sidecar = healthRes;
+      if (healthRes.mail?.counts) state.mailCounts = healthRes.mail.counts;
+      if (healthRes.drives && !state.drivesStatus) state.drivesStatus = healthRes.drives;
+    }
+    if (acctsRes.unlocked && state.mailAccounts.length === 0) {
+      state.mailAccounts = acctsRes.accounts ?? [];
+      if (acctsRes.presets?.length) state.mailPresets = acctsRes.presets;
+      const totalAcctUnread = state.mailAccounts.reduce(
+        (acc, a) => acc + (a.inbox_unread ?? 0),
+        0
+      );
+      if (totalAcctUnread > 0 && state.mailCounts.inbox_unread === 0) {
+        state.mailCounts = { ...state.mailCounts, inbox_unread: totalAcctUnread };
+      }
+    }
+    const syncKey = `unlocked:${state.knowledge.profile?.active_profile?.id ?? "default"}`;
+    triggerStartupSyncIfNeeded(syncKey);
+
+    void heavyHydratePromise.then(() => {
+      renderRailRegion();
+      renderStatusLine();
+      if (!state.activeDetail && !state.showKnowledgeView && !state.showBrainView) {
+        renderViewportRegion();
+      }
+    });
+  } finally {
+    if (liveMailPollId !== null) {
+      window.clearInterval(liveMailPollId);
     }
   }
-  const syncKey = `unlocked:${state.knowledge.profile?.active_profile?.id ?? "default"}`;
-  triggerStartupSyncIfNeeded(syncKey);
-
-  void heavyHydratePromise.then(() => {
-    renderRailRegion();
-    renderStatusLine();
-    if (!state.activeDetail && !state.showKnowledgeView && !state.showBrainView) {
-      renderViewportRegion();
-    }
-  });
 }
 
 let i18nBootSynced = false;
@@ -960,33 +1417,59 @@ async function syncAppI18nState(
 
 let googleOAuthPollTimer: number | null = null;
 let drivesOAuthPollTimer: number | null = null;
+let drivesRefreshSeq = 0;
 
-async function refreshDrivesState(renderAfter = false): Promise<void> {
-  const [statusRes, listRes, createTargets] = await Promise.all([
-    sidecarFetchDrivesStatus(),
-    sidecarFetchDrivesList({
-      folder_key: state.drivesFolderKey,
-      provider: state.drivesProviderFilter,
-      file_type: state.drivesFileTypeFilter,
-      owner: state.drivesOwnerFilter,
-      query: state.drivesSearchQuery,
-    }),
-    sidecarFetchDriveCreateTargets(),
-  ]);
-  if (statusRes) {
-    state.drivesStatus = statusRes;
+async function refreshDrivesState(
+  renderAfter = false,
+  opts?: { showLoading?: boolean; renderImmediately?: boolean }
+): Promise<void> {
+  const showLoading = opts?.showLoading ?? renderAfter;
+  const renderImmediately = opts?.renderImmediately ?? showLoading;
+  const seq = ++drivesRefreshSeq;
+  if (showLoading) {
+    state.drivesLoading = true;
+    if (
+      renderImmediately &&
+      state.activeDetail?.conversation.origin === "drives" &&
+      state.activeTabId.startsWith("drives-lane:")
+    ) {
+      renderViewportRegion();
+    }
   }
-  if (listRes && listRes.ok) {
-    state.drivesFolderKey = listRes.folder_key;
-    state.drivesParentKey = listRes.parent_key;
-    state.drivesBreadcrumbs = listRes.breadcrumbs;
-    state.drivesItems = listRes.items;
-    state.drivesFacets = listRes.facets;
-    state.drivesScope = listRes.scope;
-  }
-  state.drivesCreateTargets = createTargets;
-  if (renderAfter) {
-    renderAllRegions();
+  try {
+    const [statusRes, listRes, createTargets] = await Promise.all([
+      sidecarFetchDrivesStatus(),
+      sidecarFetchDrivesList({
+        folder_key: state.drivesFolderKey,
+        provider: state.drivesProviderFilter,
+        file_type: state.drivesFileTypeFilter,
+        owner: state.drivesOwnerFilter,
+        query: state.drivesSearchQuery,
+      }),
+      sidecarFetchDriveCreateTargets(),
+    ]);
+    if (seq !== drivesRefreshSeq) {
+      return;
+    }
+    if (statusRes) {
+      state.drivesStatus = statusRes;
+    }
+    if (listRes && listRes.ok) {
+      state.drivesFolderKey = listRes.folder_key;
+      state.drivesParentKey = listRes.parent_key;
+      state.drivesBreadcrumbs = listRes.breadcrumbs;
+      state.drivesItems = listRes.items;
+      state.drivesFacets = listRes.facets;
+      state.drivesScope = listRes.scope;
+    }
+    state.drivesCreateTargets = createTargets;
+  } finally {
+    if (seq === drivesRefreshSeq) {
+      state.drivesLoading = false;
+      if (renderAfter) {
+        renderAllRegions();
+      }
+    }
   }
 }
 
@@ -1253,9 +1736,69 @@ function resetToNewConversation(): void {
   void refreshDigest();
 }
 
+async function runAppUpdateCheck(silent = false): Promise<void> {
+  if (state.appUpdateStatus.checking || state.appUpdateStatus.installing) return;
+  state.appUpdateStatus.checking = true;
+  state.appUpdateStatus.error = "";
+  if (!silent) {
+    state.appUpdateStatus.message = t("settings.app_checking_update");
+    renderViewportRegion();
+  }
+  const res = await checkForAppUpdate();
+  state.appUpdateStatus.checking = false;
+  state.appUpdateStatus.currentVersion = res.currentVersion;
+  state.appUpdateStatus.availableVersion = res.availableVersion;
+  state.appUpdateStatus.notes = res.notes;
+  if (res.error) {
+    state.appUpdateStatus.error = silent ? "" : t("settings.app_update_err", { error: res.error });
+    state.appUpdateStatus.message = "";
+  } else if (res.availableVersion) {
+    state.appUpdateStatus.message = t("settings.app_update_available", {
+      version: res.availableVersion,
+    });
+    showAppToast(state.appUpdateStatus.message);
+  } else {
+    state.appUpdateStatus.message = silent
+      ? ""
+      : t("settings.app_up_to_date", { version: res.currentVersion });
+  }
+  if (!silent || res.availableVersion) {
+    renderViewportRegion();
+  }
+}
+
+async function runAppUpdateInstall(): Promise<void> {
+  if (state.appUpdateStatus.installing) return;
+  state.appUpdateStatus.installing = true;
+  state.appUpdateStatus.error = "";
+  state.appUpdateStatus.progressPct = 0;
+  renderViewportRegion();
+
+  const res = await downloadAndInstallAppUpdate((pct) => {
+    state.appUpdateStatus.progressPct = pct;
+    state.appUpdateStatus.message = t("settings.app_updating_progress", { pct });
+    renderViewportRegion();
+  });
+  if (!res.ok) {
+    state.appUpdateStatus.installing = false;
+    state.appUpdateStatus.error = t("settings.app_update_err", {
+      error: res.error ?? "failed",
+    });
+    showAppToast(state.appUpdateStatus.error, "danger");
+    renderViewportRegion();
+  }
+}
+
 async function initApp(): Promise<void> {
   applyUiPreferences();
   mountShellSkeleton();
+
+  void getInstalledAppVersion().then((ver) => {
+    state.appUpdateStatus.currentVersion = ver;
+  });
+  window.setTimeout(() => {
+    void runAppUpdateCheck(true);
+  }, 5000);
 
   void fontsReady().then(async () => {
     await document.fonts.ready;
@@ -1793,15 +2336,16 @@ async function pollSidecarState(): Promise<void> {
             if (freshKb.profile?.unlocked) {
               state.profilePromptOpen = false;
               state.postUnlockLoading = true;
-              state.postUnlockLabel = t("profile.syncing_vault");
+              initPostUnlockHydrationSteps(
+                freshKb.profile?.active_profile?.name ?? freshKb.profile?.active_profile_id ?? ""
+              );
               renderProfileUnlockOverlay(getProfilePromptActions());
               renderPostUnlockGlassOverlay();
               scheduleWebviewLayoutSync();
               try {
                 await syncAfterProfileAuthChange(true);
               } finally {
-                state.postUnlockLoading = false;
-                state.postUnlockLabel = "";
+                clearUnlockOverlayState();
               }
               renderAllRegions();
               scheduleWebviewLayoutSync();
@@ -1819,15 +2363,16 @@ async function pollSidecarState(): Promise<void> {
           if (earlyKb.profile?.unlocked) {
             state.profilePromptOpen = false;
             state.postUnlockLoading = true;
-            state.postUnlockLabel = t("profile.syncing_vault");
+            initPostUnlockHydrationSteps(
+              earlyKb.profile?.active_profile?.name ?? earlyKb.profile?.active_profile_id ?? ""
+            );
             renderProfileUnlockOverlay(getProfilePromptActions());
             renderPostUnlockGlassOverlay();
             scheduleWebviewLayoutSync();
             try {
               await syncAfterProfileAuthChange(true);
             } finally {
-              state.postUnlockLoading = false;
-              state.postUnlockLabel = "";
+              clearUnlockOverlayState();
             }
             renderAllRegions();
             scheduleWebviewLayoutSync();
@@ -1842,7 +2387,13 @@ async function pollSidecarState(): Promise<void> {
           if (backendUnlocked) {
             state.profilePromptOpen = false;
             state.postUnlockLoading = true;
-            state.postUnlockLabel = t("profile.syncing_vault");
+            initPostUnlockHydrationSteps(
+              state.knowledge.profile?.profiles.find(
+                (p) => p.id === state.sidecar.profile?.active_profile_id
+              )?.name ??
+                state.sidecar.profile?.active_profile_id ??
+                ""
+            );
             renderProfileUnlockOverlay(getProfilePromptActions());
             renderPostUnlockGlassOverlay();
             scheduleWebviewLayoutSync();
@@ -1850,8 +2401,7 @@ async function pollSidecarState(): Promise<void> {
           try {
             await syncAfterProfileAuthChange(backendUnlocked);
           } finally {
-            state.postUnlockLoading = false;
-            state.postUnlockLabel = "";
+            clearUnlockOverlayState();
           }
           renderAllRegions();
           scheduleWebviewLayoutSync();
@@ -2621,6 +3171,11 @@ function renderTopBarRegion(): void {
     onOpenCommandBar: () => {
       handleToggleCommandBar();
     },
+    onClearDrivesSearch: () => {
+      if (!state.drivesSearchQuery) return;
+      state.drivesSearchQuery = "";
+      void refreshDrivesState(true);
+    },
   });
 }
 
@@ -2650,7 +3205,10 @@ async function loadSettingsPanelData(): Promise<void> {
   ]);
   if (kb) state.knowledge = kb;
   state.doctorRoles = docRoles;
-  if (mCfg) syncConfiguredChatModel(mCfg, false);
+  if (mCfg) {
+    syncConfiguredChatModel(mCfg, false);
+    ensureHfDownloadPolling();
+  }
   state.googleOAuthStatus = gStatus;
   if (dStatus) state.drivesStatus = dStatus;
   if (pol && pol.ok) state.routingPolicy = pol;
@@ -2758,7 +3316,8 @@ async function openNewsHome(lane: NewsLane = "stories"): Promise<void> {
 
 async function handleSendPerspectivesTopic(
   topic: string,
-  clusterId?: string
+  clusterId?: string,
+  followedStoryId?: string
 ): Promise<void> {
   const cleanTopic = topic.trim();
   if (!cleanTopic || state.newsPerspectivesStream) return;
@@ -2829,6 +3388,7 @@ async function handleSendPerspectivesTopic(
       },
       {
         clusterId,
+        followedStoryId,
         roles: state.modelConfig?.roles,
         messages: history,
       }
@@ -2898,8 +3458,72 @@ async function handleSendPerspectivesTopic(
   }
 }
 
+let hfDownloadPollTimer: number | null = null;
+const hfNotifiedDownloads = new Set<string>();
+
+function ensureHfDownloadPolling(): void {
+  const hasRunning = state.hfDownloads.some(
+    (d) => d.state === "queued" || d.state === "downloading"
+  );
+  if (!hasRunning) {
+    if (hfDownloadPollTimer !== null) {
+      window.clearInterval(hfDownloadPollTimer);
+      hfDownloadPollTimer = null;
+    }
+    return;
+  }
+  if (hfDownloadPollTimer !== null) return;
+  hfDownloadPollTimer = window.setInterval(() => {
+    void (async () => {
+      const res = await sidecarListHfDownloads();
+      if (!res.ok) return;
+      state.hfDownloads = res.downloads;
+      let finishedNow = false;
+      for (const dl of res.downloads) {
+        if (dl.state === "completed" && !hfNotifiedDownloads.has(dl.download_id)) {
+          hfNotifiedDownloads.add(dl.download_id);
+          finishedNow = true;
+          state.modelConfigStatusMsg = t("main.lm_dl_done", { repo: dl.repo_id });
+          showAppToast(state.modelConfigStatusMsg);
+        } else if (dl.state === "error" && !hfNotifiedDownloads.has(dl.download_id)) {
+          hfNotifiedDownloads.add(dl.download_id);
+          finishedNow = true;
+          state.modelConfigStatusMsg = t("main.lm_dl_failed", {
+            repo: dl.repo_id,
+            error: dl.error || "error",
+          });
+          showAppToast(state.modelConfigStatusMsg, "danger");
+        }
+      }
+      const stillRunning = res.downloads.some(
+        (d) => d.state === "queued" || d.state === "downloading"
+      );
+      if (!stillRunning && hfDownloadPollTimer !== null) {
+        window.clearInterval(hfDownloadPollTimer);
+        hfDownloadPollTimer = null;
+      }
+      if (finishedNow) {
+        const [docRoles, mCfg, health] = await Promise.all([
+          sidecarFetchDoctor(),
+          sidecarGetModelConfig(),
+          sidecarFetchHealth(),
+        ]);
+        state.doctorRoles = docRoles;
+        state.sidecar = health;
+        if (mCfg) syncConfiguredChatModel(mCfg, true);
+      }
+      renderViewportRegion();
+    })();
+  }, 1000);
+}
+
 async function openAddMailAccountSettings(): Promise<void> {
   state.settingsAccordionOpen.mail = true;
+  await openSettingsConversation("settings-manual");
+}
+
+async function openModelsSettings(): Promise<void> {
+  state.settingsAccordionOpen.models = true;
   await openSettingsConversation("settings-manual");
 }
 
@@ -2947,7 +3571,12 @@ function renderTabStripRegion(): void {
       }
       if (tabId.startsWith("news-lane:")) {
         const rawLane = tabId.slice(10);
-        const nLane: NewsLane = rawLane === "perspectives" ? "perspectives" : "stories";
+        const nLane: NewsLane =
+          rawLane === "perspectives"
+            ? "perspectives"
+            : rawLane === "tracked"
+              ? "tracked"
+              : "stories";
         state.newsActiveLane = nLane;
         void (async () => {
           await refreshNewsState(nLane);
@@ -2956,10 +3585,9 @@ function renderTabStripRegion(): void {
         return;
       }
       if (tabId.startsWith("drives-lane:")) {
-        void (async () => {
-          await refreshDrivesState(false);
-          renderWorkspaceRegions();
-        })();
+        state.drivesLoading = true;
+        renderWorkspaceRegions();
+        void refreshDrivesState(true, { showLoading: true, renderImmediately: false });
         return;
       }
       renderWorkspaceRegions();
@@ -3198,6 +3826,16 @@ function getInlineProfileGateHandlers() {
       });
       showAppToast(state.profileStatusMessage, res.ok ? "info" : "danger");
     },
+    onImportProfileFile: async (bundleB64: string, pin: string, localPin?: string) => {
+      const res = await performProfileUnlockOrCreate({
+        mode: "import",
+        bundleB64,
+        pin,
+        localPin,
+        closeModalOnSuccess: true,
+      });
+      showAppToast(state.profileStatusMessage, res.ok ? "info" : "danger");
+    },
   };
 }
 
@@ -3255,6 +3893,7 @@ function getKnowledgeActions(): KnowledgeActions {
       },
       onLockProfile: async () => {
         state.revealedPasswords = {};
+        state.profileImportDraft = null;
         await sidecarLockProfile();
         state.profileStatusMessage = t("main.profile_locked");
         await syncAfterProfileAuthChange(false);
@@ -3270,6 +3909,19 @@ function getKnowledgeActions(): KnowledgeActions {
         const kb = await sidecarFetchKnowledge();
         if (kb) state.knowledge = kb;
         renderAllRegions();
+        showAppToast(state.profileStatusMessage, res.ok ? "info" : "danger");
+      },
+      onExportProfile: async (profileId, pin) => {
+        await handleExportProfile(profileId, pin);
+      },
+      onImportProfileFile: async (bundleB64, pin, localPin) => {
+        const res = await performProfileUnlockOrCreate({
+          mode: "import",
+          bundleB64,
+          pin,
+          localPin,
+          closeModalOnSuccess: true,
+        });
         showAppToast(state.profileStatusMessage, res.ok ? "info" : "danger");
       },
       onUpsertPassword: async (payload) => {
@@ -3420,6 +4072,117 @@ function getKnowledgeActions(): KnowledgeActions {
         renderAllRegions();
         showAppToast(state.modelConfigStatusMsg, res.ok ? "info" : "danger");
       },
+      onSearchHfModels: async (query) => {
+        const res = await sidecarSearchHfModels(query, 10);
+        if (res.ok) {
+          state.hfSearchResults = res.results ?? [];
+        } else {
+          state.modelConfigStatusMsg = `${t("common.error_prefix")} ${res.error ?? "search failed"}`;
+          showAppToast(state.modelConfigStatusMsg, "danger");
+        }
+        renderViewportRegion();
+      },
+      onInspectHfRepo: async (repoId, token) => {
+        const res = await sidecarInspectHfRepo(repoId, token ?? "");
+        if (res.ok) {
+          state.hfInspectResult = {
+            repo_id: res.repo_id || repoId,
+            gated: res.gated,
+            total_bytes: res.total_bytes,
+            file_count: res.file_count,
+          };
+        } else {
+          state.hfInspectResult = { repo_id: repoId, error: res.error ?? "inspect failed" };
+        }
+        renderViewportRegion();
+      },
+      onStartHfDownload: async (payload) => {
+        const res = await sidecarStartHfDownload(payload);
+        if (res.ok && res.download) {
+          const existing = state.hfDownloads.filter(
+            (d) => d.download_id !== res.download!.download_id
+          );
+          state.hfDownloads = [res.download, ...existing];
+          state.modelConfigStatusMsg = t("main.lm_dl_started", {
+            repo: res.download.repo_id,
+          });
+          ensureHfDownloadPolling();
+          showAppToast(state.modelConfigStatusMsg);
+        } else {
+          state.modelConfigStatusMsg = `${t("common.error_prefix")} ${res.error ?? "download failed"}`;
+          showAppToast(state.modelConfigStatusMsg, "danger");
+        }
+        renderViewportRegion();
+      },
+      onCancelHfDownload: async (downloadId) => {
+        const res = await sidecarCancelHfDownload(downloadId);
+        if (res.ok) {
+          const dlRes = await sidecarListHfDownloads();
+          if (dlRes.ok) state.hfDownloads = dlRes.downloads;
+          ensureHfDownloadPolling();
+        }
+        renderViewportRegion();
+      },
+      onPointLocalModel: async (payload) => {
+        const res = await sidecarPointLocalModel(payload);
+        if (res.ok) {
+          syncConfiguredChatModel(res, Boolean(payload.set_active));
+          state.localModelPathDraft = "";
+          state.modelConfigStatusMsg =
+            res.message || t("main.lm_linked_ok", { path: payload.path });
+          showAppToast(state.modelConfigStatusMsg);
+        } else {
+          state.modelConfigStatusMsg = `${t("common.error_prefix")} ${res.error ?? "failed to link model"}`;
+          showAppToast(state.modelConfigStatusMsg, "danger");
+        }
+        const [docRoles, health] = await Promise.all([
+          sidecarFetchDoctor(),
+          sidecarFetchHealth(),
+        ]);
+        state.doctorRoles = docRoles;
+        state.sidecar = health;
+        renderAllRegions();
+      },
+      onRemoveLocalModel: async (payload) => {
+        const res = await sidecarRemoveLocalModel(payload);
+        if (res.ok) {
+          syncConfiguredChatModel(res, true);
+          state.modelConfigStatusMsg = res.message || t("main.lm_removed_ok");
+          showAppToast(state.modelConfigStatusMsg);
+        } else {
+          state.modelConfigStatusMsg = `${t("common.error_prefix")} ${res.error ?? "failed"}`;
+          showAppToast(state.modelConfigStatusMsg, "danger");
+        }
+        const [docRoles, health] = await Promise.all([
+          sidecarFetchDoctor(),
+          sidecarFetchHealth(),
+        ]);
+        state.doctorRoles = docRoles;
+        state.sidecar = health;
+        renderAllRegions();
+      },
+      onSaveHfToken: async (token, clear = false) => {
+        const res = await sidecarSaveHfToken(token, clear);
+        if (res.ok) {
+          syncConfiguredChatModel(res, false);
+          state.modelConfigStatusMsg = clear
+            ? t("main.lm_hf_token_cleared")
+            : t("main.lm_hf_token_saved");
+          showAppToast(state.modelConfigStatusMsg);
+        } else {
+          state.modelConfigStatusMsg = `${t("common.error_prefix")} ${res.error ?? "failed"}`;
+          showAppToast(state.modelConfigStatusMsg, "danger");
+        }
+        renderViewportRegion();
+      },
+      onBrowseLocalModelPath: async (mode, title) => {
+        const res = await sidecarBrowseLocalModel(mode, title);
+        if (!res.ok && !res.cancelled && res.error) {
+          showAppToast(`${t("common.error_prefix")} ${res.error}`, "danger");
+          return null;
+        }
+        return res.path?.trim() || null;
+      },
       onResetRoutingTelemetry: async (queryType?: string) => {
         const res = await sidecarResetRoutingTelemetry(queryType);
         if (res.ok) {
@@ -3552,6 +4315,12 @@ function getKnowledgeActions(): KnowledgeActions {
         scheduleWebviewLayoutSync();
         renderStatusLine();
         showAppToast(t("settings.saved_toast"));
+      },
+      onCheckAppUpdate: async () => {
+        await runAppUpdateCheck(false);
+      },
+      onInstallAppUpdate: async () => {
+        await runAppUpdateInstall();
       },
       onOpenSettingsChat: () => {
         state.activeTabId = "chat";
@@ -3782,8 +4551,12 @@ function renderViewportRegion(): void {
     onOpenNewsHome: () => {
       void openNewsHome("stories");
     },
-    onSendPerspectivesTopic: async (topic: string, clusterId?: string) => {
-      await handleSendPerspectivesTopic(topic, clusterId);
+    onSendPerspectivesTopic: async (
+      topic: string,
+      clusterId?: string,
+      followedStoryId?: string
+    ) => {
+      await handleSendPerspectivesTopic(topic, clusterId, followedStoryId);
     },
     perspChatActions: {
       ...getChatActions(),
@@ -3883,14 +4656,6 @@ function renderViewportRegion(): void {
         state.drivesOwnerFilter = owner;
         void refreshDrivesState(true);
       },
-      onSearchQueryChange: (query) => {
-        if (query === state.drivesSearchQuery) return;
-        if (!state.drivesSearchQuery && query) {
-          pushDrivesNavHistory();
-        }
-        state.drivesSearchQuery = query;
-        void refreshDrivesState(true);
-      },
       onResetFilters: () => {
         pushDrivesNavHistory();
         state.drivesProviderFilter = "all";
@@ -3904,13 +4669,13 @@ function renderViewportRegion(): void {
       },
       onTriggerSync: (fullResync = false) => {
         void (async () => {
-          state.drivesLoading = true;
+          state.drivesSyncing = true;
           renderViewportRegion();
           try {
             await sidecarSyncDrives({ full_resync: fullResync, blocking: true });
-            await refreshDrivesState(false);
+            await refreshDrivesState(false, { showLoading: true });
           } finally {
-            state.drivesLoading = false;
+            state.drivesSyncing = false;
             renderAllRegions();
           }
         })();
@@ -3923,10 +4688,17 @@ function renderViewportRegion(): void {
       },
       onDisconnectProvider: (provider) => {
         void (async () => {
-          await sidecarDisconnectDrive(provider, true, false);
-          state.drivesFolderKey = "";
-          state.drivesNavStack = [];
-          await refreshDrivesState(true);
+          state.drivesLoading = true;
+          renderViewportRegion();
+          try {
+            await sidecarDisconnectDrive(provider, true, false);
+            state.drivesFolderKey = "";
+            state.drivesNavStack = [];
+            await refreshDrivesState(true);
+          } catch {
+            state.drivesLoading = false;
+            renderAllRegions();
+          }
         })();
       },
       onOpenProfileUnlock: () => {
@@ -3935,11 +4707,6 @@ function renderViewportRegion(): void {
         renderAllRegions();
       },
       ...getInlineProfileGateHandlers(),
-      onSwitchToChat: () => {
-        state.activeTabId = "chat";
-        state.compareMode = false;
-        renderWorkspaceRegions();
-      },
     });
     scheduleWebviewLayoutSync();
     return;
@@ -4398,9 +5165,14 @@ function getChatActions() {
       const convId = state.activeDetail?.conversation.id ?? "";
       const ctx = getLastTurnTelemetryContext(convId, msgId);
       const openTabs = getActiveTabSources(state.activeDetail);
+      const hertzReady =
+        state.sidecar.model_config?.local_models?.hertz_ready ??
+        (state.sidecar.models.find((m) => m.id === "hertz (reader)")?.state !== "missing");
       const nextPlanckModel: LocalModelId =
         openTabs.length > 0 && !state.webSearchEnabled
-          ? "hertz (reader)"
+          ? hertzReady
+            ? "hertz (reader)"
+            : "planck (reader)"
           : "planck3 (web)";
       recordHarnessOutcomeSignal("use_planck_instead", {
         prompt: text || ctx.prompt,
@@ -4414,6 +5186,9 @@ function getChatActions() {
       renderViewportRegion();
       renderStatusLine();
       void handleSendChatMessage(text, [], { forceCurrentModel: true });
+    },
+    onOpenModelsSettings: () => {
+      void openModelsSettings();
     },
     onFlaggedCitationClick: (_citeLabel: string, _kind: "src" | "brain" | "unsourced", msgId?: string) => {
       const convId = state.activeDetail?.conversation.id ?? "";
@@ -4470,8 +5245,9 @@ function getChatActions() {
     onOpenDrivesFiles: () => {
       state.activeTabId = "drives-lane:files";
       state.compareMode = false;
-      void refreshDrivesState(true);
+      state.drivesLoading = true;
       renderWorkspaceRegions();
+      void refreshDrivesState(true, { showLoading: true, renderImmediately: false });
     },
     onStartInlineCompose: () => {
       void createInlineComposeInChat();
@@ -4755,7 +5531,12 @@ function getChatActions() {
       })();
     },
     onOpenNewsLane: (lane: string) => {
-      const nl: NewsLane = lane === "perspectives" ? "perspectives" : "stories";
+      const nl: NewsLane =
+        lane === "perspectives"
+          ? "perspectives"
+          : lane === "tracked"
+            ? "tracked"
+            : "stories";
       state.newsActiveLane = nl;
       state.activeTabId = `news-lane:${nl}`;
       void refreshNewsState(nl).then(() => renderAllRegions());
@@ -4995,14 +5776,25 @@ function getChatActions() {
       name: string,
       keywords: string[]
     ) => {
-      const r = await sidecarManageNewsTopic({
-        action: "add",
-        name,
-        keywords: keywords.join(", "),
-        watch: true,
-      });
-      await refreshNewsState("settings");
-      renderAllRegions();
+      const key = name.trim().toLowerCase();
+      if (!key || state.newsPendingTopicKeys[key]) return;
+      state.newsPendingTopicKeys[key] = true;
+      renderViewportRegion();
+      let r: { ok: boolean; error?: string } = { ok: false, error: "failed" };
+      try {
+        r = await sidecarManageNewsTopic({
+          action: "add",
+          name,
+          keywords: keywords.join(", "),
+          watch: true,
+        });
+        await refreshNewsState("settings");
+      } catch (err) {
+        r = { ok: false, error: String(err) };
+      } finally {
+        delete state.newsPendingTopicKeys[key];
+        renderAllRegions();
+      }
       showAppToast(
         r.ok ? t("news.tracked_topic_added", { name }) : `${t("common.error_prefix")} ${r.error ?? ""}`,
         r.ok ? "info" : "danger"
@@ -5016,21 +5808,34 @@ function getChatActions() {
       feedUrl?: string,
       title?: string
     ) => {
-      const src = state.newsSources.find((s) => s.domain === domain);
-      const fid = src?.feeds?.[0]?.feed_id;
-      const r = fid
-        ? await sidecarManageNewsFeed({ action: "toggle", feed_id: fid, enabled })
-        : await sidecarManageNewsFeed({
-            domain,
-            feed_url: feedUrl,
-            title: title || domain,
-            enabled,
-          });
-      await refreshNewsState("settings");
-      renderAllRegions();
+      const normDom = domain.trim().toLowerCase().replace(/^www\./, "");
+      if (!normDom || state.newsPendingFeedKeys[normDom]) return;
+      state.newsPendingFeedKeys[normDom] = true;
+      renderViewportRegion();
+      let r: { ok: boolean; error?: string } = { ok: false, error: "failed" };
+      try {
+        const src = state.newsSources.find(
+          (s) => s.domain.trim().toLowerCase().replace(/^www\./, "") === normDom
+        );
+        const fid = src?.feeds?.[0]?.feed_id;
+        r = fid
+          ? await sidecarManageNewsFeed({ action: "toggle", feed_id: fid, enabled })
+          : await sidecarManageNewsFeed({
+              domain: normDom,
+              feed_url: feedUrl,
+              title: title || normDom,
+              enabled,
+            });
+        await refreshNewsState("settings");
+      } catch (err) {
+        r = { ok: false, error: String(err) };
+      } finally {
+        delete state.newsPendingFeedKeys[normDom];
+        renderAllRegions();
+      }
       showAppToast(
         r.ok
-          ? `${title || domain}: ${enabled ? t("chat.ns_enabled_badge") : t("chat.ns_disable_feed")}`
+          ? `${title || normDom}: ${enabled ? t("chat.ns_enabled_badge") : t("chat.ns_disable_feed")}`
           : `${t("common.error_prefix")} ${r.error ?? ""}`,
         r.ok ? "info" : "danger"
       );
@@ -5041,15 +5846,30 @@ function getChatActions() {
       domain: string,
       personalScore: number | null
     ) => {
-      const r = await sidecarSetDomainTrust(domain, personalScore);
-      const ok = Boolean(r && r.ok !== false);
-      const effNum = typeof r?.effective === "number" ? r.effective : null;
-      await refreshNewsState("settings");
-      renderAllRegions();
+      const normDom = domain.trim().toLowerCase().replace(/^www\./, "");
+      if (!normDom || state.newsPendingTrustDomains[normDom]) return;
+      state.newsPendingTrustDomains[normDom] = true;
+      renderViewportRegion();
+      let ok = false;
+      let errMsg = "";
+      let effNum: number | null = null;
+      try {
+        const r = await sidecarSetDomainTrust(normDom, personalScore);
+        ok = Boolean(r && r.ok !== false);
+        effNum = typeof r?.effective === "number" ? r.effective : null;
+        if (!ok && typeof r?.error === "string") errMsg = r.error;
+        await refreshNewsState("settings");
+      } catch (err) {
+        ok = false;
+        errMsg = String(err);
+      } finally {
+        delete state.newsPendingTrustDomains[normDom];
+        renderAllRegions();
+      }
       showAppToast(
         ok
-          ? `${domain}: ${personalScore === null ? t("chat.ns_reset_trust") : effNum !== null ? `${effNum.toFixed(2)}/10` : t("common.save")}`
-          : `${t("common.error_prefix")} ${typeof r?.error === "string" ? r.error : ""}`,
+          ? `${normDom}: ${personalScore === null ? t("chat.ns_reset_trust") : effNum !== null ? `${effNum.toFixed(2)}/10` : t("common.save")}`
+          : `${t("common.error_prefix")} ${errMsg}`,
         ok ? "info" : "danger"
       );
     },
@@ -5060,20 +5880,31 @@ function getChatActions() {
       title?: string,
       domain?: string
     ) => {
-      const r = await sidecarManageNewsFeed({
-        feed_url: feedUrl,
-        title: title || undefined,
-        domain: domain || undefined,
-      });
-      await refreshNewsState("settings");
-      if (r.ok) {
-        updateSettingsCardState(msgId, cardId, (c) => ({
-          ...c,
-          resolved: true,
-          resolution_note: t("news.added_item", { item: title || feedUrl }),
-        }));
+      const pendingKey = `add:${cardId}`;
+      if (state.newsPendingFeedKeys[pendingKey]) return;
+      state.newsPendingFeedKeys[pendingKey] = true;
+      renderViewportRegion();
+      let r: { ok: boolean; error?: string } = { ok: false, error: "failed" };
+      try {
+        r = await sidecarManageNewsFeed({
+          feed_url: feedUrl,
+          title: title || undefined,
+          domain: domain || undefined,
+        });
+        await refreshNewsState("settings");
+        if (r.ok) {
+          updateSettingsCardState(msgId, cardId, (c) => ({
+            ...c,
+            resolved: true,
+            resolution_note: t("news.added_item", { item: title || feedUrl }),
+          }));
+        }
+      } catch (err) {
+        r = { ok: false, error: String(err) };
+      } finally {
+        delete state.newsPendingFeedKeys[pendingKey];
+        renderAllRegions();
       }
-      renderAllRegions();
       showAppToast(
         r.ok ? t("news.added_item", { item: title || feedUrl }) : `${t("common.error_prefix")} ${r.error ?? ""}`,
         r.ok ? "info" : "danger"
@@ -5469,11 +6300,15 @@ async function selectConversation(
       );
     } else if (detail.conversation.origin === "news") {
       bgTasks.push(
-        Promise.all([refreshNewsState("stories"), refreshNewsState("topics")]).then(() => true)
+        Promise.all([
+          refreshNewsState("stories"),
+          refreshNewsState("topics"),
+          refreshNewsState("tracked"),
+        ]).then(() => true)
       );
     } else if (detail.conversation.origin === "drives") {
       bgTasks.push(
-        refreshDrivesState(false).then(() => true)
+        refreshDrivesState(false, { showLoading: true }).then(() => true)
       );
     } else if (detail.conversation.origin === "settings") {
       bgTasks.push(
@@ -5537,8 +6372,18 @@ function getProfilePromptActions() {
         closeModalOnSuccess: true,
       });
     },
+    onImportProfileFile: (bundleB64: string, pin: string, localPin?: string) => {
+      void performProfileUnlockOrCreate({
+        mode: "import",
+        bundleB64,
+        pin,
+        localPin,
+        closeModalOnSuccess: true,
+      });
+    },
     onDismissProfilePrompt: () => {
       if (state.profileUnlocking) return;
+      state.profileImportDraft = null;
       state.profilePromptOpen = false;
       state.profilePromptDismissed = true;
       renderProfileUnlockOverlay(getProfilePromptActions());
@@ -5595,6 +6440,15 @@ function getStartScreenActions() {
         mode: "create",
         name,
         pin,
+        closeModalOnSuccess: true,
+      });
+    },
+    onImportProfileFile: async (bundleB64: string, pin: string, localPin?: string) => {
+      await performProfileUnlockOrCreate({
+        mode: "import",
+        bundleB64,
+        pin,
+        localPin,
         closeModalOnSuccess: true,
       });
     },
@@ -5725,8 +6579,13 @@ async function handleExecuteCommandRoute(
       targetTabId: "drives-lane:files",
       skipRender: true,
     });
+    if (!state.drivesSearchQuery && q) {
+      pushDrivesNavHistory();
+    }
     state.drivesSearchQuery = q;
-    await refreshDrivesState(true);
+    state.drivesLoading = true;
+    renderAllRegions();
+    await refreshDrivesState(true, { showLoading: true, renderImmediately: false });
     return;
   }
 

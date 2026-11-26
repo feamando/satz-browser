@@ -809,10 +809,13 @@ class SatzMailManager:
             return conn
 
     def rebind_profile(self, *, defer_sync_start: bool = False) -> None:
+        emit = getattr(self.runtime, "emit_unlock_progress", None)
         with self.db_lock:
             self.stop_all_sync_threads()
             self._auth_stopped_accounts.clear()
             self._brain_synced_accounts_sig = None
+            if self.passwords.unlocked and callable(emit):
+                emit("mail", "running", detail="opening_mail_db")
             self._ensure_connection()
             if self.pipeline is not None:
                 self.pipeline._load_active_model_if_exists(load_weights=False)
@@ -1054,6 +1057,66 @@ class SatzMailManager:
         outbox_cols = {str(r["name"]) for r in conn.execute("PRAGMA table_info(outbox)").fetchall()}
         if "ai_draft_id" not in outbox_cols:
             conn.execute("ALTER TABLE outbox ADD COLUMN ai_draft_id TEXT NOT NULL DEFAULT ''")
+        acct_cols = {str(r["name"]) for r in conn.execute("PRAGMA table_info(accounts)").fetchall()}
+        if "updated_at" not in acct_cols:
+            conn.execute("ALTER TABLE accounts ADD COLUMN updated_at REAL NOT NULL DEFAULT 0.0")
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS mail_settings_ts (
+                key TEXT PRIMARY KEY,
+                updated_at REAL NOT NULL DEFAULT 0.0
+            );
+            CREATE TABLE IF NOT EXISTS mail_sync_tombstones (
+                table_name TEXT NOT NULL,
+                row_key TEXT NOT NULL,
+                deleted_at REAL NOT NULL DEFAULT 0.0,
+                PRIMARY KEY (table_name, row_key)
+            );
+            INSERT OR IGNORE INTO mail_settings_ts (key, updated_at)
+            SELECT key, 0.0 FROM mail_settings;
+
+            CREATE TRIGGER IF NOT EXISTS trg_mail_settings_ai AFTER INSERT ON mail_settings
+            BEGIN
+                INSERT INTO mail_settings_ts (key, updated_at)
+                VALUES (NEW.key, (julianday('now') - 2440587.5) * 86400.0)
+                ON CONFLICT(key) DO UPDATE SET updated_at = excluded.updated_at;
+                DELETE FROM mail_sync_tombstones WHERE table_name = 'mail_settings' AND row_key = NEW.key;
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_mail_settings_au AFTER UPDATE ON mail_settings
+            BEGIN
+                INSERT INTO mail_settings_ts (key, updated_at)
+                VALUES (NEW.key, (julianday('now') - 2440587.5) * 86400.0)
+                ON CONFLICT(key) DO UPDATE SET updated_at = excluded.updated_at;
+                DELETE FROM mail_sync_tombstones WHERE table_name = 'mail_settings' AND row_key = NEW.key;
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_mail_settings_ad AFTER DELETE ON mail_settings
+            BEGIN
+                DELETE FROM mail_settings_ts WHERE key = OLD.key;
+                INSERT INTO mail_sync_tombstones (table_name, row_key, deleted_at)
+                VALUES ('mail_settings', OLD.key, (julianday('now') - 2440587.5) * 86400.0)
+                ON CONFLICT(table_name, row_key) DO UPDATE SET deleted_at = excluded.deleted_at;
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_mail_accounts_ai AFTER INSERT ON accounts
+            BEGIN
+                DELETE FROM mail_sync_tombstones WHERE table_name = 'accounts' AND row_key = NEW.id;
+                UPDATE accounts SET updated_at = (julianday('now') - 2440587.5) * 86400.0
+                WHERE id = NEW.id AND COALESCE(updated_at, 0.0) <= 0.0;
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_mail_accounts_au AFTER UPDATE OF label, email, protocol, in_host, in_port, in_security, smtp_host, smtp_port, smtp_security, vault_prefix, sync_days ON accounts
+            WHEN COALESCE(NEW.updated_at, 0.0) <= COALESCE(OLD.updated_at, 0.0)
+            BEGIN
+                UPDATE accounts SET updated_at = (julianday('now') - 2440587.5) * 86400.0
+                WHERE id = NEW.id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_mail_accounts_ad AFTER DELETE ON accounts
+            BEGIN
+                INSERT INTO mail_sync_tombstones (table_name, row_key, deleted_at)
+                VALUES ('accounts', OLD.id, (julianday('now') - 2440587.5) * 86400.0)
+                ON CONFLICT(table_name, row_key) DO UPDATE SET deleted_at = excluded.deleted_at;
+            END;
+            """
+        )
         conn.commit()
 
     # ── Settings Helpers ─────────────────────────────────────────────────
@@ -1706,6 +1769,10 @@ class SatzMailManager:
             ).fetchone()
             if done and str(done["value"]) == "1":
                 return 0
+
+            emit = getattr(self.runtime, "emit_unlock_progress", None)
+            if callable(emit):
+                emit("mail", "running", detail="repairing_calendar")
 
             rows = conn.execute(
                 """
