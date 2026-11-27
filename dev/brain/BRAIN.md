@@ -1,5 +1,5 @@
 # BRAIN.md - Satz Personal Knowledge Graph Index
-<!-- Generated: 2026-11-27T22:55:00Z | Architecture: PM-OS / SGS-Brain v2 -->
+<!-- Generated: 2026-11-27T22:55:49Z | Architecture: PM-OS / SGS-Brain v2 -->
 
 ## Core User Entities, Accounts, People & Places (Tier 1)
 id|type|name|status|summary|attributes

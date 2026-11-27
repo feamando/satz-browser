@@ -272,7 +272,7 @@ def sync_and_push(
                 ["show-ref", "--verify", f"refs/remotes/{remote}/{target_branch}"], cwd=root, check=False
             ).returncode == 0
             if rem_exists:
-                _git(["rebase", f"{remote}/{target_branch}"], cwd=root)
+                _git(["rebase", "--autostash", f"{remote}/{target_branch}"], cwd=root)
                 steps.append(f"rebased cleanly onto {remote}/{target_branch}")
 
     # 7. Push commits (and optional verified release tag) when requested
