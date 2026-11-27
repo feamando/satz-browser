@@ -1,0 +1,30 @@
+{
+  "version": "0.5.0",
+  "captured_at": "2026-11-27T20:52:00Z",
+  "git": {
+    "branch": "main",
+    "short_sha": "a5cc359"
+  },
+  "manifests": {
+    "package_json": "0.5.0",
+    "tauri_conf": "0.5.0",
+    "cargo_toml": "0.5.0"
+  },
+  "platform": "macos-aarch64",
+  "local_notes": "Built locally on Apple Silicon via scripts/build_preview.sh with two local webview_manager.rs macOS compile fixes pending upstream sync; updater .sig signing failed due to missing ~/.tauri/satz.key on Mac while .app and .dmg succeeded.",
+  "release_binaries": [
+    {
+      "path": "src-tauri/target/release/bundle/dmg/satz_0.5.0_aarch64.dmg",
+      "bytes": 546308096,
+      "approx_mb": 521.0,
+      "mtime": "2026-11-27T20:52:00Z",
+      "sha256": "pending-mac-sha256"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app",
+      "bytes": 0,
+      "mtime": "2026-11-27T20:52:00Z",
+      "sha256": "app-bundle-directory"
+    }
+  ]
+}

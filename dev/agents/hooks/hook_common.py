@@ -12,7 +12,8 @@ from typing import Any
 
 HOOK_DIR = Path(__file__).resolve().parent
 REPO_ROOT = HOOK_DIR.parents[2]
-for _sys_dir in (str(REPO_ROOT), str(HOOK_DIR)):
+SCRIPTS_DIR = REPO_ROOT / "scripts"
+for _sys_dir in (str(SCRIPTS_DIR), str(HOOK_DIR)):
     if _sys_dir not in sys.path:
         sys.path.insert(0, _sys_dir)
 
@@ -203,6 +204,16 @@ def emit_tool_deny(reason: str, *, payload: dict[str, Any]) -> None:
         return
 
     emit_json({"decision": "deny", "reason": reason})
+
+
+def emit_tool_pass(*, payload: dict[str, Any]) -> None:
+    """Emit a host-native PreToolUse pass-through respecting host confirmation gates."""
+    if is_claude_payload(payload):
+        emit_noop()
+        return
+
+    # Antigravity requires decision on PreToolUse; 'ask' preserves Always Allow / confirmation gates.
+    emit_json({"decision": "ask"})
 
 
 def emit_stop_block(reason: str, *, payload: dict[str, Any]) -> None:

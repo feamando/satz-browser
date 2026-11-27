@@ -187,6 +187,7 @@ impl DbState {
             conn: Mutex::new(conn),
             db_path,
         };
+        let _ = state.ensure_mail_conversation();
         let _ = state.ensure_news_conversation();
         let _ = state.ensure_drives_conversation();
         Ok(state)

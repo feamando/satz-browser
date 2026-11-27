@@ -1,0 +1,22 @@
+version: 1
+cases:
+- id: auto-err-c1f8ae8c
+  captured_at: '2026-11-27T10:00:41Z'
+  source_event: pre_tool_deny
+  description: Blocked writing inline private key or TAURI_SIGNING_PRIVATE_KEY secret
+    into workspace file. Keep secrets in GitHub Actions Secrets or external keystore
+    paths.
+  check_type: manifest_parity
+- id: auto-err-cb7a5e42
+  captured_at: '2026-11-27T20:54:19Z'
+  source_event: tool_error
+  description: target content not found in the file; the Target must exactly match
+    existing file text, including whitespace
+  check_type: manifest_parity
+- id: auto-err-2c659853
+  captured_at: '2026-11-27T20:54:19Z'
+  source_event: stop_error
+  description: 'Created At: 2026-11-27T21:53:02+01:00 Completed At: 2026-11-27T21:53:42+01:00
+    Encountered error in step execution: target content not found in the file; the
+    Target must exactly mat'
+  check_type: manifest_parity

@@ -12,3 +12,6 @@ cases:
   - id: gate-dev-brain-accuracy
     check: "Dev Brain labeled retrieval eval meets MRR >= 0.70 and Recall@5 >= 0.85."
     script: "scripts/dev_brain.py eval --min-mrr 0.70 --min-recall5 0.85"
+  - id: gate-pre-push-privacy-security
+    check: "Zero unredacted private keys, API tokens, OS home paths, or personal emails in tracked files or brain_index.sqlite."
+    script: "scripts/security_audit.py scan --mode all"

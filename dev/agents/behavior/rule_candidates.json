@@ -1,0 +1,20 @@
+[
+  {
+    "sig": "2f454c5ccf0d",
+    "ts": "2026-11-27T10:00:41Z",
+    "source": "pre_tool_deny",
+    "rule": "Blocked writing inline private key or TAURI_SIGNING_PRIVATE_KEY secret into workspace file. Keep secrets in GitHub Actions Secrets or external keystore paths."
+  },
+  {
+    "sig": "a9fb44eaa614",
+    "ts": "2026-11-27T10:00:41Z",
+    "source": "user_instruction",
+    "rule": "I want to introduce onboarding into the browser when there is no existing profile set up for the user. This should involve a pretty simple setup in an ideal scenario because most of the things are optional and should be "
+  },
+  {
+    "sig": "98f9db300f6f",
+    "ts": "2026-11-27T20:54:19Z",
+    "source": "user_instruction",
+    "rule": "On less powerful machines loading up gemma really kills it. Let's make sure that the default launcher (during onboarding, until the user themselves add gemma to the config or use cloud services) is planck. It should be s"
+  }
+]

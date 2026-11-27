@@ -34,6 +34,7 @@ export interface RailActions {
   onOpenCommandBar?: () => void;
   onOpenProfileUnlock?: () => void;
   onLockProfile?: () => void;
+  onReplayOnboardingTour?: () => void;
 }
 
 function paintWordmark(): void {
@@ -91,13 +92,18 @@ export function renderRail(actions: RailActions): void {
 
   const acc = state.railAccordion;
   const profile = state.knowledge.profile;
+  const hasProfiles = (profile?.profiles.length ?? 0) > 0;
   const isUnlocked = Boolean(profile?.unlocked && profile?.active_profile);
   const profileName = isUnlocked
     ? profile?.active_profile?.name || t("rail.profile_title", { name: "" }).trim()
-    : t("rail.locked");
+    : !hasProfiles
+      ? t("onboard.demo_rail_label")
+      : t("rail.locked");
   const avatarInitial = isUnlocked
     ? (profileName.trim()[0] || "S").toUpperCase()
-    : "L";
+    : !hasProfiles
+      ? "D"
+      : "L";
 
   container.innerHTML = `
     <div class="brand">
@@ -179,7 +185,7 @@ export function renderRail(actions: RailActions): void {
       </section>
 
       <section class="acc ${acc.sources ? "" : "closed"}" data-acc="sources">
-        <button class="acc-h" type="button" data-acc-toggle="sources" aria-expanded="${acc.sources ? "true" : "false"}" title="${escapeHtml(t("rail.bookmarks_title"))}">
+        <button class="acc-h" type="button" data-acc-toggle="sources" data-onboard-anchor="bookmarks" aria-expanded="${acc.sources ? "true" : "false"}" title="${escapeHtml(t("rail.bookmarks_title"))}">
           <span class="rail-acc-chevron">${icon("chev", "ico-sm")}</span>
           <span class="label">${escapeHtml(t("rail.bookmarks"))}</span>
           <span class="acc-count">${state.bookmarks.length}</span>
@@ -229,7 +235,7 @@ export function renderRail(actions: RailActions): void {
       </section>
 
       <section class="acc ${acc.conversations ? "" : "closed"}" data-acc="conversations">
-        <button class="acc-h" type="button" data-acc-toggle="conversations" aria-expanded="${acc.conversations ? "true" : "false"}">
+        <button class="acc-h" type="button" data-acc-toggle="conversations" data-onboard-anchor="conversations" aria-expanded="${acc.conversations ? "true" : "false"}">
           <span class="rail-acc-chevron">${icon("chev", "ico-sm")}</span>
           <span class="label">${escapeHtml(t("rail.conversations"))}</span>
           <span class="acc-count">${recent.length}</span>
@@ -276,9 +282,19 @@ export function renderRail(actions: RailActions): void {
               ${icon("settings", "ico-sm")}
               <span>${escapeHtml(t("rail.settings_appearance"))}</span>
             </button>
+            ${
+              !isUnlocked && !hasProfiles
+                ? `
+                  <button class="menu-item" type="button" data-prof-action="replay-tour">
+                    ${icon("spark", "ico-sm")}
+                    <span>${escapeHtml(t("onboard.demo_tour_btn"))}</span>
+                  </button>
+                `
+                : ""
+            }
             <button class="menu-item" type="button" data-prof-action="toggle-lock" ${state.profileUnlocking ? "disabled" : ""}>
               ${icon("lock", "ico-sm")}
-              <span>${escapeHtml(state.profileUnlocking ? t("profile.unlocking_short") : isUnlocked ? t("rail.lock_profile") : t("rail.unlock_profile"))}</span>
+              <span>${escapeHtml(state.profileUnlocking ? t("profile.unlocking_short") : isUnlocked ? t("rail.lock_profile") : !hasProfiles ? t("settings.setup_profile_btn") : t("rail.unlock_profile"))}</span>
             </button>
           </div>
         `
@@ -297,6 +313,7 @@ export function renderRail(actions: RailActions): void {
         </button>
         <button
           id="rail-open-knowledge-btn"
+          data-onboard-anchor="settings"
           class="icon-btn ${state.showKnowledgeView || state.activeDetail?.conversation.origin === "settings" ? "active on" : ""}"
           type="button"
           title="${escapeHtml(t("rail.settings_title"))}"
@@ -441,7 +458,7 @@ function renderConversationRow(c: Conversation, isActive: boolean): string {
       <div
         class="row ${isCommonMailActive || isNormalConvActive ? "active" : ""}"
         data-conv-id="${escapeHtml(c.id)}"
-        ${isMail ? 'data-mail-rail-all="1"' : ""}
+        ${isMail ? 'data-mail-rail-all="1" data-onboard-anchor="mail"' : isNews ? 'data-onboard-anchor="news"' : ""}
         title="${escapeHtml(displayTitle)}"
       >
         ${leadIcon}
@@ -578,6 +595,8 @@ function bindRailEvents(container: HTMLElement, actions: RailActions): void {
       state.profileMenuOpen = false;
       if (action === "settings") {
         actions.onOpenKnowledgeView();
+      } else if (action === "replay-tour") {
+        actions.onReplayOnboardingTour?.();
       } else if (action === "toggle-lock") {
         const isUnlocked = Boolean(
           state.knowledge.profile?.unlocked && state.knowledge.profile?.active_profile

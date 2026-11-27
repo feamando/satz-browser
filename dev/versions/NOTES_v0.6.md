@@ -57,7 +57,7 @@ Implemented **Satz News** (`M24`-`M29` core implementation + `M30` automated ver
 
 ### 3.2 Desktop Release Binary
 - Command: `npm run tauri build -- --no-bundle`
-- Output: `C:\Users\feama\satz-browser\src-tauri\target\release\satz-browser.exe`
+- Output: `src-tauri\target\release\satz-browser.exe`
 - Timestamp & Size: `11/17/2026 4:51:21 PM`, `11,659,264` bytes
 
 ### 3.3 Pending Live Runtime Checks (`M30` Interactive / Eval Benchmarks)

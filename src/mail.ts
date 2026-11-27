@@ -152,6 +152,7 @@ export interface MailViewActions {
   onUnlockProfile?: (profileId: string, pin: string) => void | Promise<void>;
   onUnlockProfileKeychain?: (profileId: string) => void | Promise<void>;
   onCreateProfile?: (name: string, pin: string) => void | Promise<void>;
+  onImportProfileFile?: (bundleB64: string, pin: string, localPin?: string) => void | Promise<void>;
   onRefreshState: () => Promise<void>;
 }
 
@@ -1271,6 +1272,7 @@ export function renderMailLaneView(
       onUnlockProfile: actions.onUnlockProfile,
       onUnlockProfileKeychain: actions.onUnlockProfileKeychain,
       onCreateProfile: actions.onCreateProfile,
+      onImportProfileFile: actions.onImportProfileFile,
     });
     return;
   }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PreInvocation / UserPromptSubmit hook: inject read-only Dev Brain context relevant to the prompt."""
+"""PreInvocation / UserPromptSubmit hook: capture prompt telemetry and inject read-only Dev Brain + Skill context."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from hook_common import (
     emit_noop,
     extract_user_prompt,
     get_conversation_id,
+    is_claude_payload,
     read_payload,
 )
 
@@ -61,10 +62,17 @@ def _record_injected(conv_id: str, prompt_hash: str) -> None:
 
 
 def build_prompt_context(prompt: str) -> str:
-    from scripts.dev_brain import DevBrain
+    from dev_brain import DevBrain
 
     brain = DevBrain(REPO_ROOT)
     health = brain.monitor()
+    skill_hits = brain.search(
+        prompt,
+        kind="skill",
+        limit=2,
+        include_neighbors=False,
+        log_query=False,
+    )
     results = brain.search(
         prompt,
         limit=3,
@@ -79,6 +87,17 @@ def build_prompt_context(prompt: str) -> str:
             f"[DevBrain Notice] {stale_count} stale file(s) detected in dev/. "
             "Run `python scripts/dev_brain.py reindex` after finishing dev/ edits."
         )
+
+    matched_skills = [
+        item for item in (skill_hits if isinstance(skill_hits, list) else [])
+        if str(item.get("path") or "").startswith("dev/agents/skills/")
+    ]
+    if matched_skills:
+        lines.append("[Recommended Skills]")
+        for item in matched_skills[:2]:
+            path_str = item.get("path") or ""
+            title = item.get("title") or path_str
+            lines.append(f"- Read `{path_str}` ({title}, score={item.get('score')})")
 
     if isinstance(results, list) and results:
         lines.append("[DevBrain Relevant Context]")
@@ -118,6 +137,21 @@ def main() -> None:
         if not disable_cache and _already_injected(conv_id, prompt_hash):
             emit_noop()
             return
+
+        # Fast local behavior telemetry capture (<15ms, gitignored SQLite).
+        try:
+            import behavior_eval_store
+
+            behavior_eval_store.record_event(
+                harness="claude" if is_claude_payload(payload) else "antigravity",
+                conv_id=conv_id,
+                event_type="prompt",
+                prompt_text=prompt,
+                ok=True,
+                transcript_path=str(payload.get("transcriptPath") or payload.get("transcript_path") or ""),
+            )
+        except Exception:
+            pass
 
         context_text = build_prompt_context(prompt)
         if not context_text.strip():

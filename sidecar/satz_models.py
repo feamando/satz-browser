@@ -549,8 +549,10 @@ class SatzSidecarRuntime:
         from satz_i18n import SatzI18nManager
         from satz_providers import SatzProvidersManager
         from satz_skills import BehaviorMiner, DomainRecipeStore, SkillRunner
+        from satz_telemetry import SatzTelemetryManager
         from satz_translate import SatzContentTranslator
 
+        self.telemetry = SatzTelemetryManager(self.legacy_store_path.parent, app_version=SATZ_SIDECAR_VERSION)
         self.drives = SatzDrivesManager(self)
         self.recipes = DomainRecipeStore(self)
         self.behavior = BehaviorMiner(self)
@@ -560,6 +562,7 @@ class SatzSidecarRuntime:
         self.i18n = SatzI18nManager(self)
         self.evals = EvalManager(self, evals_dir=evals_dir)
         self._init_satz_tables()
+        self.telemetry.record("sidecar", "runtime_boot", metrics={"evals_dir": str(self.evals.evals_dir)})
 
         sgs_cache_dir = self.sgs_root / "data" / "planck3_cache"
         cache_dir = sgs_cache_dir if sgs_cache_dir.exists() else (self.legacy_store_path.parent / "web_cache")
@@ -4779,14 +4782,16 @@ class SatzSidecarRuntime:
         answerer = self.ensure_answerer()
         orig_cwd = os.getcwd()
         try:
-            os.chdir(self.sgs_root)
+            if self.sgs_root.exists():
+                os.chdir(self.sgs_root)
             with self.store_lock:
                 sess = self._get_or_create_answer_session(session_id, answerer)
                 turn = sess.ask(question)
                 if not self.pause_learning:
                     self.store.log_query(turn.question, main_entity(turn.question))
         finally:
-            os.chdir(orig_cwd)
+            if os.getcwd() != orig_cwd:
+                os.chdir(orig_cwd)
 
         res = turn.result
         ex = res.get("explain") or {}
@@ -10464,6 +10469,11 @@ def make_sidecar_server(
 
             if route_path == "/doctor":
                 return self._json(runtime.get_doctor())
+            if route_path == "/telemetry/summary":
+                return self._json(runtime.telemetry.get_summary())
+            if route_path == "/telemetry/export":
+                lim = int(query_params.get("limit", "200") or 200)
+                return self._json(runtime.telemetry.export_pending_batch(limit=lim))
             if route_path == "/models/config":
                 return self._json(runtime.get_model_management_config())
             if route_path == "/models/local":
@@ -11799,6 +11809,15 @@ def make_sidecar_server(
                         title=str(data.get("title") or ""),
                         notes=str(data.get("notes") or ""),
                     )
+                    runtime.telemetry.record(
+                        "evals",
+                        "capture_failure",
+                        metrics={
+                            "eval_id": ev_case.get("eval_id"),
+                            "model_id": str(data.get("model_id") or ""),
+                            "web_enabled": bool(data.get("web_enabled", False)),
+                        },
+                    )
                     return self._json({"ok": True, "eval_case": ev_case})
                 except Exception as e:
                     return self._json({"ok": False, "error": str(e)}, 400)
@@ -11810,11 +11829,60 @@ def make_sidecar_server(
                     eval_id = str(data.get("eval_id") or "").strip()
                     if eval_id:
                         res = runtime.evals.run_eval_case(eval_id, targets=targets, mode=mode)
+                        runtime.telemetry.record_eval_run(
+                            mode,
+                            cases_total=1,
+                            passed_count=1 if res.get("passed") else 0,
+                            failed_count=0 if res.get("passed") else 1,
+                            passed=bool(res.get("passed", False)),
+                            details={"eval_id": eval_id, "targets": list(targets)},
+                        )
                         return self._json({"ok": res.get("passed", False), "results": [res], **res})
                     res = runtime.evals.run_all(targets=targets, mode=mode)
+                    results_list = res.get("results") if isinstance(res.get("results"), list) else []
+                    passed_n = sum(1 for r in results_list if isinstance(r, dict) and r.get("passed"))
+                    runtime.telemetry.record_eval_run(
+                        mode,
+                        cases_total=len(results_list),
+                        passed_count=passed_n,
+                        failed_count=max(0, len(results_list) - passed_n),
+                        passed=bool(res.get("ok", False)),
+                        details={"targets": list(targets)},
+                    )
                     return self._json(res)
                 except KeyError as ke:
                     return self._json({"ok": False, "error": str(ke)}, 404)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/telemetry/event":
+                try:
+                    rec = runtime.telemetry.record(
+                        str(data.get("subsystem") or "frontend"),
+                        str(data.get("event_name") or "ui_event"),
+                        ok=bool(data.get("ok", True)),
+                        duration_ms=data.get("duration_ms"),
+                        error_code=str(data.get("error_code") or ""),
+                        metrics=data.get("metrics") if isinstance(data.get("metrics"), dict) else {},
+                    )
+                    return self._json({"ok": True, "event": rec})
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/telemetry/ack":
+                try:
+                    return self._json(runtime.telemetry.mark_exported_through(int(data.get("max_seq") or 0)))
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
+            if self.path == "/telemetry/config":
+                try:
+                    return self._json(
+                        runtime.telemetry.set_hosted_sync(
+                            enabled=bool(data.get("hosted_sync_enabled", False)),
+                            endpoint=str(data.get("hosted_endpoint") or ""),
+                        )
+                    )
                 except Exception as e:
                     return self._json({"ok": False, "error": str(e)}, 400)
 

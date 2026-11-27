@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the Satz Development Hub, Brain Index Graph DB, Monitor, Eval, and Lifecycle Hooks."""
+"""Tests for Satz Dev Hub, Brain Index Graph DB, Lifecycle Hooks, Behavior->Skill, Error->Eval & Release CLI."""
 from __future__ import annotations
 
 import hashlib
@@ -21,8 +21,14 @@ for p in (str(REPO_ROOT / "sidecar"), str(SCRIPTS_DIR), str(HOOKS_DIR)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+import agent_background_worker  # noqa: E402
+import dev_brain  # noqa: E402
+import git_sync  # noqa: E402
+import release_version  # noqa: E402
+import security_audit  # noqa: E402
 from dev_brain import DevBrain  # noqa: E402
 from pre_commit_dev_sync import check_ui_and_weight_limits, check_version_parity  # noqa: E402
+import behavior_eval_store  # noqa: E402
 import hook_common  # noqa: E402
 import post_edit_brain_sync  # noqa: E402
 import pre_invocation_context  # noqa: E402
@@ -57,10 +63,27 @@ class TestDevPipelineAndBrain(unittest.TestCase):
             self.assertTrue((REPO_ROOT / rel).is_dir(), f"Missing directory: {rel}")
 
         plan_subdirs = [d for d in (REPO_ROOT / "dev" / "plans").iterdir() if d.is_dir()]
-        self.assertGreaterEqual(len(plan_subdirs), 10)
+        self.assertGreaterEqual(len(plan_subdirs), 12)
         for pdir in plan_subdirs:
             self.assertTrue((pdir / "v1.md").is_file(), f"Missing v1.md in {pdir}")
             self.assertTrue((pdir / "tasks.md").is_file(), f"Missing tasks.md in {pdir}")
+
+        expected_skills = (
+            "satz-release-manager",
+            "satz-dev-brain",
+            "satz-eval-auditor",
+            "satz-ui-design-i18n",
+            "satz-cross-platform-shell",
+            "satz-sidecar-models-boundary",
+            "satz-tools-safety-boundary",
+            "satz-feature-planner",
+            "satz-git-sync",
+        )
+        for skill_name in expected_skills:
+            self.assertTrue(
+                (REPO_ROOT / "dev" / "agents" / "skills" / skill_name / "SKILL.md").is_file(),
+                f"Missing skill: {skill_name}",
+            )
 
     def test_dev_brain_monitor_integrity_and_readonly_queries(self) -> None:
         mon = self.brain.monitor()
@@ -106,12 +129,19 @@ class TestDevPipelineAndBrain(unittest.TestCase):
         self.assertTrue(bool(ver))
         check_ui_and_weight_limits()
 
-        fake_stdin = io.StringIO(json.dumps({"toolInput": {"Path": "src/main.ts"}}))
-        fake_stdout = io.StringIO()
-        with mock.patch("sys.stdin", fake_stdin), mock.patch("sys.stdout", fake_stdout):
-            rc = post_edit_brain_sync.main()
-        self.assertEqual(rc, 0)
-        self.assertEqual(json.loads(fake_stdout.getvalue()), {})
+        with tempfile.TemporaryDirectory() as tmpd:
+            env_patch = {
+                "SATZ_BEHAVIOR_DB_PATH": str(Path(tmpd) / "raw.sqlite"),
+                "SATZ_ERROR_LOG_PATH": str(Path(tmpd) / "err.jsonl"),
+                "SATZ_DISABLE_BG_WORKER": "1",
+            }
+            with mock.patch.dict(os.environ, env_patch):
+                fake_stdin = io.StringIO(json.dumps({"toolInput": {"Path": "src/main.ts"}}))
+                fake_stdout = io.StringIO()
+                with mock.patch("sys.stdin", fake_stdin), mock.patch("sys.stdout", fake_stdout):
+                    rc = post_edit_brain_sync.main()
+                self.assertEqual(rc, 0)
+                self.assertEqual(json.loads(fake_stdout.getvalue()), {})
 
     def test_hook_configs_are_valid_json_and_wire_all_events(self) -> None:
         ag = json.loads((REPO_ROOT / ".agents" / "hooks.json").read_text(encoding="utf-8"))
@@ -120,7 +150,7 @@ class TestDevPipelineAndBrain(unittest.TestCase):
         self.assertIsInstance(spec["PreInvocation"], list)
         self.assertIsInstance(spec["Stop"], list)
         self.assertIn("matcher", spec["PreToolUse"][0])
-        self.assertIn("matcher", spec["PostToolUse"][0])
+        self.assertIn("run_command", spec["PostToolUse"][0]["matcher"])
 
         cc = json.loads((REPO_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
         cc_hooks = cc["hooks"]
@@ -145,39 +175,49 @@ class TestDevPipelineAndBrain(unittest.TestCase):
         data = json.loads(res.stdout)
         msg = data["injectSteps"][0]["systemMessage"]["systemMessage"]
         self.assertIn("dev/agents/INSTRUCTIONS.md", msg)
+        self.assertIn("satz-release-manager", msg)
+        self.assertIn("satz-ui-design-i18n", msg)
         self.assertNotIn("_template", msg)
 
-    def test_session_start_and_pre_invocation_contracts_and_dedupe(self) -> None:
+    def test_session_start_and_pre_invocation_contracts_skill_boost_and_dedupe(self) -> None:
         before_hash = hashlib.sha256(self.brain.db_path.read_bytes()).hexdigest()
 
-        # Claude Code SessionStart
         out_cc = io.StringIO()
         with mock.patch("sys.stdin", io.StringIO(json.dumps({"hook_event_name": "SessionStart", "session_id": "cc-1"}))), \
              mock.patch("sys.stdout", out_cc):
             session_start_context.main()
         parsed_cc = json.loads(out_cc.getvalue())
         self.assertEqual(parsed_cc["hookSpecificOutput"]["hookEventName"], "SessionStart")
-        self.assertIn("Mandatory guardrails:", parsed_cc["hookSpecificOutput"]["additionalContext"])
+        ctx = parsed_cc["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Mandatory guardrails:", ctx)
+        self.assertIn("Available repo skills", ctx)
+        self.assertIn("satz-sidecar-models-boundary", ctx)
 
-        # PreInvocation injects DevBrain context once per conversation+prompt, skips invocationNum > 1
         with tempfile.TemporaryDirectory() as tmpd:
             cache_file = str(Path(tmpd) / "cache.json")
-            with mock.patch.dict(os.environ, {"SATZ_HOOK_CACHE_PATH": cache_file}):
+            raw_db = str(Path(tmpd) / "raw.sqlite")
+            env_patch = {
+                "SATZ_HOOK_CACHE_PATH": cache_file,
+                "SATZ_BEHAVIOR_DB_PATH": raw_db,
+                "SATZ_DISABLE_BG_WORKER": "1",
+            }
+            with mock.patch.dict(os.environ, env_patch):
                 out1 = io.StringIO()
                 payload1 = {
                     "hookEventName": "PreInvocation",
                     "conversationId": "conv-ut",
                     "invocationNum": 1,
-                    "lastUserInput": "release packaging and macos updater signature",
+                    "lastUserInput": "release packaging major minor fix version and macos updater signature",
                 }
                 with mock.patch("sys.stdin", io.StringIO(json.dumps(payload1))), mock.patch("sys.stdout", out1):
                     pre_invocation_context.main()
                 d1 = json.loads(out1.getvalue())
                 injected = d1["injectSteps"][0]["systemMessage"]["systemMessage"]
+                self.assertIn("[Recommended Skills]", injected)
+                self.assertIn("satz-release-manager/SKILL.md", injected)
                 self.assertIn("[DevBrain Relevant Context]", injected)
-                self.assertIn("RELEASE_RUNBOOK.md", injected)
+                self.assertGreaterEqual(behavior_eval_store.count_unanalyzed(Path(raw_db)), 1)
 
-                # Same prompt on second invocation or duplicate call -> {}
                 out_dup = io.StringIO()
                 with mock.patch("sys.stdin", io.StringIO(json.dumps(payload1))), mock.patch("sys.stdout", out_dup):
                     pre_invocation_context.main()
@@ -195,8 +235,11 @@ class TestDevPipelineAndBrain(unittest.TestCase):
     def test_pre_tool_guard_policies_antigravity_and_claude(self) -> None:
         with tempfile.TemporaryDirectory() as tmpd:
             temp_log = Path(tmpd) / "behavior.jsonl"
-            with mock.patch.object(hook_common, "BEHAVIOR_LOG", temp_log):
-                # 1. Block ../sgs edits (Antigravity)
+            env_patch = {
+                "SATZ_BEHAVIOR_DB_PATH": str(Path(tmpd) / "raw.sqlite"),
+                "SATZ_DISABLE_BG_WORKER": "1",
+            }
+            with mock.patch.object(hook_common, "BEHAVIOR_LOG", temp_log), mock.patch.dict(os.environ, env_patch):
                 r1 = pre_tool_guard.evaluate_tool_call({
                     "hookEventName": "PreToolUse",
                     "toolCall": {"name": "edit_file", "args": {"Path": "../sgs/README.md", "Replacement": "x"}},
@@ -204,7 +247,6 @@ class TestDevPipelineAndBrain(unittest.TestCase):
                 self.assertIsNotNone(r1)
                 self.assertIn("read-only", r1)
 
-                # 2. Block em dash in src/i18n/catalog.ts (Claude Code)
                 r2 = pre_tool_guard.evaluate_tool_call({
                     "hook_event_name": "PreToolUse",
                     "tool_name": "Edit",
@@ -213,7 +255,6 @@ class TestDevPipelineAndBrain(unittest.TestCase):
                 self.assertIsNotNone(r2)
                 self.assertIn("em/en dash", r2)
 
-                # 3. Block hardcoded CSS hex outside tokens.css, permit tokens.css
                 r3 = pre_tool_guard.evaluate_tool_call({
                     "hookEventName": "PreToolUse",
                     "toolCall": {"name": "edit_file", "args": {"Path": "src/design-system/components.css", "Replacement": "color: #ff00aa;"}},
@@ -227,7 +268,6 @@ class TestDevPipelineAndBrain(unittest.TestCase):
                 })
                 self.assertIsNone(ok_tokens)
 
-                # 4. Block mismatched git tag version
                 r4 = pre_tool_guard.evaluate_tool_call({
                     "hookEventName": "PreToolUse",
                     "toolCall": {"name": "run_command", "args": {"CommandLine": "git tag -a v9.9.9 -m rel"}},
@@ -235,48 +275,238 @@ class TestDevPipelineAndBrain(unittest.TestCase):
                 self.assertIsNotNone(r4)
                 self.assertIn("Blocked git tag v9.9.9", r4)
 
-                # 5. Allow normal source edit cleanly (empty {})
-                out = io.StringIO()
+                # Antigravity permitted tool call returns decision='ask'; Claude Code returns {}
+                out_ag = io.StringIO()
                 with mock.patch("sys.stdin", io.StringIO(json.dumps({
                     "hookEventName": "PreToolUse",
                     "toolCall": {"name": "edit_file", "args": {"Path": "src/main.ts", "Replacement": "const x = 1;"}},
-                }))), mock.patch("sys.stdout", out):
+                }))), mock.patch("sys.stdout", out_ag):
                     pre_tool_guard.main()
-                self.assertEqual(json.loads(out.getvalue()), {})
+                self.assertEqual(json.loads(out_ag.getvalue()), {"decision": "ask"})
 
-    def test_post_edit_brain_sync_handles_antigravity_and_claude_dev_edits(self) -> None:
-        with mock.patch.object(post_edit_brain_sync, "append_behavior_log") as log_mock:
-            with mock.patch("scripts.dev_brain.DevBrain.reindex", return_value={"nodes": 80, "edges": 140}) as reidx_mock:
-                res = post_edit_brain_sync.handle_post_tool({
+                out_cc = io.StringIO()
+                with mock.patch("sys.stdin", io.StringIO(json.dumps({
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Edit",
+                    "tool_input": {"file_path": "src/main.ts", "new_string": "const x = 1;"},
+                }))), mock.patch("sys.stdout", out_cc):
+                    pre_tool_guard.main()
+                self.assertEqual(json.loads(out_cc.getvalue()), {})
+
+    def test_post_edit_brain_sync_handles_dev_edits_and_tool_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpd:
+            env_patch = {
+                "SATZ_BEHAVIOR_DB_PATH": str(Path(tmpd) / "raw.sqlite"),
+                "SATZ_ERROR_LOG_PATH": str(Path(tmpd) / "err.jsonl"),
+                "SATZ_DISABLE_BG_WORKER": "1",
+            }
+            with mock.patch.dict(os.environ, env_patch), mock.patch.object(post_edit_brain_sync, "append_behavior_log") as log_mock:
+                with mock.patch("dev_brain.DevBrain.reindex", return_value={"nodes": 80, "edges": 140}) as reidx_mock:
+                    res = post_edit_brain_sync.handle_post_tool({
+                        "hookEventName": "PostToolUse",
+                        "toolCall": {"name": "replace_file_content", "args": {"TargetFile": "dev/agents/INSTRUCTIONS.md"}},
+                    })
+                    self.assertEqual(res["action"], "reindexed")
+                    self.assertEqual(reidx_mock.call_count, 1)
+                    self.assertEqual(log_mock.call_count, 1)
+
+                # Tool execution failure captures deduplicated error incident without reindexing dev/
+                post_edit_brain_sync.handle_post_tool({
                     "hookEventName": "PostToolUse",
-                    "toolCall": {"name": "replace_file_content", "args": {"TargetFile": "dev/agents/INSTRUCTIONS.md"}},
+                    "toolCall": {"name": "run_command", "args": {"CommandLine": "cargo test"}},
+                    "error": "exit status 101: unresolved import",
                 })
-                self.assertEqual(res["action"], "reindexed")
-                self.assertEqual(reidx_mock.call_count, 1)
-                self.assertEqual(log_mock.call_count, 1)
+                err_lines = Path(tmpd, "err.jsonl").read_text(encoding="utf-8").splitlines()
+                self.assertEqual(len(err_lines), 1)
+                self.assertIn("cargo test", err_lines[0])
+                self.assertIn("unresolved import", err_lines[0])
 
     def test_stop_gate_check_loop_guard_and_broken_link_block(self) -> None:
-        # Must immediately noop when continuationActive / stop_hook_active is true
-        self.assertIsNone(stop_gate_check.evaluate_stop({"continuationActive": True, "terminationReason": "NO_TOOL_CALL"}))
-        self.assertIsNone(stop_gate_check.evaluate_stop({"stop_hook_active": True}))
-        self.assertIsNone(stop_gate_check.evaluate_stop({"continuationActive": False, "terminationReason": "USER_CANCELED"}))
+        with tempfile.TemporaryDirectory() as tmpd:
+            env_patch = {
+                "SATZ_BEHAVIOR_DB_PATH": str(Path(tmpd) / "raw.sqlite"),
+                "SATZ_ERROR_LOG_PATH": str(Path(tmpd) / "err.jsonl"),
+                "SATZ_DISABLE_BG_WORKER": "1",
+            }
+            with mock.patch.dict(os.environ, env_patch):
+                self.assertIsNone(stop_gate_check.evaluate_stop({"continuationActive": True, "terminationReason": "NO_TOOL_CALL"}))
+                self.assertIsNone(stop_gate_check.evaluate_stop({"stop_hook_active": True}))
+                self.assertIsNone(stop_gate_check.evaluate_stop({"continuationActive": False, "terminationReason": "USER_CANCELED"}))
 
-        # Broken edge triggers continue/block cleanly
-        fake_mon = {
-            "stale_count": 0,
-            "broken_edge_count": 1,
-            "broken_links": [{"source": "dev/a.md", "target": "missing.md"}],
-        }
-        with mock.patch("scripts.dev_brain.DevBrain.monitor", return_value=fake_mon), \
-             mock.patch.object(stop_gate_check, "_git_dirty_paths", return_value=[]):
-            out = io.StringIO()
-            with mock.patch("sys.stdin", io.StringIO(json.dumps({"continuationActive": False, "terminationReason": "NO_TOOL_CALL"}))), \
-                 mock.patch("sys.stdout", out), \
-                 mock.patch.object(stop_gate_check, "append_behavior_log"):
-                stop_gate_check.main()
-            parsed = json.loads(out.getvalue())
-            self.assertEqual(parsed["decision"], "continue")
-            self.assertIn("missing.md", parsed["reason"])
+                fake_mon = {
+                    "stale_count": 0,
+                    "broken_edge_count": 1,
+                    "broken_links": [{"source": "dev/a.md", "target": "missing.md"}],
+                }
+                with mock.patch("dev_brain.DevBrain.monitor", return_value=fake_mon), \
+                     mock.patch.object(stop_gate_check, "_git_dirty_paths", return_value=[]):
+                    out = io.StringIO()
+                    with mock.patch("sys.stdin", io.StringIO(json.dumps({"continuationActive": False, "terminationReason": "NO_TOOL_CALL"}))), \
+                         mock.patch("sys.stdout", out), \
+                         mock.patch.object(stop_gate_check, "append_behavior_log"):
+                        stop_gate_check.main()
+                    parsed = json.loads(out.getvalue())
+                    self.assertEqual(parsed["decision"], "continue")
+                    self.assertIn("missing.md", parsed["reason"])
+
+    def test_background_worker_clusters_prompts_synthesizes_skill_and_auto_eval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpd:
+            tmp_root = Path(tmpd)
+            (tmp_root / "dev" / "agents" / "skills").mkdir(parents=True)
+            (tmp_root / "dev" / "agents" / "evals").mkdir(parents=True)
+            raw_db = tmp_root / "dev" / "agents" / "behavior" / "raw_events.sqlite"
+
+            for i in range(3):
+                behavior_eval_store.record_event(
+                    harness="antigravity",
+                    conv_id=f"c-{i}",
+                    event_type="prompt",
+                    prompt_text="Always verify release manifest version parity and build signed windows bundle",
+                    db_path=raw_db,
+                )
+                behavior_eval_store.record_event(
+                    harness="antigravity",
+                    conv_id=f"c-{i}",
+                    event_type="tool_use",
+                    tool_name="edit_file",
+                    rel_paths=["src-tauri/tauri.conf.json"],
+                    db_path=raw_db,
+                )
+            behavior_eval_store.record_event(
+                harness="antigravity",
+                conv_id="c-err",
+                event_type="pre_tool_deny",
+                tool_name="edit_file",
+                ok=False,
+                error_text="Blocked em/en dash in src/i18n/catalog.ts",
+                db_path=raw_db,
+            )
+
+            with mock.patch.object(agent_background_worker, "append_behavior_log"), \
+                 mock.patch.object(dev_brain.DevBrain, "monitor", return_value={"broken_edge_count": 0}):
+                summary = agent_background_worker.run_cycle(
+                    repo_root=tmp_root,
+                    db_path=raw_db,
+                    min_cluster=3,
+                )
+            self.assertEqual(summary["clusters_found"], 1)
+            self.assertEqual(len(summary["skills_written"]), 1)
+            slug = summary["skills_written"][0]
+            prop_md = tmp_root / "dev" / "agents" / "behavior" / "proposals" / slug / "SKILL.md"
+            self.assertTrue(prop_md.is_file())
+            self.assertTrue((tmp_root / "dev" / "agents" / "evals" / "auto_eval_cases.yaml").is_file())
+            self.assertTrue((tmp_root / "dev" / "agents" / "evals" / "eval_history.jsonl").is_file())
+
+            with mock.patch.object(agent_background_worker, "append_behavior_log"):
+                approved = agent_background_worker.approve_proposal(slug, repo_root=tmp_root)
+            self.assertTrue(approved["ok"])
+            self.assertTrue((tmp_root / "dev" / "agents" / "skills" / slug / "SKILL.md").is_file())
+            self.assertFalse(prop_md.exists())
+
+    def test_release_version_cli_and_planck_manifests(self) -> None:
+        self.assertEqual(release_version.compute_next_version("0.5.0", "fix"), "0.5.1")
+        self.assertEqual(release_version.compute_next_version("0.5.1", "minor"), "0.6.0")
+        self.assertEqual(release_version.compute_next_version("0.6.2", "major"), "1.0.0")
+        models = release_version.inspect_planck_manifests(verify_hashes=False)
+        self.assertGreaterEqual(len(models), 2)
+        for m in models:
+            self.assertEqual(m["missing_parts"], [])
+            self.assertEqual(m["oversize_parts"], [])
+
+    def test_security_audit_repo_clean_scrubbing_and_pre_push_block(self) -> None:
+        res = security_audit.run_audit(mode="all", repo_root=REPO_ROOT)
+        self.assertTrue(res["ok"], f"Security audit reported findings: {res['findings'][:5]}")
+
+        # Verify detection of secrets, private keys, personal emails, and IBANs (constructed at runtime)
+        tok_prefix = "sk-" + "proj-"
+        priv_hdr = "-----BEGIN OPENSSH " + "PRIVATE KEY-----"
+        dirty_sample = (
+            f"OPENAI={tok_prefix}RealLeakKey9876543210abcdef\n"
+            "email=someone@gmail.com\n"
+            "iban=DE89370400440532013000\n"
+            f"key={priv_hdr}\n"
+        )
+        findings = security_audit.scan_text_content("dev/docs/sample.md", dirty_sample)
+        cats = {f["category"] for f in findings}
+        self.assertIn("api_or_auth_token", cats)
+        self.assertIn("unanonymized_email", cats)
+        self.assertIn("iban_pii", cats)
+        self.assertIn("private_key_or_secret", cats)
+
+        scrubbed = security_audit.redact_text(dirty_sample)
+        self.assertEqual(security_audit.scan_text_content("dev/docs/sample.md", scrubbed), [])
+
+        # Behavior/error stores also scrub sensitive values before writing
+        with tempfile.TemporaryDirectory() as tmpd:
+            err_log = Path(tmpd) / "err.jsonl"
+            behavior_eval_store.record_error_incident(
+                scope="tool:test",
+                summary=dirty_sample,
+                root_cause="simulated test",
+                error_log_path=err_log,
+            )
+            saved = err_log.read_text(encoding="utf-8")
+            self.assertEqual(security_audit.scan_text_content("dev/agents/evals/error_log.jsonl", saved), [])
+
+        # PreToolUse blocks git push whenever security audit reports unpushed leaks
+        fake_fail = {"ok": False, "finding_count": 1, "findings": [{"category": "api_or_auth_token", "path": "x.py", "line": 2}]}
+        with mock.patch.object(pre_tool_guard.security_audit, "run_audit", return_value=fake_fail):
+            deny_reason = pre_tool_guard.evaluate_tool_call({
+                "hookEventName": "PreToolUse",
+                "toolCall": {"name": "run_command", "args": {"CommandLine": "git push origin main"}},
+            })
+            self.assertIsNotNone(deny_reason)
+            self.assertIn("Blocked git push", deny_reason)
+
+        # PreToolUse blocks direct file writes containing secret tokens in tracked files
+        sample_tok = "AIza" + "SyActualSecretToken9876543210abcd"
+        deny_write = pre_tool_guard.evaluate_tool_call({
+            "hookEventName": "PreToolUse",
+            "toolCall": {
+                "name": "edit_file",
+                "args": {"Path": "src/main.ts", "Replacement": f"const k = '{sample_tok}';"},
+            },
+        })
+        self.assertIsNotNone(deny_write)
+        self.assertIn("Blocked security/privacy leak", deny_write)
+
+    def test_git_sync_workflow_and_pre_push_security_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpd:
+            tmp = Path(tmpd)
+            remote_bare = tmp / "remote.git"
+            work = tmp / "work"
+            subprocess.run(["git", "init", "--bare", str(remote_bare)], check=True, capture_output=True)
+            subprocess.run(["git", "clone", str(remote_bare), str(work)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(work), "config", "user.name", "Satz Test"], check=True)
+            subprocess.run(["git", "-C", str(work), "config", "user.email", "tester@example.test"], check=True)
+            (work / "README.md").write_text("# Init\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(work), "add", "README.md"], check=True)
+            subprocess.run(["git", "-C", str(work), "commit", "-m", "init"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(work), "push", "-u", "origin", "HEAD:main"], check=True, capture_output=True)
+
+            # Auto branch switch/create + commit + push without manual git checkout
+            (work / "notes.md").write_text("clean dev change\n", encoding="utf-8")
+            res = git_sync.sync_and_push(
+                repo_root=work,
+                branch="feature/auto-sync",
+                push=True,
+                skip_gate=True,
+            )
+            self.assertTrue(res["ok"])
+            self.assertTrue(res["committed"])
+            self.assertTrue(res["pushed"])
+            cur_branch = subprocess.run(
+                ["git", "-C", str(work), "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            self.assertEqual(cur_branch, "feature/auto-sync")
+
+            # Introducing an unredacted token must block git_sync push
+            bad_secret = "sk-" + "proj-LeakedSecretToken1234567890"
+            (work / "leak.txt").write_text(f"TOKEN={bad_secret}\n", encoding="utf-8")
+            with self.assertRaises(RuntimeError) as ctx:
+                git_sync.sync_and_push(repo_root=work, push=True, skip_gate=True)
+            self.assertIn("Security/privacy audit blocked", str(ctx.exception))
 
 
 if __name__ == "__main__":

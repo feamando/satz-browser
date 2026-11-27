@@ -6,7 +6,7 @@ Central engineering workspace for managing Satz Browser architecture, documentat
 
 | Folder | Purpose | Key Entrypoints |
 | :--- | :--- | :--- |
-| [docs/](docs/) | Technical architecture, platform notes, release runbook, research | [ARCHITECTURE.md](docs/ARCHITECTURE.md), [RELEASE_RUNBOOK.md](docs/RELEASE_RUNBOOK.md), [PLATFORMS.md](docs/PLATFORMS.md) |
+| [docs/](docs/) | Technical architecture, high-level system/harness overview, platform notes, release runbook | [SYSTEM_OVERVIEW.md](docs/SYSTEM_OVERVIEW.md), [ARCHITECTURE.md](docs/ARCHITECTURE.md), [RELEASE_RUNBOOK.md](docs/RELEASE_RUNBOOK.md), [PLATFORMS.md](docs/PLATFORMS.md) |
 | [versions/](versions/) | Release history (`NOTES_v*.md`), changelog, point-in-time build snapshots | [CHANGELOG.md](versions/CHANGELOG.md), [snapshots/](versions/snapshots/) |
 | [analytics/](analytics/) | Build size/timing telemetry, Dev Brain eval time-series, harness analysis | [build_telemetry.jsonl](analytics/build_telemetry.jsonl), [dev_brain_eval_history.jsonl](analytics/dev_brain_eval_history.jsonl) |
 | [agents/](agents/) | Core instructions for Antigravity & Claude Code (especially release management) | [INSTRUCTIONS.md](agents/INSTRUCTIONS.md), [hooks/](agents/hooks/), [skills/](agents/skills/), [behavior/](agents/behavior/), [roles/](agents/roles/), [evals/](agents/evals/) |

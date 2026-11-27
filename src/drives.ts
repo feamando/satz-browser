@@ -79,6 +79,7 @@ export interface DrivesViewActions {
   onUnlockProfile?: (profileId: string, pin: string) => void | Promise<void>;
   onUnlockProfileKeychain?: (profileId: string) => void | Promise<void>;
   onCreateProfile?: (name: string, pin: string) => void | Promise<void>;
+  onImportProfileFile?: (bundleB64: string, pin: string, localPin?: string) => void | Promise<void>;
 }
 
 export function snapshotCurrentDrivesNav(): DriveNavSnapshot {
@@ -174,6 +175,7 @@ export function renderDrivesView(
       onUnlockProfile: actions.onUnlockProfile,
       onUnlockProfileKeychain: actions.onUnlockProfileKeychain,
       onCreateProfile: actions.onCreateProfile,
+      onImportProfileFile: actions.onImportProfileFile,
       onOpenSettings: actions.onOpenProfileUnlock,
     });
     return;
@@ -604,7 +606,7 @@ export function renderDriveAccountsPanelHtml(
                     id="drives-gdrive-hint"
                     class="input"
                     type="email"
-                    placeholder="nikita.gorshkov@hellofresh.com"
+                    placeholder="name@company.example"
                     value="${escapeHtml(gInfo?.email || state.googleOAuthStatus?.email || "")}"
                   />
                   <button id="drives-connect-gdrive-btn" class="btn primary" type="button">
