@@ -4298,23 +4298,32 @@ class SatzMailManager:
 
         default_cfg_model = ""
         try:
-            cfg = self.runtime.get_model_config() if hasattr(self.runtime, "get_model_config") else {}
-            default_cfg_model = str((cfg.get("roles") or {}).get("chat") or "").strip()
+            cfg = (
+                self.runtime.get_model_management_config()
+                if hasattr(self.runtime, "get_model_management_config")
+                else {}
+            )
+            roles = cfg.get("roles") or {}
+            default_cfg_model = str(roles.get("effective_chat") or roles.get("chat") or "").strip()
         except Exception:
             default_cfg_model = ""
-        chosen_model = requested_model or default_cfg_model or "gemma-4-e4b"
-        if chosen_model in ("hertz (reader)", "planck (reader)", "planck3 (web)"):
-            chosen_model = "gemma-4-e4b"
+        chosen_model = requested_model or default_cfg_model or "planck3 (web)"
 
         is_cloud = (
             hasattr(self.runtime, "_parse_cloud_model_id")
             and self.runtime._parse_cloud_model_id(chosen_model) is not None
         )
+        is_planck_choice = chosen_model in ("hertz (reader)", "planck (reader)", "planck3 (web)", "template")
         can_run_local_gemma = (
-            getattr(self.runtime, "gemma_model", None) is not None
-            or (
-                hasattr(self.runtime, "_gemma_dir")
-                and self.runtime._gemma_dir().exists()
+            not is_cloud
+            and not is_planck_choice
+            and (
+                getattr(self.runtime, "gemma_model", None) is not None
+                or (
+                    hasattr(self.runtime, "local_models")
+                    and self.runtime.local_models is not None
+                    and self.runtime.local_models.has_ready_local_llm(chosen_model)
+                )
             )
         )
 

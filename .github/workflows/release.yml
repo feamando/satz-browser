@@ -7,15 +7,121 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Release tag to build/publish (e.g. v0.5.1)"
+        description: "Release tag matching manifests (e.g. v0.5.1)"
         required: true
         default: "v0.5.1"
+      prerelease:
+        description: "Publish as pre-release instead of updater 'latest' channel"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
 
 jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.meta.outputs.tag_name }}
+      version: ${{ steps.meta.outputs.version }}
+      release_id: ${{ steps.draft.outputs.release_id }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate release tag, manifests, Planck shards & security audit
+        id: meta
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag_name }}
+          REF_TAG: ${{ github.ref_name }}
+          INPUT_PRERELEASE: ${{ github.event.inputs.prerelease }}
+        run: |
+          TAG="${INPUT_TAG:-$REF_TAG}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release tag format: '$TAG' (expected vX.Y.Z)" >&2
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          python3 scripts/release_version.py ci-preflight --tag "$TAG"
+          {
+            echo "tag_name=$TAG"
+            echo "version=$VERSION"
+            echo "prerelease=${INPUT_PRERELEASE:-false}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create or reuse single Draft release for matrix builds
+        id: draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REL_TAG: ${{ steps.meta.outputs.tag_name }}
+          REL_VERSION: ${{ steps.meta.outputs.version }}
+          REL_SHA: ${{ github.sha }}
+        run: |
+          cat <<'EOF' > /tmp/release_notes.md
+          ## Preview Install Notes
+
+          - **macOS (unsigned preview):** Drag `satz.app` from the `.dmg` into `/Applications`, then run once in Terminal before opening:
+            ```bash
+            xattr -cr /Applications/satz.app
+            ```
+          - **Windows:** Run `*_x64-setup.exe`. If SmartScreen appears, choose **More info -> Run anyway**.
+          - **Updating existing installs:** Satz checks automatically on launch or manually via **Settings -> Appearance & Language -> App updates -> Check for updates** (your Brain, Vault, Mail, and downloaded local models stay untouched in AppData).
+          EOF
+
+          RELEASE_ID="$(python3 - <<'PY'
+          import json, os, subprocess
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          tag = os.environ["REL_TAG"]
+          raw = subprocess.check_output(
+              ["gh", "api", f"repos/{repo}/releases?per_page=30"],
+              text=True,
+          )
+          for item in json.loads(raw):
+              if item.get("tag_name") == tag:
+                  if not item.get("draft"):
+                      raise SystemExit(f"Release {tag} is already published (not draft); bump to a new tag.")
+                  print(item["id"])
+                  raise SystemExit(0)
+          PY
+          )"
+
+          if [[ -z "$RELEASE_ID" ]]; then
+            gh release create "$REL_TAG" \
+              --draft \
+              --target "$REL_SHA" \
+              --title "Satz Browser ${REL_VERSION}" \
+              --notes-file /tmp/release_notes.md
+
+            RELEASE_ID="$(python3 - <<'PY'
+          import json, os, subprocess
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          tag = os.environ["REL_TAG"]
+          raw = subprocess.check_output(
+              ["gh", "api", f"repos/{repo}/releases?per_page=30"],
+              text=True,
+          )
+          for item in json.loads(raw):
+              if item.get("tag_name") == tag and item.get("draft"):
+                  print(item["id"])
+                  raise SystemExit(0)
+          raise SystemExit(f"Failed to locate created draft release for {tag}")
+          PY
+          )"
+          fi
+
+          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+
   build-tauri:
+    needs: [prepare-release]
     strategy:
       fail-fast: false
       matrix:
@@ -66,24 +172,114 @@ jobs:
           PY_BIN="$(uv python find 3.12 --managed-python)"
           "$PY_BIN" scripts/prepare_sidecar_bundle.py
 
-      - name: Build & publish signed Tauri bundles
+      - name: Build & upload signed Tauri bundles to draft release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ inputs.tag_name || github.ref_name }}
-          releaseName: "Satz Browser __VERSION__"
-          releaseBody: |
-            ## Preview Install Notes
-
-            - **macOS (unsigned preview):** Drag `satz.app` from the `.dmg` into `/Applications`, then run once in Terminal before opening:
-              ```bash
-              xattr -cr /Applications/satz.app
-              ```
-            - **Windows:** Run `*_x64-setup.exe`. If SmartScreen appears, choose **More info -> Run anyway**.
-            - **Updating existing installs:** Open **Settings -> Appearance & Language -> App updates** -> **Check for updates** (your Brain, Vault, Mail, and downloaded local models stay untouched in AppData).
+          releaseId: ${{ needs.prepare-release.outputs.release_id }}
+          tagName: ${{ needs.prepare-release.outputs.tag_name }}
           releaseDraft: true
-          prerelease: true
+          prerelease: false
           args: ${{ matrix.args }}
+
+  publish-release:
+    needs: [prepare-release, build-tauri]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify dual-OS latest.json & publish release live
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REL_TAG: ${{ needs.prepare-release.outputs.tag_name }}
+          REL_VERSION: ${{ needs.prepare-release.outputs.version }}
+          REL_ID: ${{ needs.prepare-release.outputs.release_id }}
+          IS_PRERELEASE: ${{ needs.prepare-release.outputs.prerelease }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+          from pathlib import Path
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          rel_id = os.environ["REL_ID"]
+          raw = subprocess.check_output(
+              ["gh", "api", f"repos/{repo}/releases/{rel_id}/assets?per_page=100"],
+              text=True,
+          )
+          assets = json.loads(raw)
+          names = [str(a.get("name") or "") for a in assets]
+          print("Draft assets:", ", ".join(names))
+          latest_asset = next((a for a in assets if a.get("name") == "latest.json"), None)
+          if not latest_asset:
+              raise SystemExit(f"Missing latest.json in draft release assets: {names}")
+
+          latest_bytes = subprocess.check_output(
+              [
+                  "gh",
+                  "api",
+                  "-H",
+                  "Accept: application/octet-stream",
+                  f"repos/{repo}/releases/assets/{latest_asset['id']}",
+              ]
+          )
+          Path("/tmp/latest.json").write_bytes(latest_bytes)
+          PY
+
+          python3 scripts/release_version.py verify-updater-manifest \
+            --file /tmp/latest.json \
+            --expected-version "$REL_VERSION" \
+            --require-platforms "windows,darwin"
+
+          python3 - <<'PY'
+          import json, os, subprocess
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          rel_id = os.environ["REL_ID"]
+          tag = os.environ["REL_TAG"]
+          is_pre = os.environ.get("IS_PRERELEASE", "false").lower() == "true"
+          payload = {
+              "draft": False,
+              "prerelease": is_pre,
+              "make_latest": "false" if is_pre else "true",
+          }
+          subprocess.run(
+              ["gh", "api", "-X", "PATCH", f"repos/{repo}/releases/{rel_id}", "--input", "-"],
+              input=json.dumps(payload),
+              text=True,
+              check=True,
+          )
+          print(f"Published release {tag} (draft=False, prerelease={is_pre}, make_latest={payload['make_latest']}).")
+          PY
+
+          if [[ "$IS_PRERELEASE" != "true" ]]; then
+            python3 - <<'PY'
+          import json, os, time, urllib.request
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          expected_ver = os.environ["REL_VERSION"]
+          url = f"https://github.com/{repo}/releases/latest/download/latest.json"
+          last_err = None
+          for _ in range(8):
+              try:
+                  with urllib.request.urlopen(url, timeout=15) as resp:
+                      if resp.status == 200:
+                          data = json.loads(resp.read().decode("utf-8"))
+                          if str(data.get("version") or "").lstrip("v") == expected_ver:
+                              print(f"Verified live updater endpoint: {url} -> v{expected_ver}")
+                              raise SystemExit(0)
+                          last_err = f"version mismatch: {data.get('version')}"
+              except Exception as exc:
+                  last_err = str(exc)
+              time.sleep(5)
+          raise SystemExit(f"Live updater feed verification failed for {url}: {last_err}")
+          PY
+          fi

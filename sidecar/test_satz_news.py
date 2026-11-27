@@ -861,6 +861,48 @@ class TestSatzNewsEngine(unittest.TestCase):
         self.assertTrue(self.rt.news.unpin_followed_story(sid)["ok"])
         self.assertEqual(self.rt.news.list_followed_stories()["stories"], [])
 
+    def test_news_defaults_run_cleanly_on_planck_without_gemma(self) -> None:
+        now = time.time()
+        self.rt.news.upsert_article(
+            {
+                "url": "https://www.reuters.com/world/grid-planck-test",
+                "domain": "reuters.com",
+                "title": "European grid operators publish winter capacity outlook",
+                "snippet": "Grid regulators reported stable reserve margins across central Europe.",
+                "body_text": "Grid regulators reported stable reserve margins across central Europe.",
+                "published_at": now - 600,
+            },
+            language="en",
+        )
+        self.rt.news.upsert_article(
+            {
+                "url": "https://www.dw.com/en/grid-planck-test",
+                "domain": "dw.com",
+                "title": "Winter electricity reserve margins confirmed in EU report",
+                "snippet": "Officials confirmed sufficient winter power reserves across member states.",
+                "body_text": "Officials confirmed sufficient winter power reserves across member states.",
+                "published_at": now - 300,
+            },
+            language="en",
+        )
+        self.rt.news.recluster_and_rank()
+        with mock.patch.object(
+            self.rt, "ensure_gemma", side_effect=AssertionError("Gemma must not load on default News flow")
+        ), mock.patch.object(
+            self.rt.web, "search", return_value=[]
+        ):
+            ans = self.rt.news.answer_news_question("Give me today's European grid briefing")
+            self.assertTrue(ans["ok"])
+            self.assertEqual(ans["answer_meta"]["models_used"]["planner"], "planck3 (web)")
+            self.assertEqual(ans["answer_meta"]["models_used"]["analyzer"], "template")
+            self.assertTrue("DW" in ans["answer"] or "Reuters" in ans["answer"], ans["answer"])
+            self.assertIn("reuters.com", [s["domain"] for s in ans["sources"]])
+
+            persp_evs = list(self.rt.news.stream_topic_perspectives("European grid"))
+            done_p = [e for e in persp_evs if e.get("done")][-1]
+            self.assertTrue(done_p["ok"])
+            self.assertEqual(done_p["model"], "template")
+
 
 if __name__ == "__main__":
     unittest.main()

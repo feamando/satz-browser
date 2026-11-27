@@ -168,6 +168,8 @@ def sync_and_push(
     message: str = "",
     push: bool = False,
     tag: str = "",
+    bump: str = "",
+    release_notes: str = "",
     skip_gate: bool = False,
     full_gate: bool = False,
     dry_run: bool = False,
@@ -179,6 +181,8 @@ def sync_and_push(
         raise RuntimeError("Detached HEAD state; pass --branch <name> to checkout/create automatically.")
 
     steps: list[str] = []
+    effective_tag = tag.strip()
+    effective_message = message.strip()
 
     # 1. Ensure Git security hooks exist on this clone
     if not (root / ".git" / "hooks" / "pre-push").is_file() or not (root / ".git" / "hooks" / "pre-commit").is_file():
@@ -192,6 +196,25 @@ def sync_and_push(
     if branch and branch != state["branch"]:
         _ensure_branch(root, branch, dry_run=dry_run)
         steps.append(f"active branch -> {branch}")
+
+    # 2b. Optional atomic semver bump before verification & commit
+    bumped_version = ""
+    if bump.strip():
+        if root != REPO_ROOT.resolve():
+            raise RuntimeError("--bump only operates on primary workspace repository.")
+        import release_version
+
+        bump_res = release_version.apply_version_bump(
+            bump.strip(),
+            notes=release_notes,
+            dry_run=dry_run,
+        )
+        bumped_version = str(bump_res.get("target" if dry_run else "version") or "")
+        steps.append(f"{'would bump' if dry_run else 'bumped'} version -> {bumped_version}")
+        if push and not effective_tag and bumped_version:
+            effective_tag = f"v{bumped_version}"
+        if not effective_message and bumped_version:
+            effective_message = f"chore(release): prepare v{bumped_version}"
 
     # 3. Reindex Dev Brain cleanly before staging if operating on primary repo
     if not dry_run and root == REPO_ROOT.resolve() and not skip_gate:
@@ -224,7 +247,7 @@ def sync_and_push(
 
     # 5. Stage & commit dirty workspace changes cleanly
     porcelain = [ln for ln in _git(["status", "--porcelain"], cwd=root).stdout.splitlines() if ln.strip()]
-    commit_msg = message.strip() or _auto_commit_message(porcelain, target_branch)
+    commit_msg = effective_message or _auto_commit_message(porcelain, target_branch)
     committed = False
     if porcelain:
         if dry_run:
@@ -258,18 +281,20 @@ def sync_and_push(
         unpushed_audit = security_audit.run_audit(mode="unpushed", repo_root=root)
         if not unpushed_audit["ok"]:
             raise RuntimeError(f"Unpushed security audit blocked push: {unpushed_audit['findings'][:3]}")
-        if tag:
-            if root == REPO_ROOT.resolve():
+        if effective_tag:
+            if root == REPO_ROOT.resolve() and not dry_run:
                 expected_ver = pre_commit_dev_sync.check_version_parity()
-                if tag.lstrip("v") != expected_ver:
-                    raise RuntimeError(f"Tag {tag!r} does not match manifest version {expected_ver!r}")
+                if effective_tag.lstrip("v") != expected_ver:
+                    raise RuntimeError(
+                        f"Tag {effective_tag!r} does not match manifest version {expected_ver!r}"
+                    )
             if dry_run:
-                steps.append(f"would tag {tag} and git push -u {remote} {target_branch} --tags")
+                steps.append(f"would tag {effective_tag} and git push -u {remote} {target_branch} --tags")
             else:
-                _git(["tag", "-a", tag, "-m", f"Release {tag}"], cwd=root)
+                _git(["tag", "-a", effective_tag, "-m", f"Release {effective_tag}"], cwd=root)
                 _git(["push", "-u", remote, target_branch, "--tags"], cwd=root)
                 pushed = True
-                steps.append(f"pushed {remote}/{target_branch} + tag {tag}")
+                steps.append(f"pushed {remote}/{target_branch} + tag {effective_tag}")
         else:
             if dry_run:
                 steps.append(f"would git push -u {remote} {target_branch}")
@@ -282,6 +307,8 @@ def sync_and_push(
         "ok": True,
         "dry_run": dry_run,
         "branch": target_branch,
+        "bumped_version": bumped_version or None,
+        "tag": effective_tag or None,
         "committed": committed,
         "pushed": pushed,
         "commit_message": commit_msg if (porcelain or committed) else None,
@@ -307,6 +334,8 @@ def main() -> int:
     p_sync.add_argument("-m", "--message", default="", help="Commit message (auto-generated if omitted)")
     p_sync.add_argument("--push", action="store_true", help="Push branch after commit/rebase & pre-push security checks")
     p_sync.add_argument("--tag", default="", help="Optional verified release tag vX.Y.Z to push")
+    p_sync.add_argument("--bump", default="", help="Optional atomic version bump (major|minor|fix|patch|X.Y.Z); auto-tags on --push")
+    p_sync.add_argument("--release-notes", default="", help="Changelog note when --bump is used")
     p_sync.add_argument("--skip-gate", action="store_true", help="Skip repo-specific manifest/Brain reindex (for isolated tests)")
     p_sync.add_argument("--full-gate", action="store_true", help="Run full release_gate.py before commit/push")
     p_sync.add_argument("--dry-run", action="store_true")
@@ -327,6 +356,8 @@ def main() -> int:
                     message=args.message,
                     push=args.push,
                     tag=args.tag,
+                    bump=args.bump,
+                    release_notes=args.release_notes,
                     skip_gate=args.skip_gate,
                     full_gate=args.full_gate,
                     dry_run=args.dry_run,

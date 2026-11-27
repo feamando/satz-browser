@@ -2676,13 +2676,13 @@ export async function sidecarUpdateModelConfig(
     return {
       ok: false,
       roles: {
-        chat: "gemma-4-e4b",
+        chat: "planck3 (web)",
         web_answer: "planck3 (web)",
-        reader: "hertz (reader)",
-        news_planner: "gemma-4-e4b",
-        news_capture: "gemma-4-e4b",
-        news_reader: "hertz (reader)",
-        news_analyzer: "gemma-4-e4b",
+        reader: "planck (reader)",
+        news_planner: "planck3 (web)",
+        news_capture: "planck3 (web)",
+        news_reader: "planck (reader)",
+        news_analyzer: "template",
         mail_classifier: "local",
         brain_encoder: "planck13 (local)",
       },
@@ -2807,9 +2807,9 @@ export async function sidecarPointLocalModel(payload: {
     return {
       ok: false,
       roles: {
-        chat: "gemma-4-e4b",
+        chat: "planck3 (web)",
         web_answer: "planck3 (web)",
-        reader: "hertz (reader)",
+        reader: "planck (reader)",
         mail_classifier: "local",
         brain_encoder: "planck13 (local)",
       },
@@ -2835,9 +2835,9 @@ export async function sidecarRemoveLocalModel(payload: {
     return {
       ok: false,
       roles: {
-        chat: "gemma-4-e4b",
+        chat: "planck3 (web)",
         web_answer: "planck3 (web)",
-        reader: "hertz (reader)",
+        reader: "planck (reader)",
         mail_classifier: "local",
         brain_encoder: "planck13 (local)",
       },
@@ -2862,9 +2862,9 @@ export async function sidecarSaveHfToken(
     return {
       ok: false,
       roles: {
-        chat: "gemma-4-e4b",
+        chat: "planck3 (web)",
         web_answer: "planck3 (web)",
-        reader: "hertz (reader)",
+        reader: "planck (reader)",
         mail_classifier: "local",
         brain_encoder: "planck13 (local)",
       },

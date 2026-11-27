@@ -452,7 +452,7 @@ class TestCloudWebSearchHarness(unittest.TestCase):
             self.assertEqual(health["model_config"]["roles"]["chat"], "gemini:gemini-4-hydrogen (cloud)")
         with mock.patch.dict("os.environ", {"GEMINI_API_KEY": "", "GOOGLE_API_KEY": ""}, clear=False):
             cleared = self.rt.update_model_management_config({"provider_id": "gemini", "clear_key": True})
-        self.assertEqual(cleared["roles"]["chat"], "gemma-4-e4b")
+        self.assertEqual(cleared["roles"]["chat"], "planck3 (web)")
 
     @staticmethod
     def _make_test_data_url(fmt: str = "PNG", color: tuple[int, int, int] = (24, 120, 200)) -> str:

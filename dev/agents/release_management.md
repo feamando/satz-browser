@@ -36,15 +36,15 @@ Run before every local preview bundle or release tag:
   - Windows: `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build_preview.ps1` -> `*_x64-setup.exe`, `*_x64_en-US.msi`, `.sig`
   - macOS: `./scripts/build_preview.sh` -> `.app`, `.dmg`, `.app.tar.gz`, `.sig`
 
-## 5. CI Multi-OS Release (`v*` Tags) & Install Notes
-1. Capture snapshot & changelog entry:
-   `python scripts/dev_brain.py snapshot` and update [CHANGELOG.md](../versions/CHANGELOG.md).
-2. Commit cleanly, tag `vX.Y.Z`, and push (`git push origin main --tags`).
-3. `.github/workflows/release.yml` runs `windows-latest` and `macos-latest` in parallel, caches `python-runtime` by `requirements-runtime.txt` hash, signs updater payloads, and emits a draft GitHub Release with `latest.json`.
-4. Preview notes must state:
+## 5. CI Multi-OS Verification & Auto-Updating Release (`v*` Tags)
+1. `.github/workflows/ci.yml` verifies `npm run build`, `i18n_extract.mjs --check`, `cargo test`, and `security_audit.py` across `windows-latest` and `macos-latest` on `main` pushes.
+2. One-command release bump + gate + tag push:
+   `python scripts/git_sync.py sync --bump fix --release-notes "Summary" --full-gate --push` (updates `package.json`, `package-lock.json`, `Cargo.toml`, `tauri.conf.json`, `CHANGELOG.md`, snapshot, and Brain).
+3. `.github/workflows/release.yml` runs 3 stages: `prepare-release` (`ci-preflight` + single Draft `release_id`) -> `build-tauri` (`windows-latest` + `macos-latest` signed bundles) -> `publish-release` (`verify-updater-manifest` for `windows,darwin`, promote live with `draft=false, prerelease=false, make_latest=true`, and verify `/releases/latest/download/latest.json` HTTP 200).
+4. Release notes include:
    - **macOS (unsigned preview):** drag `satz.app` into `/Applications`, then run once: `xattr -cr /Applications/satz.app`
    - **Windows:** click **More info -> Run anyway** if SmartScreen prompts
 5. Record build sizes/timings in [build_telemetry.jsonl](../analytics/build_telemetry.jsonl) and run `python scripts/dev_brain.py reindex`.
 
 ## 6. Sidecar Shutdown Safety During Self-Update
-In `src-tauri/src/lib.rs`, `src/updater.ts` invokes `prepare_for_update` right before `downloadAndInstall()` + `relaunch()`, setting `SIDE_SHUTTING_DOWN` to halt the watchdog and killing the sidecar tree cleanly so Windows installer replacement never hits file locks. User data in `%APPDATA%\com.satz.browser\` / `~/Library/Application Support/com.satz.browser/` stays untouched.
+In `src-tauri/src/lib.rs`, `src/updater.ts` executes `await update.download(...)`, awaits `invoke("prepare_for_update")` cleanly before `await update.install()` + `relaunch()`, setting `SIDE_SHUTTING_DOWN` and terminating the sidecar process tree so Windows installer replacement never hits file locks. User data in `%APPDATA%\com.satz.browser\` / `~/Library/Application Support/com.satz.browser/` stays untouched.

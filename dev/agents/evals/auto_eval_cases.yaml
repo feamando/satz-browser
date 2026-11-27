@@ -20,3 +20,10 @@ cases:
     Encountered error in step execution: target content not found in the file; the
     Target must exactly mat'
   check_type: manifest_parity
+- id: auto-err-c9267bdc
+  captured_at: '2026-11-27T21:01:12Z'
+  source_event: stop_error
+  description: 'Created At: 2026-11-27T21:57:25+01:00 Completed At: 2026-11-27T21:57:40+01:00
+    Encountered error in step execution: target content not found in the file; the
+    Target must exactly mat'
+  check_type: manifest_parity

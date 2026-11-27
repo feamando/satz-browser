@@ -37,8 +37,8 @@ Runbook: [RELEASE_RUNBOOK.md](../../../docs/RELEASE_RUNBOOK.md) · Protocol: [re
      `./scripts/build_preview.sh` *(downloaded unsigned previews require `xattr -cr /Applications/satz.app` once)*
 5. **Snapshot binaries + publish CI release (`latest.json` updater feed):**
    - Capture binary SHA256s/sizes & manifest snapshot: `..\sgs\.venv\Scripts\python.exe scripts/dev_brain.py snapshot`
-   - Commit clean changes, tag & push: `git tag -a vX.Y.Z -m "Release vX.Y.Z" && git push origin main --tags`
-   - `.github/workflows/release.yml` builds Windows + macOS in parallel, signs updater bundles via `TAURI_SIGNING_PRIVATE_KEY` (`~/.tauri/satz.key` locally, GitHub Secret in CI), and publishes `latest.json` for installed previews while keeping AppData (`satz.db`, Vault, Mail, Brain, downloaded HF LLMs) intact.
+   - Or one-command bump + gate + tag push: `..\sgs\.venv\Scripts\python.exe scripts/git_sync.py sync --bump fix --release-notes "Summary" --full-gate --push` (auto-tags `vX.Y.Z` after `release_gate.py`).
+   - `.github/workflows/ci.yml` checks Windows + macOS builds on `main` pushes; `.github/workflows/release.yml` runs 3 stages (`prepare-release` -> `build-tauri` -> `publish-release`), validates dual-OS `latest.json`, promotes live (`draft=false, prerelease=false, make_latest=true`), and verifies `/releases/latest/download/latest.json` HTTP 200 while keeping AppData (`satz.db`, Vault, Mail, Brain, downloaded HF LLMs) intact.
 6. **Record telemetry & reindex Brain:**
    Append build sizes/durations to `dev/analytics/build_telemetry.jsonl` and run `python scripts/dev_brain.py reindex`.
 

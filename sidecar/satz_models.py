@@ -56,6 +56,9 @@ ALLOWED_CORS_ORIGINS = {
     "http://localhost:1420",
 }
 MAX_ANSWER_SESSIONS = 32
+_PLANCK_NON_GENERATIVE_MODELS = frozenset(
+    {"planck3 (web)", "planck (reader)", "hertz (reader)", "template"}
+)
 
 STATIC_SYSTEM_PROMPT = (
     "You are the local AI assistant inside the Satz browser, connected directly to:\n"
@@ -1141,34 +1144,40 @@ class SatzSidecarRuntime:
             except Exception as ne:
                 self.record_error("news_brain_catchup", ne)
 
+    def resolve_preload_local_llm_id(self) -> str | None:
+        """Returns an explicitly configured local generative LLM id ready on disk, or None."""
+        role_chat = ""
+        try:
+            with self.store_lock:
+                row = self.store.db.execute(
+                    "SELECT value FROM satz_meta WHERE key = 'model_role_chat'"
+                ).fetchone()
+                role_chat = str(row["value"] or "").strip() if row else ""
+        except Exception:
+            role_chat = ""
+        if not role_chat or role_chat in _PLANCK_NON_GENERATIVE_MODELS:
+            return None
+        if self._parse_cloud_model_id(role_chat) is not None:
+            return None
+        if hasattr(self, "local_models") and self.local_models is not None:
+            if self.local_models.has_ready_local_llm(role_chat):
+                return role_chat
+        return None
+
     def start_gemma_preload(self) -> None:
         """
-        Section 3.2 (M9): Preloads Gemma in a background thread right after the HTTP server starts,
-        when local Gemma weights are present. If missing (e.g. fresh macOS install), skips cleanly.
+        Preloads a local generative LLM in a background thread right after HTTP startup
+        ONLY when explicitly configured as `model_role_chat` in `satz_meta`.
         """
         def _preload():
             try:
                 self.wait_for_unlock_quiet(max_wait=4.0)
-                target_id = None
-                if self.local_models.has_ready_local_llm("gemma-4-e4b"):
-                    target_id = "gemma-4-e4b"
-                else:
-                    role_chat = ""
-                    try:
-                        with self.store_lock:
-                            row = self.store.db.execute(
-                                "SELECT value FROM satz_meta WHERE key = 'model_role_chat'"
-                            ).fetchone()
-                            role_chat = str(row["value"] or "").strip() if row else ""
-                    except Exception:
-                        role_chat = ""
-                    if role_chat and role_chat.startswith("local:") and self.local_models.has_ready_local_llm(role_chat):
-                        target_id = role_chat
+                target_id = self.resolve_preload_local_llm_id()
                 if not target_id:
                     if self.gemma_device is None:
                         self.gemma_device = self._detect_gemma_device()
                     print(
-                        "[satz-sidecar] gemma [skip] - local LLM weights not installed; use Settings -> Models or Planck/cloud",
+                        "[satz-sidecar] gemma [skip] - local LLM not configured in active roles; using Planck/cloud",
                         flush=True,
                     )
                     return
@@ -1408,16 +1417,11 @@ class SatzSidecarRuntime:
         return None
 
     def get_doctor(self) -> dict[str, Any]:
-        gemma_dir = self._gemma_dir()
-        gemma_ready = gemma_dir.exists()
-        alt_local = (
-            self.local_models.first_ready_local_llm_id()
-            if hasattr(self, "local_models") and self.local_models is not None and not gemma_ready
-            else None
-        )
-        active_chat_id = "gemma-4-e4b" if (gemma_ready or not alt_local) else alt_local
-        active_chat_dir = gemma_dir if (gemma_ready or not alt_local) else self._gemma_dir(alt_local)
-        chat_ready = gemma_ready or bool(alt_local)
+        with self.store_lock:
+            row_rc = self.store.db.execute(
+                "SELECT value FROM satz_meta WHERE key = 'model_role_chat'"
+            ).fetchone()
+            raw_role_chat = str(row_rc["value"] or "").strip() if row_rc else ""
 
         hertz_ckpt = self._hertz_reader_ckpt()
         planck_ckpt, planck_src = (
@@ -1439,8 +1443,39 @@ class SatzSidecarRuntime:
         web_ckpt = hertz_ckpt if (hertz_ckpt is not None and hertz_ckpt.exists()) else planck_ckpt
         web_ready = bool(web_ckpt is not None and web_ckpt.exists())
 
-        roles = [
-            {
+        active_chat_id = raw_role_chat or "planck3 (web)"
+        cloud_chat = self._parse_cloud_model_id(active_chat_id)
+        if active_chat_id in _PLANCK_NON_GENERATIVE_MODELS:
+            chat_role_entry = {
+                "role": "chat",
+                "model": active_chat_id,
+                "state": "ready" if web_ready else "missing",
+                "device": "cpu",
+                "path": str(web_ckpt or ""),
+                "fix": (
+                    ""
+                    if web_ready
+                    else "Link a Planck/Hertz reader checkpoint in Settings -> Models"
+                ),
+            }
+        elif cloud_chat is not None:
+            c_key, _ = self._resolve_provider_api_key(cloud_chat[0])
+            chat_role_entry = {
+                "role": "chat",
+                "model": active_chat_id,
+                "state": "ready" if c_key else "missing",
+                "device": "cloud",
+                "path": cloud_chat[0],
+                "fix": "" if c_key else f"Add {cloud_chat[0]} API key in Settings -> Models",
+            }
+        else:
+            chat_dir = self._gemma_dir(active_chat_id)
+            chat_ready = (
+                self.local_models.has_ready_local_llm(active_chat_id)
+                if hasattr(self, "local_models") and self.local_models is not None
+                else chat_dir.exists()
+            )
+            chat_role_entry = {
                 "role": "chat",
                 "model": active_chat_id,
                 "state": (
@@ -1449,7 +1484,7 @@ class SatzSidecarRuntime:
                     else ("cpu_only" if gemma_dev == "cpu" else "ready")
                 ),
                 "device": gemma_dev,
-                "path": str(active_chat_dir),
+                "path": str(chat_dir),
                 "fix": (
                     "Download a model from Hugging Face, link a local folder, or add a Cloud API key in Settings -> Models"
                     if not chat_ready
@@ -1459,7 +1494,10 @@ class SatzSidecarRuntime:
                         else ""
                     )
                 ),
-            },
+            }
+
+        roles = [
+            chat_role_entry,
             {
                 "role": "web_answer",
                 "model": "planck3 (web)",
@@ -1982,13 +2020,16 @@ class SatzSidecarRuntime:
             ).fetchall()
             meta = {r["key"]: r["value"] for r in rows}
 
-        role_chat = meta.get("model_role_chat") or "gemma-4-e4b"
-        role_web = meta.get("model_role_web_answer") or "planck3 (web)"
-        role_reader = meta.get("model_role_reader") or "hertz (reader)"
-        role_news_planner = meta.get("model_role_news_planner") or "gemma-4-e4b"
-        role_news_capture = meta.get("model_role_news_capture") or "gemma-4-e4b"
-        role_news_reader = meta.get("model_role_news_reader") or "hertz (reader)"
-        role_news_analyzer = meta.get("model_role_news_analyzer") or role_chat
+        raw_role_chat = str(meta.get("model_role_chat") or "").strip()
+        role_chat = raw_role_chat or "planck3 (web)"
+        role_web = str(meta.get("model_role_web_answer") or "").strip() or "planck3 (web)"
+        default_reader = "hertz (reader)" if self._hertz_reader_ckpt() is not None else "planck (reader)"
+        role_reader = str(meta.get("model_role_reader") or "").strip() or default_reader
+        role_news_planner = str(meta.get("model_role_news_planner") or "").strip() or "planck3 (web)"
+        role_news_capture = str(meta.get("model_role_news_capture") or "").strip() or "planck3 (web)"
+        role_news_reader = str(meta.get("model_role_news_reader") or "").strip() or role_reader
+        default_news_analyzer = "template" if role_chat in _PLANCK_NON_GENERATIVE_MODELS else role_chat
+        role_news_analyzer = str(meta.get("model_role_news_analyzer") or "").strip() or default_news_analyzer
 
         providers_out: list[dict[str, Any]] = []
         for spec in self.CLOUD_PROVIDERS_SPEC:
@@ -2019,15 +2060,22 @@ class SatzSidecarRuntime:
 
         local_snap = self.local_models.get_snapshot() if hasattr(self, "local_models") and self.local_models is not None else None
         effective_chat = role_chat
-        if role_chat == "gemma-4-e4b" and hasattr(self, "local_models") and self.local_models is not None:
-            if not self.local_models.has_ready_local_llm("gemma-4-e4b"):
-                alt_local = self.local_models.first_ready_local_llm_id()
-                if alt_local:
-                    effective_chat = alt_local
-                else:
-                    ready_cloud = self._resolve_ready_cloud_model()
-                    if ready_cloud:
-                        effective_chat = ready_cloud
+        if (
+            (role_chat == "gemma-4-e4b" or role_chat.startswith("local:"))
+            and hasattr(self, "local_models")
+            and self.local_models is not None
+            and not self.local_models.has_ready_local_llm(role_chat)
+        ):
+            alt_local = self.local_models.first_ready_local_llm_id()
+            if alt_local:
+                effective_chat = alt_local
+            else:
+                ready_cloud = self._resolve_ready_cloud_model()
+                effective_chat = ready_cloud or "planck3 (web)"
+        elif not raw_role_chat:
+            ready_cloud = self._resolve_ready_cloud_model()
+            if ready_cloud:
+                effective_chat = ready_cloud
 
         return {
             "ok": True,
@@ -2579,6 +2627,8 @@ class SatzSidecarRuntime:
         all configured cloud providers (`gemini`, `anthropic`, `openai`, `mistral`)
         and local `gemma-4-e4b`.
         """
+        if model_id in _PLANCK_NON_GENERATIVE_MODELS or model_id == "heuristic":
+            raise RuntimeError(f"Model '{model_id}' is non-generative.")
         msgs = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -2647,6 +2697,8 @@ class SatzSidecarRuntime:
         `{'phase': 'heartbeat'}` events and ending with `{'__full_raw': str}`.
         Uses existing SSE cloud clients or local Gemma `TextIteratorStreamer`.
         """
+        if model_id in _PLANCK_NON_GENERATIVE_MODELS or model_id == "heuristic":
+            raise RuntimeError(f"Model '{model_id}' is non-generative.")
         msgs = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -2792,6 +2844,8 @@ class SatzSidecarRuntime:
 
     # ── Lazy Model Loaders ───────────────────────────────────────────────
     def ensure_gemma(self, model_id: str | None = None):
+        if model_id and (model_id in _PLANCK_NON_GENERATIVE_MODELS or model_id == "heuristic"):
+            raise RuntimeError(f"Model '{model_id}' is non-generative and cannot be loaded as Gemma.")
         target_dir = self._gemma_dir(model_id)
         if self.gemma_model is not None and (
             self._loaded_local_llm_dir is None
@@ -4900,9 +4954,10 @@ class SatzSidecarRuntime:
             url_to_source_id[url] = sid
             url_to_idx[url] = idx
 
-            text, extra_lines = self.get_source_text(sid, url, title)
-            if not text and src.get("text"):
-                text = str(src["text"])
+            text = str(src.get("text") or "")
+            extra_lines: list[str] = []
+            if not text:
+                text, extra_lines = self.get_source_text(sid, url, title)
             if not text:
                 continue
             cands = span_candidates(question, text, at, url=url, extra_lines=extra_lines)
@@ -4939,9 +4994,10 @@ class SatzSidecarRuntime:
 
         cite_str = ", ".join(cites) if cites else "[1]"
         context_snip = fams[0].get("context", "") if fams else ""
-        answer_str = f"{val} (according to {cite_str}, confidence {conf:.1f}/10 {band_label})."
+        answer_str = f"{val} (according to {cite_str})."
         if context_snip:
             answer_str += f'\n"{context_snip}"'
+        answer_str += f"\n\nconfidence: {conf:.1f}/10 ({band_label})"
 
         return {
             "answer": answer_str,
@@ -5588,6 +5644,125 @@ class SatzSidecarRuntime:
         condensed = base + " ; ".join(t.replace("\n", " ")[:90] for t in turns[-6:])
         return condensed[:600]
 
+    def _answer_with_planck_stream(
+        self,
+        *,
+        user_msg: str,
+        resolved_search_q: str,
+        conversation_id: str,
+        hydrated_sources: list[dict[str, Any]],
+        cited_web_sources: list[dict[str, str]],
+        brain_sources: list[dict[str, Any]],
+        active_images: list[dict[str, Any]],
+        should_run_web: bool,
+    ) -> str:
+        """Handles non-Settings chat turns on shipped Planck without loading Gemma."""
+        if active_images:
+            return (
+                "Planck is text-only and cannot analyze attached images. "
+                "Add Gemma 4, a multimodal local model, or a Cloud API key in Settings -> Models to analyze images."
+            )
+
+        if hydrated_sources and not should_run_web:
+            if user_msg and is_factual_question(user_msg):
+                try:
+                    reader_id = "hertz (reader)" if self._hertz_reader_ckpt() is not None else "planck (reader)"
+                    read_res = self.run_read(
+                        reader_id,
+                        user_msg,
+                        [
+                            {
+                                "id": hs.get("id"),
+                                "url": hs.get("url"),
+                                "title": hs.get("title"),
+                                "text": hs.get("full_text") or hs.get("text"),
+                            }
+                            for hs in hydrated_sources
+                        ],
+                    )
+                    read_ans = str(read_res.get("answer") or "").strip()
+                    if read_ans and not read_ans.lower().startswith(
+                        ("no confident answer", "could not find", "hertz reads facts", "planck reads facts", "no checked sources")
+                    ):
+                        return read_ans
+                except Exception as exc:
+                    self.record_error("planck_chat_read", exc)
+
+            try:
+                from src.planck3.candidates import rank_passages
+
+                url_to_idx = {
+                    str(hs.get("url") or hs.get("id") or ""): i
+                    for i, hs in enumerate(hydrated_sources, 1)
+                }
+                docs_in = [
+                    {
+                        "url": str(hs.get("url") or hs.get("id") or f"source-{i}"),
+                        "domain": str(hs.get("domain") or ""),
+                        "title": str(hs.get("title") or ""),
+                        "trust": 0.7,
+                        "text": str(hs.get("text") or ""),
+                    }
+                    for i, hs in enumerate(hydrated_sources, 1)
+                    if str(hs.get("text") or "").strip()
+                ]
+                ranked = rank_passages(user_msg or resolved_search_q, docs_in)[:4] if docs_in else []
+                lines: list[str] = []
+                for p in ranked:
+                    snip = re.sub(r"\s+", " ", str(p.get("text") or "")).strip()
+                    if not snip:
+                        continue
+                    idx_ref = url_to_idx.get(str(p.get("url") or ""), 1)
+                    lines.append(f"- {snip[:260]} [{idx_ref}]")
+                if lines:
+                    return "\n".join(lines)
+            except Exception:
+                pass
+
+            lead_lines = []
+            for i, hs in enumerate(hydrated_sources[:3], 1):
+                txt = re.sub(r"\s+", " ", str(hs.get("text") or "")).strip()
+                if txt:
+                    title_s = str(hs.get("title") or hs.get("domain") or f"Source {i}").strip()
+                    lead_lines.append(f"- **{title_s}** [{i}]: {txt[:260]}")
+            if lead_lines:
+                return "\n".join(lead_lines)
+
+        if user_msg and (should_run_web or not hydrated_sources):
+            try:
+                ans = self.run_answer(
+                    resolved_search_q or user_msg,
+                    session_id=conversation_id or "chat-web",
+                )
+                seen_urls = {str(c.get("url") or "") for c in cited_web_sources}
+                for ws in ans.get("sources") or []:
+                    wu = str(ws.get("url") or "")
+                    if wu and wu not in seen_urls:
+                        seen_urls.add(wu)
+                        cited_web_sources.append(
+                            {"url": wu, "title": str(ws.get("title") or wu)}
+                        )
+                ans_txt = str(ans.get("answer") or "").strip()
+                band = str(ans.get("band") or "").strip()
+                if ans_txt:
+                    return f"{ans_txt}\n\nconfidence: {band}" if band else ans_txt
+            except Exception as exc:
+                self.record_error("planck_chat_answer", exc)
+
+        if brain_sources:
+            b_lines = []
+            for i, b in enumerate(brain_sources[:3], 1):
+                b_name = str(b.get("name") or f"Memory {i}").strip()
+                b_body = re.sub(r"\s+", " ", str(b.get("summary") or b.get("body") or "")).strip()
+                b_lines.append(f"- **{b_name}** [B{i}]: {b_body[:220]}")
+            if b_lines:
+                return "\n".join(b_lines)
+
+        return (
+            "Planck found no matching answer in open tabs or Brain memory. "
+            "Enable [+ web] to search the web, or add Gemma / a Cloud API key in Settings -> Models."
+        )
+
     def stream_chat(
         self,
         messages: list[dict[str, Any]],
@@ -5595,7 +5770,7 @@ class SatzSidecarRuntime:
         web_enabled: bool = False,
         conversation_summary: str = "",
         mail_enabled: bool = False,
-        model_id: str = "gemma-4-e4b",
+        model_id: str = "",
         conversation_id: str = "",
         images: list[dict[str, Any]] | None = None,
         open_tabs: list[dict[str, Any]] | None = None,
@@ -5609,6 +5784,14 @@ class SatzSidecarRuntime:
         from src.planck3.web import domain_of
 
         t0 = time.perf_counter()
+        if not (model_id or "").strip():
+            if self.gemma_model is not None:
+                model_id = "gemma-4-e4b"
+            else:
+                try:
+                    model_id = str(self.get_model_management_config()["roles"]["effective_chat"] or "planck3 (web)")
+                except Exception:
+                    model_id = "planck3 (web)"
         norm_origin = str(origin or "").strip().lower()
         is_settings_origin = norm_origin == "settings"
         is_news_settings_origin = norm_origin == "news_settings"
@@ -5632,7 +5815,7 @@ class SatzSidecarRuntime:
                 user_msg, staged_files = extract_and_stage_inline_secrets(self, user_msg, staged_files)
             route_decision = {
                 "query_type": "news_settings" if is_news_settings_origin else "settings",
-                "model": str(model_id or "gemma-4-e4b"),
+                "model": str(model_id or "planck3 (web)"),
                 "web_enabled": bool(web_enabled),
                 "mail_enabled": False,
                 "escalated": False,
@@ -5647,7 +5830,7 @@ class SatzSidecarRuntime:
                 sources=sources,
                 user_overrode_model=user_overrode_model,
             )
-        effective_model_id = str(route_decision["model"] or model_id or "gemma-4-e4b")
+        effective_model_id = str(route_decision["model"] or model_id or "planck3 (web)")
         effective_web_enabled = bool(route_decision["web_enabled"])
         effective_mail_enabled = bool(route_decision["mail_enabled"])
         if route_decision.get("escalated"):
@@ -6070,8 +6253,36 @@ class SatzSidecarRuntime:
 
         effective_local_model_id = model_id
         local_settings_skip = False
+        planck_handled = False
+        is_planck_mode = effective_local_model_id in _PLANCK_NON_GENERATIVE_MODELS
         is_real_ensure = getattr(self.ensure_gemma, "__func__", None) is SatzSidecarRuntime.ensure_gemma
-        if cloud_parsed is None:
+        if cloud_parsed is None and is_planck_mode:
+            if is_any_settings_origin:
+                local_settings_skip = True
+                in_brain_tag = True
+            else:
+                yield {
+                    "status": f"answering with {effective_local_model_id}...",
+                    "phase": "generating",
+                }
+                planck_ans = self._answer_with_planck_stream(
+                    user_msg=user_msg,
+                    resolved_search_q=resolved_search_q,
+                    conversation_id=conversation_id,
+                    hydrated_sources=hydrated_sources,
+                    cited_web_sources=cited_web_sources,
+                    brain_sources=brain_sources,
+                    active_images=active_images,
+                    should_run_web=bool(should_run_web),
+                )
+                full_raw = planck_ans
+                in_brain_tag = True
+                if planck_ans:
+                    yield {"status": "streaming response tokens...", "phase": "streaming"}
+                    yield {"delta": planck_ans}
+                    emitted_len = len(planck_ans)
+                planck_handled = True
+        elif cloud_parsed is None:
             target_llm_dir = self._gemma_dir(effective_local_model_id)
             loaded_llm_dir = getattr(self, "_loaded_local_llm_dir", None)
             needs_disk_check = self.gemma_model is None or (
@@ -6108,7 +6319,7 @@ class SatzSidecarRuntime:
                             "add a Cloud API key, or click Use Planck instead."
                         )
 
-        if local_settings_skip:
+        if local_settings_skip or planck_handled:
             pass
         elif cloud_parsed is not None:
             prov_id, prov_slug = cloud_parsed
@@ -6429,7 +6640,18 @@ class SatzSidecarRuntime:
                         user_msg=user_msg,
                         staged_files=staged_files,
                     )
-                if fb_cards:
+                fb_text = str(getattr(session_harness, "fallback_reply_text", "") or "").strip()
+                if fb_text:
+                    if not (cleaned_final or "").strip():
+                        cleaned_final = fb_text
+                        yield {"delta": fb_text}
+                        emitted_len += len(fb_text)
+                    else:
+                        add_fb = f"\n\n{fb_text}"
+                        cleaned_final = f"{cleaned_final.rstrip()}{add_fb}"
+                        yield {"delta": add_fb}
+                        emitted_len += len(add_fb)
+                elif fb_cards:
                     card0 = fb_cards[0]
                     default_sub = (
                         "Review the interactive card below to update your News Settings."
@@ -7924,7 +8146,7 @@ class SatzSidecarRuntime:
         *,
         query_type: str = "",
         prompt: str = "",
-        model_id: str = "gemma-4-e4b",
+        model_id: str = "planck3 (web)",
         source_count: int = 0,
         chars_cut: int = 0,
         outcome_signal: str = "success",
@@ -7952,7 +8174,7 @@ class SatzSidecarRuntime:
         qtype = str(query_type or "").strip() or self.classify_query_type(
             prompt, web_enabled=web_enabled, mail_enabled=mail_enabled
         )
-        mod = str(model_id or "gemma-4-e4b").strip() or "gemma-4-e4b"
+        mod = str(model_id or "planck3 (web)").strip() or "planck3 (web)"
         tgt = str(target_model or "").strip()
         preview = re.sub(r"\s+", " ", str(prompt or "").strip())[:120]
         now_ts = time.time()
@@ -8181,7 +8403,7 @@ class SatzSidecarRuntime:
         self,
         *,
         prompt: str,
-        selected_model: str = "gemma-4-e4b",
+        selected_model: str = "planck3 (web)",
         web_enabled: bool = False,
         mail_enabled: bool = False,
         sources: list[dict[str, Any]] | None = None,
@@ -8192,7 +8414,7 @@ class SatzSidecarRuntime:
         policy = self.get_routing_policy()
         rule = (policy.get("by_query_type") or {}).get(qtype)
 
-        eff_model = selected_model or "gemma-4-e4b"
+        eff_model = selected_model or "planck3 (web)"
         eff_web = bool(web_enabled)
         eff_mail = bool(mail_enabled)
         escalated = False
@@ -8234,7 +8456,7 @@ class SatzSidecarRuntime:
         self,
         raw: str,
         web_enabled: bool = False,
-        selected_model: str = "gemma-4-e4b",
+        selected_model: str = "planck3 (web)",
     ) -> list[dict[str, Any]]:
         """
         Section 7 (M21):
@@ -8261,7 +8483,7 @@ class SatzSidecarRuntime:
             if trimmed
             else {"model": selected_model, "web_enabled": bool(web_enabled), "mail_enabled": False, "escalated": False, "reason": ""}
         )
-        eff_model = str(learned_route.get("model") or selected_model or "gemma-4-e4b")
+        eff_model = str(learned_route.get("model") or selected_model or "planck3 (web)")
         eff_web = bool(learned_route.get("web_enabled", web_enabled))
         eff_mail = bool(learned_route.get("mail_enabled", False))
         eff_escalated = bool(learned_route.get("escalated", False))
@@ -11475,7 +11697,7 @@ def make_sidecar_server(
                 res = runtime.record_harness_signal(
                     query_type=str(data.get("query_type") or ""),
                     prompt=str(data.get("prompt") or ""),
-                    model_id=str(data.get("model_id") or data.get("model") or "gemma-4-e4b"),
+                    model_id=str(data.get("model_id") or data.get("model") or "planck3 (web)"),
                     source_count=int(data.get("source_count") or 0),
                     chars_cut=int(data.get("chars_cut") or 0),
                     outcome_signal=str(data.get("outcome_signal") or "success"),
@@ -12369,7 +12591,7 @@ def make_sidecar_server(
                 mail_enabled = bool(data.get("mail", False))
                 drives_enabled = bool(data.get("drives", False))
                 conversation_summary = str(data.get("summary") or "")
-                model_id = str(data.get("model") or "gemma-4-e4b")
+                model_id = str(data.get("model") or "planck3 (web)")
                 conversation_id = str(data.get("conversation_id") or "")
                 top_images = data.get("images") or None
                 open_tabs = data.get("open_tabs") if isinstance(data.get("open_tabs"), list) else None
@@ -12489,7 +12711,7 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8020)
     parser.add_argument("--parent-pid", type=int, default=0)
-    parser.add_argument("--preload-gemma", action="store_true", default=True)
+    parser.add_argument("--preload-gemma", action="store_true", default=False)
     parser.add_argument("--no-preload-gemma", action="store_false", dest="preload_gemma")
     parser.add_argument("--bookmark-interval-minutes", type=float, default=30.0)
     parser.add_argument("--news-interval-minutes", type=float, default=60.0)
@@ -12514,21 +12736,7 @@ def main():
     if args.preload_gemma:
         try:
             runtime.wait_for_unlock_quiet(max_wait=4.0)
-            target_id = None
-            if runtime.local_models.has_ready_local_llm("gemma-4-e4b"):
-                target_id = "gemma-4-e4b"
-            else:
-                role_chat = ""
-                try:
-                    with runtime.store_lock:
-                        row = runtime.store.db.execute(
-                            "SELECT value FROM satz_meta WHERE key = 'model_role_chat'"
-                        ).fetchone()
-                        role_chat = str(row["value"] or "").strip() if row else ""
-                except Exception:
-                    role_chat = ""
-                if role_chat and role_chat.startswith("local:") and runtime.local_models.has_ready_local_llm(role_chat):
-                    target_id = role_chat
+            target_id = runtime.resolve_preload_local_llm_id()
             if target_id:
                 runtime.ensure_gemma(target_id)
                 print(f"[satz-sidecar] {target_id} [warm] - preload complete", flush=True)
@@ -12536,7 +12744,7 @@ def main():
                 if runtime.gemma_device is None:
                     runtime.gemma_device = runtime._detect_gemma_device()
                 print(
-                    "[satz-sidecar] gemma [skip] - local LLM weights not installed; use Settings -> Models or Planck/cloud",
+                    "[satz-sidecar] gemma [skip] - local LLM not configured in active roles; using Planck/cloud",
                     flush=True,
                 )
         except Exception as e:

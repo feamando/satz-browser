@@ -32,16 +32,12 @@ pub struct SatzSettings {
     pub gemma_path: String,
     pub port: u16,
     pub max_live_tabs: usize,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub preload_gemma: bool,
     #[serde(default = "default_bookmark_interval_minutes")]
     pub bookmark_interval_minutes: u64,
     #[serde(default)]
     pub repo_root: Option<String>,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn default_bookmark_interval_minutes() -> u64 {
@@ -66,7 +62,7 @@ impl Default for SatzSettings {
             gemma_path: "models/gemma-4-e4b-it".to_string(),
             port: 8020,
             max_live_tabs: 8,
-            preload_gemma: true,
+            preload_gemma: false,
             bookmark_interval_minutes: 30,
             repo_root: None,
         }
@@ -1222,7 +1218,7 @@ mod tests {
         let def = SatzSettings::default();
         assert_eq!(def.port, 8020);
         assert_eq!(def.max_live_tabs, 8);
-        assert!(def.preload_gemma);
+        assert!(!def.preload_gemma);
         #[cfg(windows)]
         {
             assert_eq!(def.sgs_root, "..\\sgs");

@@ -1,0 +1,109 @@
+{
+  "version": "0.5.1",
+  "captured_at": "2026-11-27T22:51:04Z",
+  "git": {
+    "branch": "main",
+    "short_sha": "8cb4f64"
+  },
+  "manifests": {
+    "package_json": "0.5.1",
+    "tauri_conf": "0.5.1",
+    "cargo_toml": "0.5.1"
+  },
+  "requirements_runtime_sha256_16": "150186ad68a5c04d",
+  "shipped_planck_files": [
+    {
+      "path": "sidecar/models/planck/planck13/manifest.json",
+      "bytes": 248
+    },
+    {
+      "path": "sidecar/models/planck/planck13/model.pt.part000",
+      "bytes": 71303168
+    },
+    {
+      "path": "sidecar/models/planck/planck13/model.pt.part001",
+      "bytes": 66543030
+    },
+    {
+      "path": "sidecar/models/planck/tokenizer.model",
+      "bytes": 709375
+    },
+    {
+      "path": "sidecar/models/planck/xreader_planck/manifest.json",
+      "bytes": 248
+    },
+    {
+      "path": "sidecar/models/planck/xreader_planck/model.pt.part000",
+      "bytes": 71303168
+    },
+    {
+      "path": "sidecar/models/planck/xreader_planck/model.pt.part001",
+      "bytes": 67586090
+    }
+  ],
+  "release_binaries": [
+    {
+      "path": "src-tauri/target/release/satz-browser.exe",
+      "bytes": 16175616,
+      "mtime": "2026-11-27T10:12:56Z",
+      "sha256": "e4ce38e87d74adf0e831920b68dc218ccb10f1933248dd8ca308ec0a42dcb358"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/msi/satz_0.5.0_x64_en-US.msi",
+      "bytes": 543969712,
+      "mtime": "2026-11-26T16:13:03Z",
+      "sha256": "ad2c054a2bddff10ed0065c06b7198bc18224077a20978bd58bdc7299209ca31"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/msi/satz_0.5.0_x64_en-US.msi.sig",
+      "bytes": 412,
+      "mtime": "2026-11-26T16:26:16Z",
+      "sha256": "58af669e34fce5b8ab86a129a489673be060e6c52222400308ca46960317faf0",
+      "sig_preview": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTa2JZa01PeURUL1RBcFBPcGgwNzY3QmswTGVIdnlndzRpSStBaThzbHlDTG9FUVBqSVZUN2tFNHo5ZEpFbHZ4Nk5EaHRXU2kvM2xaRHp3U1o5REdRZURDWkpiV0dxamdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NzEwMzc1CWZpbGU6c2F0el8wLjUuMF94NjRfZW4tVVMubXNpCkFKcklMLzBTTjNjcmlVcXh4U3pVNy82ampoSXFuOHM2aFN4TUFnTy9NeXJpbmNOT2c2ZFFCZjdxbEVua1lBZWRyTGNoVDNEbDFSbHlrTFVxaDM5R0N3PT0K"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/nsis/satz_0.5.0_x64-setup.exe",
+      "bytes": 421595808,
+      "mtime": "2026-11-26T16:26:15Z",
+      "sha256": "4806ff4ff2a1c88f10447dd9f81b6a962ad934441a4092581d1f0d5130b2fd3e"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/nsis/satz_0.5.0_x64-setup.exe.sig",
+      "bytes": 412,
+      "mtime": "2026-11-26T16:26:16Z",
+      "sha256": "53b5470bbec617282fb58573097b3cbdb101e0ffefc2bab23c5d727335430c86",
+      "sig_preview": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTa2JZa01PeURUL1VSUjNjVGhaM05GbDhxekhGTk5OZmE2TWVmc0UvNVZOS2x3TkxUeGNyNU1DMm0yUlFhNlh2ai9jRFFtQXB4SUJwOVhjam1QSGNHUDBUYlhsUWhwK0FrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NzEwMzc2CWZpbGU6c2F0el8wLjUuMF94NjQtc2V0dXAuZXhlCnRxbDBMT2VaaHRDSGVIYTVZVzFpWGxWSkJpNGRxZUprTERZZVEvUTZBKzRsMklqVDNGRFJiSWVXZjJNbHorUlJ0d2c3WkZrT1VsY2crdmNmZGgwcUFnPT0K"
+    }
+  ],
+  "dev_brain_monitor": {
+    "ok": false,
+    "db_path": "dev/brain/brain_index.sqlite",
+    "encoder": "planck",
+    "last_reindex_ts": "2026-11-27T22:50:44Z",
+    "disk_files": 105,
+    "nodes": 105,
+    "fts_nodes": 105,
+    "embeddings": 105,
+    "edges": 201,
+    "orphan_nodes": 15,
+    "stale_count": 1,
+    "stale_files": [
+      "dev/versions/CHANGELOG.md"
+    ],
+    "extra_files": [],
+    "broken_edge_count": 0,
+    "broken_links": [],
+    "registry_and_brain_md_ok": true,
+    "latest_eval": {
+      "run_id": "eval-1795771787",
+      "ran_at": "2026-11-27T09:29:47Z",
+      "encoder": "planck",
+      "hit_at_1": 0.8824,
+      "recall_at_3": 0.9412,
+      "recall_at_5": 1.0,
+      "mrr": 0.9235,
+      "term_accuracy": 1.0,
+      "passed": 1
+    }
+  }
+}

@@ -149,7 +149,126 @@ def maybe_fallback_settings_cards(
                 REGISTRY.dispatch("settings_prepare_language_translation", {"language": raw_target}, runtime=runtime, session=session)
             return list(getattr(session, "ui_cards", []) or [])
 
-    return []
+    low = q.lower()
+
+    m_unlock_prof = re.search(
+        r"\b(?:unlock|switch\s+to|open|load)\s+(?:my\s+)?profile(?:\s+(?:called|named))?\s+['\"]?([A-Za-z0-9_.\-]{2,40})['\"]?",
+        q,
+        re.IGNORECASE,
+    )
+    if m_unlock_prof:
+        pname = m_unlock_prof.group(1)
+        res = REGISTRY.dispatch(
+            "settings_prepare_unlock_or_switch_profile",
+            {"profile_id": pname},
+            runtime=runtime,
+            session=session,
+        )
+        cards = list(getattr(session, "ui_cards", []) or [])
+        if not cards and res.get("error") and session is not None:
+            session.fallback_reply_text = str(res["error"])
+        return cards
+
+    if re.search(r"\b(profiles?|vault)\b", low) and not re.search(r"\b(api\s*key|model|drive|mail|news)\b", low):
+        prof_res = REGISTRY.dispatch("settings_list_profiles", {}, runtime=runtime, session=session)
+        profiles = prof_res.get("profiles") or []
+        active_id = str(prof_res.get("active_profile_id") or "")
+        unlocked = bool(prof_res.get("unlocked"))
+        if session is not None:
+            if not profiles:
+                REGISTRY.dispatch("settings_prepare_create_profile", {"profile_name": "default"}, runtime=runtime, session=session)
+                return list(getattr(session, "ui_cards", []) or [])
+            lines = [
+                f"- **{p.get('name') or p.get('id')}** (`{p.get('id')}`)"
+                + (" [unlocked]" if unlocked and p.get("id") == active_id else "")
+                for p in profiles[:10]
+            ]
+            session.fallback_reply_text = (
+                "Existing profiles:\n"
+                + "\n".join(lines)
+                + "\n\nSay **create profile <name>** or **unlock profile <name>** to open a card."
+            )
+        return list(getattr(session, "ui_cards", []) or [])
+
+    if re.search(r"\b(model|models|gemma|planck|hertz|llm|hugging\s*face|local\s+model)\b", low):
+        m_res = REGISTRY.dispatch("settings_get_model_roles", {}, runtime=runtime, session=session)
+        roles = m_res.get("roles") or {}
+        provs = [p for p in (m_res.get("cloud_providers") or []) if p.get("configured")]
+        prov_txt = (
+            ", ".join(f"{p.get('id')} ({len(p.get('models') or [])} models)" for p in provs)
+            if provs
+            else "none configured"
+        )
+        if session is not None:
+            session.fallback_reply_text = (
+                "Current model routing:\n"
+                f"- Chat: `{roles.get('chat', 'planck3 (web)')}` (effective: `{roles.get('effective_chat', roles.get('chat', 'planck3 (web)'))}`)\n"
+                f"- Web answers: `{roles.get('web_answer', 'planck3 (web)')}`\n"
+                f"- Reader: `{roles.get('reader', 'planck (reader)')}`\n"
+                f"- News analyzer: `{roles.get('news_analyzer', 'template')}`\n"
+                f"- Cloud providers: {prov_txt}\n\n"
+                "Open **Settings -> Models** to download/link Gemma or another local model, or say **add gemini api key** to configure cloud chat."
+            )
+        return list(getattr(session, "ui_cards", []) or [])
+
+    if re.search(r"\b(drive|drives|google\s+drive|onedrive)\b", low):
+        d_res = REGISTRY.dispatch("settings_get_summary", {"section": "drives"}, runtime=runtime, session=session)
+        drv = d_res.get("drives") or {}
+        if session is not None:
+            session.fallback_reply_text = (
+                "Cloud Drives status:\n"
+                f"- Vault unlocked: {'yes' if drv.get('unlocked') else 'no'}\n"
+                f"- Google Drive ready: {'yes' if drv.get('google_drive_ready') else 'no'}"
+                + (f" ({drv.get('google_email')})" if drv.get("google_email") else "")
+                + "\n"
+                f"- OneDrive ready: {'yes' if drv.get('onedrive_signed_in') else 'no'}"
+                + (f" ({drv.get('onedrive_email')})" if drv.get("onedrive_email") else "")
+                + f"\n- Indexed files: {drv.get('indexed_count', 0)} / {drv.get('total_files', 0)}\n\n"
+                "To connect Google Drive, say **connect google** or attach your `client_secret_*.json` file. For OneDrive, open the **Drives** tab in the left rail or **Settings -> Cloud Drives**."
+            )
+        return list(getattr(session, "ui_cards", []) or [])
+
+    if re.search(r"\b(provider|providers|search\s+api)\b", low):
+        p_res = REGISTRY.dispatch("settings_list_providers", {}, runtime=runtime, session=session)
+        cats = p_res.get("categories") or []
+        if session is not None:
+            cat_lines = []
+            for c in cats[:6]:
+                ready_p = [str(p.get("display_name") or p.get("id")) for p in (c.get("providers") or []) if p.get("auth_ready")]
+                total_p = len(c.get("providers") or [])
+                cat_lines.append(
+                    f"- **{c.get('label') or c.get('id')}**: {total_p} provider(s)"
+                    + (f" (ready: {', '.join(ready_p)})" if ready_p else "")
+                )
+            session.fallback_reply_text = (
+                "Action Providers:\n"
+                + ("\n".join(cat_lines) if cat_lines else "- No provider categories found.")
+                + "\n\nOpen **Settings -> Action Providers** to add credentials or infer a site provider."
+            )
+        return list(getattr(session, "ui_cards", []) or [])
+
+    # Safe catch-all Settings summary + command guide so Planck-only Settings chat never returns empty output
+    sum_res = REGISTRY.dispatch("settings_get_summary", {"section": "all"}, runtime=runtime, session=session)
+    prof_info = sum_res.get("profiles") or {}
+    models_info = (sum_res.get("models") or {}).get("roles") or {}
+    mail_info = sum_res.get("mail") or {}
+    oauth_info = sum_res.get("google_oauth") or {}
+    if session is not None:
+        session.fallback_reply_text = (
+            "Satz Settings (Planck local mode):\n"
+            f"- Profile unlocked: {'yes' if prof_info.get('unlocked') else 'no'}"
+            + (f" (`{prof_info.get('active_profile_id')}`)" if prof_info.get("active_profile_id") else "")
+            + "\n"
+            f"- Chat / Web model: `{models_info.get('effective_chat') or models_info.get('chat') or 'planck3 (web)'}`\n"
+            f"- Mail accounts: {len(mail_info.get('accounts') or [])}\n"
+            f"- Google OAuth: {'signed in' if oauth_info.get('signed_in') else ('configured' if oauth_info.get('configured') else 'not configured')}\n\n"
+            "Try commands like:\n"
+            "- **create profile <name>** or **unlock profile <name>**\n"
+            "- **add gemini api key** (or openai / anthropic / mistral)\n"
+            "- **add mail account** or **connect google**\n"
+            "- **check models**, **check drives**, or **translate interface to German**"
+        )
+    return list(getattr(session, "ui_cards", []) or [])
 
 
 def maybe_fallback_news_settings_cards(

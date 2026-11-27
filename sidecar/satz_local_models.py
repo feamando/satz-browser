@@ -397,12 +397,15 @@ class LocalModelManager:
     def resolve_chat_llm_dir(self, model_id: str | None = None) -> Path:
         mid = (model_id or "").strip()
         if mid and mid != "gemma-4-e4b":
+            if mid in ("planck3 (web)", "planck (reader)", "hertz (reader)", "template", "heuristic"):
+                return self.models_dir / "__non_llm__"
             custom = self.get_custom_llm_by_id(mid)
             if custom and custom["path"]:
                 return Path(custom["path"])
             cand_p = Path(mid).expanduser()
-            if cand_p.is_dir():
+            if (os.sep in mid or "/" in mid or cand_p.is_absolute()) and cand_p.is_dir():
                 return cand_p
+            return self.models_dir / "__missing_custom_llm__"
 
         with self.lock:
             ov = str((self._data.get("overrides") or {}).get("chat_llm_path") or "").strip()

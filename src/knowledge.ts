@@ -742,7 +742,7 @@ function renderAppLanguageSectionHtml(): string {
       : Math.max(1, totalKeys);
   const pct = Math.min(100, Math.max(0, Math.round((doneCount / goalCount) * 100)));
 
-  const modelId = st?.model_info?.model_id || state.modelConfig?.roles?.chat || "gemma-4-e4b";
+  const modelId = st?.model_info?.model_id || state.modelConfig?.roles?.chat || "planck3 (web)";
   const privacyLine = st?.model_info
     ? st.model_info.local_only
       ? t("i18n.privacy_local", { model: modelId })
@@ -994,13 +994,15 @@ export function renderKnowledgeView(
     (p) => p.configured || (p.models && p.models.length > 0)
   );
   const discoveredCloudModels = cloudProviders.flatMap((p) => p.models ?? []);
-  const roleChat = modelCfg?.roles?.chat ?? state.selectedModel ?? "gemma-4-e4b";
+  const roleChat = modelCfg?.roles?.chat ?? state.selectedModel ?? "planck3 (web)";
   const roleWeb = modelCfg?.roles?.web_answer ?? "planck3 (web)";
   const roleReader = modelCfg?.roles?.reader ?? "hertz (reader)";
-  const roleNewsPlanner = modelCfg?.roles?.news_planner ?? "gemma-4-e4b";
-  const roleNewsCapture = modelCfg?.roles?.news_capture ?? "gemma-4-e4b";
+  const roleNewsPlanner = modelCfg?.roles?.news_planner ?? "planck3 (web)";
+  const roleNewsCapture = modelCfg?.roles?.news_capture ?? "planck3 (web)";
   const roleNewsReader = modelCfg?.roles?.news_reader ?? "hertz (reader)";
-  const roleNewsAnalyzer = modelCfg?.roles?.news_analyzer ?? roleChat;
+  const roleNewsAnalyzer =
+    modelCfg?.roles?.news_analyzer ??
+    (roleChat === "planck3 (web)" ? "template" : roleChat);
   const cloudSummaryBadge =
     configuredCloudProviders.length > 0
       ? t("settings.cloud_summary", { items: configuredCloudProviders.map((p) => `${p.id} (${(p.models ?? []).length})`).join(" · ") })
@@ -1041,7 +1043,7 @@ export function renderKnowledgeView(
       )
       .join("");
   const gemmaOptionLabel = gemmaReady
-    ? "gemma-4-e4b (local · default)"
+    ? "gemma-4-e4b (local)"
     : "gemma-4-e4b (local · not installed)";
   const renderCloudOptionsHtml = (selectedRoleVal: string) =>
     discoveredCloudModels
@@ -1074,6 +1076,7 @@ export function renderKnowledgeView(
                 <div class="kb-form-field">
                   <label for="kb-role-chat-select">${escapeHtml(t("settings.role_chat"))}</label>
                   <select id="kb-role-chat-select" class="select">
+                    <option value="planck3 (web)" ${roleChat === "planck3 (web)" ? "selected" : ""}>planck3 (local · default)</option>
                     <option value="gemma-4-e4b" ${roleChat === "gemma-4-e4b" ? "selected" : ""}>${escapeHtml(gemmaOptionLabel)}</option>
                     ${renderLocalLlmOptionsHtml(roleChat)}
                     ${renderCloudOptionsHtml(roleChat)}
@@ -1101,6 +1104,7 @@ export function renderKnowledgeView(
                 <div class="kb-form-field">
                   <label for="kb-role-news-planner-select">${escapeHtml(t("settings.role_news_planner"))}</label>
                   <select id="kb-role-news-planner-select" class="select">
+                    <option value="planck3 (web)" ${roleNewsPlanner === "planck3 (web)" ? "selected" : ""}>planck3 (local rule planner)</option>
                     <option value="gemma-4-e4b" ${roleNewsPlanner === "gemma-4-e4b" ? "selected" : ""}>${escapeHtml(gemmaOptionLabel)}</option>
                     ${renderLocalLlmOptionsHtml(roleNewsPlanner)}
                     ${renderCloudOptionsHtml(roleNewsPlanner)}
@@ -1109,6 +1113,7 @@ export function renderKnowledgeView(
                 <div class="kb-form-field">
                   <label for="kb-role-news-capture-select">${escapeHtml(t("settings.role_news_translate"))}</label>
                   <select id="kb-role-news-capture-select" class="select">
+                    <option value="planck3 (web)" ${roleNewsCapture === "planck3 (web)" ? "selected" : ""}>planck3 (local · default)</option>
                     <option value="gemma-4-e4b" ${roleNewsCapture === "gemma-4-e4b" ? "selected" : ""}>${escapeHtml(gemmaOptionLabel)}</option>
                     ${renderLocalLlmOptionsHtml(roleNewsCapture)}
                     ${renderCloudOptionsHtml(roleNewsCapture)}
@@ -2044,13 +2049,13 @@ export function renderKnowledgeView(
 
   container.querySelector("#kb-save-roles-btn")?.addEventListener("click", () => {
     if (!actions.onSaveModelConfig) return;
-    const chatSel = (container.querySelector("#kb-role-chat-select") as HTMLSelectElement | null)?.value ?? "gemma-4-e4b";
+    const chatSel = (container.querySelector("#kb-role-chat-select") as HTMLSelectElement | null)?.value ?? "planck3 (web)";
     const webSel = (container.querySelector("#kb-role-web-select") as HTMLSelectElement | null)?.value ?? "planck3 (web)";
     const readerSel = (container.querySelector("#kb-role-reader-select") as HTMLSelectElement | null)?.value ?? "hertz (reader)";
-    const npSel = (container.querySelector("#kb-role-news-planner-select") as HTMLSelectElement | null)?.value ?? "gemma-4-e4b";
-    const ncSel = (container.querySelector("#kb-role-news-capture-select") as HTMLSelectElement | null)?.value ?? "gemma-4-e4b";
+    const npSel = (container.querySelector("#kb-role-news-planner-select") as HTMLSelectElement | null)?.value ?? "planck3 (web)";
+    const ncSel = (container.querySelector("#kb-role-news-capture-select") as HTMLSelectElement | null)?.value ?? "planck3 (web)";
     const nrSel = (container.querySelector("#kb-role-news-reader-select") as HTMLSelectElement | null)?.value ?? "hertz (reader)";
-    const naSel = (container.querySelector("#kb-role-news-analyzer-select") as HTMLSelectElement | null)?.value ?? chatSel;
+    const naSel = (container.querySelector("#kb-role-news-analyzer-select") as HTMLSelectElement | null)?.value ?? (chatSel === "planck3 (web)" ? "template" : chatSel);
     void actions.onSaveModelConfig({
       role_chat: chatSel,
       role_web_answer: webSel,

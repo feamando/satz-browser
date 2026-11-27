@@ -15,7 +15,35 @@ const HOOK_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HOOK_DIR, "..", "..", "..");
 const WIN_APPS_MARKER = `${path.sep}windowsapps${path.sep}`;
 
-function emitNoop() {
+function isClaudePayloadText(stdinText) {
+  try {
+    const parsed = JSON.parse(stdinText || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return false;
+    }
+    for (const key of ["hook_event_name", "tool_name", "tool_input", "stop_hook_active"]) {
+      if (Object.prototype.hasOwnProperty.call(parsed, key)) {
+        return true;
+      }
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(parsed, "prompt") &&
+      !Object.prototype.hasOwnProperty.call(parsed, "lastUserInput") &&
+      !Object.prototype.hasOwnProperty.call(parsed, "hookEventName")
+    ) {
+      return true;
+    }
+  } catch {
+    // Non-JSON stdin defaults to host prompt fallback rather than silent denial.
+  }
+  return false;
+}
+
+function emitNoop(hookName = "", stdinText = "") {
+  if (hookName === "pre_tool_guard" && !isClaudePayloadText(stdinText)) {
+    process.stdout.write(`${JSON.stringify({ decision: "ask" })}\n`);
+    return;
+  }
   process.stdout.write("{}\n");
 }
 
@@ -109,21 +137,21 @@ function main() {
     return;
   }
 
+  const stdinText = readStdinText();
   const scriptPath = path.join(HOOK_DIR, `${hookName}.py`);
   if (!fs.existsSync(scriptPath)) {
     process.stderr.write(`[satz-hook:${hookName}] Missing hook script: ${scriptPath}\n`);
-    emitNoop();
+    emitNoop(hookName, stdinText);
     return;
   }
 
   const pythonExe = resolvePythonExecutable();
   if (!pythonExe) {
     process.stderr.write(`[satz-hook:${hookName}] No usable Python interpreter found.\n`);
-    emitNoop();
+    emitNoop(hookName, stdinText);
     return;
   }
 
-  const stdinText = readStdinText();
   const result = spawnSync(pythonExe, [scriptPath], {
     cwd: REPO_ROOT,
     input: stdinText || "{}",
@@ -142,13 +170,13 @@ function main() {
   if (result.error || result.status !== 0) {
     const errMsg = result.error ? result.error.message : (result.stderr || `exit ${result.status}`);
     process.stderr.write(`[satz-hook:${hookName}] ${String(errMsg).trim()}\n`);
-    emitNoop();
+    emitNoop(hookName, stdinText);
     return;
   }
 
   const out = (result.stdout || "").trim();
   if (!out) {
-    emitNoop();
+    emitNoop(hookName, stdinText);
     return;
   }
 
@@ -157,7 +185,7 @@ function main() {
     process.stdout.write(`${JSON.stringify(parsed)}\n`);
   } catch {
     process.stderr.write(`[satz-hook:${hookName}] Non-JSON hook stdout ignored.\n`);
-    emitNoop();
+    emitNoop(hookName, stdinText);
   }
 }
 

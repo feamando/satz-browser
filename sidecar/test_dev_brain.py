@@ -179,6 +179,80 @@ class TestDevPipelineAndBrain(unittest.TestCase):
         self.assertIn("satz-ui-design-i18n", msg)
         self.assertNotIn("_template", msg)
 
+    def test_hook_runner_pre_tool_guard_fail_open_and_host_formats(self) -> None:
+        env = dict(os.environ)
+        env["SATZ_PYTHON"] = sys.executable
+
+        # Normal pre_tool_guard dispatch across Antigravity and Claude Code payloads
+        ag_res = subprocess.run(
+            ["node", "../dev/agents/hooks/hook_runner.mjs", "pre_tool_guard"],
+            cwd=str(REPO_ROOT / ".agents"),
+            input=json.dumps({
+                "hookEventName": "PreToolUse",
+                "toolCall": {"name": "run_command", "args": {"CommandLine": "git status"}},
+            }),
+            text=True,
+            capture_output=True,
+            timeout=15,
+            env=env,
+        )
+        self.assertEqual(ag_res.returncode, 0, ag_res.stderr)
+        self.assertEqual(json.loads(ag_res.stdout), {"decision": "ask"})
+
+        cc_res = subprocess.run(
+            ["node", "../dev/agents/hooks/hook_runner.mjs", "pre_tool_guard"],
+            cwd=str(REPO_ROOT / ".agents"),
+            input=json.dumps({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "git status"},
+            }),
+            text=True,
+            capture_output=True,
+            timeout=15,
+            env=env,
+        )
+        self.assertEqual(cc_res.returncode, 0, cc_res.stderr)
+        self.assertEqual(json.loads(cc_res.stdout), {})
+
+        # Fail-open path (isolated runner missing pre_tool_guard.py) must emit ask for Antigravity, {} for Claude Code
+        with tempfile.TemporaryDirectory() as tmpd:
+            isolated_runner = Path(tmpd) / "hook_runner.mjs"
+            isolated_runner.write_text(
+                (HOOKS_DIR / "hook_runner.mjs").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            ag_failopen = subprocess.run(
+                ["node", str(isolated_runner), "pre_tool_guard"],
+                cwd=tmpd,
+                input=json.dumps({
+                    "hookEventName": "PreToolUse",
+                    "toolCall": {"name": "run_command", "args": {"CommandLine": "echo hi"}},
+                }),
+                text=True,
+                capture_output=True,
+                timeout=15,
+                env=env,
+            )
+            self.assertEqual(ag_failopen.returncode, 0, ag_failopen.stderr)
+            self.assertEqual(json.loads(ag_failopen.stdout), {"decision": "ask"})
+
+            cc_failopen = subprocess.run(
+                ["node", str(isolated_runner), "pre_tool_guard"],
+                cwd=tmpd,
+                input=json.dumps({
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "echo hi"},
+                }),
+                text=True,
+                capture_output=True,
+                timeout=15,
+                env=env,
+            )
+            self.assertEqual(cc_failopen.returncode, 0, cc_failopen.stderr)
+            self.assertEqual(json.loads(cc_failopen.stdout), {})
+
     def test_session_start_and_pre_invocation_contracts_skill_boost_and_dedupe(self) -> None:
         before_hash = hashlib.sha256(self.brain.db_path.read_bytes()).hexdigest()
 
@@ -507,6 +581,70 @@ class TestDevPipelineAndBrain(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 git_sync.sync_and_push(repo_root=work, push=True, skip_gate=True)
             self.assertIn("Security/privacy audit blocked", str(ctx.exception))
+
+    def test_release_workflow_ci_preflight_updater_manifest_and_dry_run_bump(self) -> None:
+        import yaml
+
+        aligned = check_version_parity()
+        pref = release_version.run_ci_preflight(tag=f"v{aligned}")
+        self.assertTrue(pref["ok"])
+        self.assertEqual(pref["version"], aligned)
+        with self.assertRaises(AssertionError):
+            release_version.run_ci_preflight(tag="v99.99.99")
+
+        # Validate workflows YAML contracts for automated dual-OS CI and non-prerelease updater feed
+        ci_wf = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+        self.assertEqual(ci_wf["jobs"]["verify"]["strategy"]["matrix"]["os"], ["windows-latest", "macos-latest"])
+
+        rel_wf = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8"))
+        self.assertIn("prepare-release", rel_wf["jobs"])
+        self.assertIn("build-tauri", rel_wf["jobs"])
+        self.assertIn("publish-release", rel_wf["jobs"])
+        on_cfg = rel_wf.get("on") or rel_wf.get(True)
+        dispatch_pre = on_cfg["workflow_dispatch"]["inputs"]["prerelease"]["default"]
+        self.assertFalse(dispatch_pre)
+        build_step = rel_wf["jobs"]["build-tauri"]["steps"][-1]
+        self.assertFalse(build_step["with"]["prerelease"])
+        self.assertIn("release_id", str(build_step["with"]["releaseId"]))
+
+        # Verify updater manifest validation rejects single-OS or broken sigs, accepts dual-OS
+        with tempfile.TemporaryDirectory() as tmpd:
+            manifest = Path(tmpd) / "latest.json"
+            valid_sig = "A" * 64
+            manifest.write_text(json.dumps({
+                "version": aligned,
+                "platforms": {
+                    "windows-x86_64": {"url": f"https://github.com/feamando/satz-browser/releases/download/v{aligned}/satz.exe", "signature": valid_sig},
+                    "darwin-aarch64": {"url": f"https://github.com/feamando/satz-browser/releases/download/v{aligned}/satz.app.tar.gz", "signature": valid_sig},
+                },
+            }), encoding="utf-8")
+            ok_res = release_version.verify_updater_manifest(manifest_path=manifest, expected_version=aligned)
+            self.assertTrue(ok_res["ok"])
+            self.assertEqual(ok_res["platforms"], ["darwin-aarch64", "windows-x86_64"])
+
+            manifest.write_text(json.dumps({
+                "version": aligned,
+                "platforms": {
+                    "windows-x86_64": {"url": "https://example.invalid/satz.exe", "signature": valid_sig},
+                },
+            }), encoding="utf-8")
+            with self.assertRaises(AssertionError) as miss_ctx:
+                release_version.verify_updater_manifest(manifest_path=manifest, expected_version=aligned)
+            self.assertIn("darwin", str(miss_ctx.exception))
+
+        # Sequential updater shutdown before install in src/updater.ts
+        updater_src = (REPO_ROOT / "src" / "updater.ts").read_text(encoding="utf-8")
+        self.assertIn("await update.download(", updater_src)
+        self.assertIn('await invoke("prepare_for_update")', updater_src)
+        self.assertIn("await update.install()", updater_src)
+        self.assertNotIn("downloadAndInstall(async", updater_src)
+
+        # Dry-run bump + tag preview in git_sync must not modify manifests
+        dry = git_sync.sync_and_push(bump="fix", push=True, dry_run=True)
+        self.assertTrue(dry["ok"])
+        self.assertTrue(dry["dry_run"])
+        self.assertEqual(dry["tag"], f"v{dry['bumped_version']}")
+        self.assertEqual(check_version_parity(), aligned)
 
 
 if __name__ == "__main__":

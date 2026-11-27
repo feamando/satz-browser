@@ -236,6 +236,7 @@ import {
   extractDomain,
   getActiveTabSources,
   getCachedUrlPreview,
+  getComposeModelsForPicker,
   getDefaultComposeModelId,
   getOnboardingTourDonePref,
   getOriginFromUrl,
@@ -491,7 +492,7 @@ function getLastTurnTelemetryContext(
   const targetMsg = msgId ? msgs.find((m) => m.id === msgId) : undefined;
   const fallbackAsst = [...msgs].reverse().find((m) => m.role === "assistant");
   const model =
-    targetMsg?.model || fallbackAsst?.model || state.selectedModel || "gemma-4-e4b";
+    targetMsg?.model || fallbackAsst?.model || state.selectedModel || "planck3 (web)";
   let sourceCount = 0;
   let charsCut = 0;
   const rawSids = targetMsg?.source_ids_json ?? fallbackAsst?.source_ids_json;
@@ -7566,12 +7567,20 @@ async function handleSendChatMessage(
       : null;
 
   const routedModel: LocalModelId = learnedDecision?.model ?? baseModel;
+  const gemmaReadyForImg = Boolean(
+    state.modelConfig?.local_models?.gemma_ready ??
+      state.sidecar.model_config?.local_models?.gemma_ready
+  );
+  const imageFallbackModel: LocalModelId =
+    getComposeModelsForPicker().find(
+      (m) => m.id !== "gemma-4-e4b" || gemmaReadyForImg
+    )?.id ?? "gemma-4-e4b";
   const chosenModel: LocalModelId =
-    (hasImages || isSettingsConv) &&
+    hasImages &&
     (routedModel === "planck3 (web)" ||
       routedModel === "hertz (reader)" ||
       routedModel === "planck (reader)")
-      ? "gemma-4-e4b"
+      ? imageFallbackModel
       : routedModel;
   const useWebSearch = isSettingsConv
     ? false
@@ -7761,7 +7770,14 @@ async function handleSendChatMessage(
       return;
     }
 
-    if (chosenModel === "planck3 (web)" && !hasImages && !isSettingsConv) {
+    if (
+      chosenModel === "planck3 (web)" &&
+      !hasImages &&
+      !isSettingsConv &&
+      !useMailContext &&
+      !useDrivesContext &&
+      (useWebSearch || activeTabSources.length === 0)
+    ) {
       updateStreamingStatus(
         convId,
         t("main.stream_web_search"),

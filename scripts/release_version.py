@@ -20,9 +20,11 @@ for _p in (str(SCRIPTS_DIR), str(HOOK_DIR)):
         sys.path.insert(0, _p)
 
 import pre_commit_dev_sync  # noqa: E402
+import security_audit  # noqa: E402
 from dev_brain import DevBrain  # noqa: E402
 
 PACKAGE_JSON = REPO_ROOT / "package.json"
+PACKAGE_LOCK = REPO_ROOT / "package-lock.json"
 CARGO_TOML = REPO_ROOT / "src-tauri" / "Cargo.toml"
 TAURI_CONF = REPO_ROOT / "src-tauri" / "tauri.conf.json"
 CHANGELOG_MD = REPO_ROOT / "dev" / "versions" / "CHANGELOG.md"
@@ -168,10 +170,18 @@ def apply_version_bump(
             "models": models,
         }
 
-    # Update package.json, tauri.conf.json, and Cargo.toml atomically.
+    # Update package.json, package-lock.json, tauri.conf.json, and Cargo.toml atomically.
     pkg = json.loads(PACKAGE_JSON.read_text(encoding="utf-8"))
     pkg["version"] = target
     PACKAGE_JSON.write_text(json.dumps(pkg, indent=2) + "\n", encoding="utf-8")
+
+    if PACKAGE_LOCK.is_file():
+        lock = json.loads(PACKAGE_LOCK.read_text(encoding="utf-8"))
+        lock["version"] = target
+        packages = lock.get("packages")
+        if isinstance(packages, dict) and isinstance(packages.get(""), dict):
+            packages[""]["version"] = target
+        PACKAGE_LOCK.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
     tauri_cfg = json.loads(TAURI_CONF.read_text(encoding="utf-8"))
     tauri_cfg["version"] = target
@@ -219,6 +229,119 @@ def apply_version_bump(
     }
 
 
+def read_versions_for_root(repo_root: Path | None = None) -> dict[str, str]:
+    root = (repo_root or REPO_ROOT).resolve()
+    pkg = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    tauri_cfg = json.loads((root / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
+    cargo_raw = (root / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8")
+    m = CARGO_VER_RE.search(cargo_raw)
+    out = {
+        "package_json": str(pkg.get("version") or ""),
+        "cargo_toml": m.group(1).strip() if m else "",
+        "tauri_conf": str(tauri_cfg.get("version") or ""),
+    }
+    lock_path = root / "package-lock.json"
+    if lock_path.is_file():
+        lock_cfg = json.loads(lock_path.read_text(encoding="utf-8"))
+        out["package_lock"] = str(lock_cfg.get("version") or "")
+    return out
+
+
+def run_ci_preflight(*, tag: str = "", repo_root: Path | None = None) -> dict[str, Any]:
+    root = (repo_root or REPO_ROOT).resolve()
+    versions = read_versions_for_root(root)
+    core = {versions["package_json"], versions["cargo_toml"], versions["tauri_conf"]}
+    if "" in core or len(core) != 1:
+        raise AssertionError(f"Release manifest version mismatch: {versions}")
+    aligned = versions["package_json"]
+    if "package_lock" in versions and versions["package_lock"] != aligned:
+        raise AssertionError(f"package-lock.json version {versions['package_lock']!r} != {aligned!r}")
+
+    clean_tag = tag.strip()
+    if clean_tag:
+        stripped = clean_tag[1:] if clean_tag.startswith("v") else clean_tag
+        if not SEMVER_RE.fullmatch(stripped) or stripped != aligned:
+            raise AssertionError(f"Release tag {clean_tag!r} does not match manifest version {aligned!r}")
+
+    planck_dir = root / "sidecar" / "models" / "planck"
+    models: list[dict[str, Any]] = []
+    if planck_dir.is_dir():
+        for manifest_path in sorted(planck_dir.glob("*/manifest.json")):
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            parts = [manifest_path.parent / str(p) for p in (data.get("parts") or [])]
+            missing = [p.name for p in parts if not p.is_file()]
+            oversize = [p.name for p in parts if p.is_file() and p.stat().st_size > MAX_SHARD_BYTES]
+            hash_ok = _sha256_parts(parts) == str(data.get("sha256") or "") if parts and not missing else False
+            if missing or oversize or not hash_ok:
+                raise AssertionError(
+                    f"Planck shard/hash check failed for {manifest_path.parent.name}: "
+                    f"missing={missing}, oversize={oversize}, hash_ok={hash_ok}"
+                )
+            models.append({"model": manifest_path.parent.name, "parts": len(parts), "sha256_ok": hash_ok})
+
+    audit = security_audit.run_audit(mode="all", repo_root=root)
+    if not audit["ok"]:
+        raise AssertionError(
+            f"Security audit failed ({audit['finding_count']} finding(s)): {audit['findings'][:3]}"
+        )
+
+    return {
+        "ok": True,
+        "version": aligned,
+        "tag": clean_tag or f"v{aligned}",
+        "manifests": versions,
+        "models": models,
+        "security_files_scanned": audit["files_scanned"],
+    }
+
+
+def verify_updater_manifest(
+    *,
+    manifest_path: Path,
+    expected_version: str = "",
+    require_platforms: tuple[str, ...] = ("windows", "darwin"),
+) -> dict[str, Any]:
+    if not manifest_path.is_file():
+        raise AssertionError(f"Missing updater manifest file: {manifest_path}")
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise AssertionError("Updater manifest JSON root must be an object.")
+
+    version = str(data.get("version") or "").strip().lstrip("v")
+    if not SEMVER_RE.fullmatch(version):
+        raise AssertionError(f"Updater manifest missing valid semver version: {data.get('version')!r}")
+    exp = expected_version.strip().lstrip("v")
+    if exp and version != exp:
+        raise AssertionError(f"Updater manifest version {version!r} != expected {exp!r}")
+
+    platforms = data.get("platforms")
+    if not isinstance(platforms, dict) or not platforms:
+        raise AssertionError("Updater manifest must contain a non-empty 'platforms' map.")
+
+    for key, entry in platforms.items():
+        if not isinstance(entry, dict):
+            raise AssertionError(f"Platform entry {key!r} must be an object.")
+        url = str(entry.get("url") or "").strip()
+        sig = str(entry.get("signature") or "").strip()
+        if not url.startswith("https://"):
+            raise AssertionError(f"Platform {key!r} missing valid HTTPS download URL: {url!r}")
+        if len(sig) < 40:
+            raise AssertionError(f"Platform {key!r} missing valid Tauri updater signature.")
+
+    platform_keys = sorted(platforms.keys())
+    missing_os = [pref for pref in require_platforms if pref and not any(k.startswith(pref) for k in platform_keys)]
+    if missing_os:
+        raise AssertionError(
+            f"Updater manifest missing required platform(s) {missing_os}; present={platform_keys}"
+        )
+
+    return {
+        "ok": True,
+        "version": version,
+        "platforms": platform_keys,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Satz-Browser release version & binary manager")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -231,6 +354,14 @@ def main() -> int:
     p_bump.add_argument("--notes", default="")
     p_bump.add_argument("--model-version", default=None, help="Optional shipped Planck model version stamp")
     p_bump.add_argument("--dry-run", action="store_true")
+
+    p_pre = sub.add_parser("ci-preflight", help="Validate tag, manifest parity, Planck shards, and security audit")
+    p_pre.add_argument("--tag", default="", help="Expected release tag (e.g. v0.5.1)")
+
+    p_upd = sub.add_parser("verify-updater-manifest", help="Validate Tauri latest.json signatures and dual-OS entries")
+    p_upd.add_argument("--file", required=True, help="Path to downloaded latest.json")
+    p_upd.add_argument("--expected-version", default="", help="Expected X.Y.Z semver")
+    p_upd.add_argument("--require-platforms", default="windows,darwin", help="Comma-separated required OS prefixes")
 
     args = parser.parse_args()
     if args.cmd == "status":
@@ -264,6 +395,32 @@ def main() -> int:
         )
         print(json.dumps(res, indent=2))
         return 0
+
+    if args.cmd == "ci-preflight":
+        try:
+            print(json.dumps(run_ci_preflight(tag=args.tag), indent=2))
+            return 0
+        except AssertionError as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}, indent=2))
+            return 1
+
+    if args.cmd == "verify-updater-manifest":
+        req = tuple(p.strip() for p in str(args.require_platforms).split(",") if p.strip())
+        try:
+            print(
+                json.dumps(
+                    verify_updater_manifest(
+                        manifest_path=Path(args.file),
+                        expected_version=args.expected_version,
+                        require_platforms=req,
+                    ),
+                    indent=2,
+                )
+            )
+            return 0
+        except AssertionError as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}, indent=2))
+            return 1
 
     return 1
 

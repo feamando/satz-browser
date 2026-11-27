@@ -895,6 +895,28 @@ class TestSettingsToolsAndRegistry(unittest.TestCase):
             any(t["name"] == "AI & Foundation Models" for t in self.rt.news.list_topics()["topics"])
         )
 
+    def test_planck_settings_chat_fallbacks_cover_core_queries(self) -> None:
+        with mock.patch.object(
+            self.rt, "ensure_gemma", side_effect=AssertionError("Settings chat on Planck must never load Gemma")
+        ):
+            for prompt_txt, expected_sub in (
+                ("check models", "Current model routing:"),
+                ("check drives", "Cloud Drives status:"),
+                ("show profiles", "Create profile: default"),
+                ("help me configure satz", "Satz Settings (Planck local mode):"),
+            ):
+                evs = list(
+                    self.rt.stream_chat(
+                        [{"role": "user", "content": prompt_txt}],
+                        [],
+                        model_id="planck3 (web)",
+                        conversation_id="conv-settings",
+                        origin="settings",
+                    )
+                )
+                joined = "".join(str(e.get("delta") or "") for e in evs)
+                self.assertIn(expected_sub, joined, f"Missing expected reply for {prompt_txt!r}: {evs}")
+
 
 if __name__ == "__main__":
     unittest.main()

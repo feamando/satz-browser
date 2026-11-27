@@ -83,13 +83,20 @@ class TestLocalModelsPackaging(unittest.TestCase):
 
         doc = self.rt.get_doctor()
         by_role = {r["role"]: r for r in doc["roles"]}
-        self.assertEqual(by_role["chat"]["state"], "missing")
+        self.assertEqual(by_role["chat"]["model"], "planck3 (web)")
+        self.assertEqual(by_role["chat"]["state"], "ready")
         self.assertEqual(by_role["web_answer"]["state"], "ready")
         self.assertEqual(by_role["reader_planck"]["state"], "ready")
         self.assertEqual(by_role["reader_planck"]["source"], "shipped")
         self.assertEqual(by_role["brain_encoder"]["state"], "ready")
         self.assertEqual(by_role["brain_encoder"]["source"], "shipped")
         self.assertIn("semantic (planck13)", doc["brain_ranking"])
+
+        cfg_default = self.rt.get_model_management_config()
+        self.assertEqual(cfg_default["roles"]["chat"], "planck3 (web)")
+        self.assertEqual(cfg_default["roles"]["effective_chat"], "planck3 (web)")
+        self.assertEqual(cfg_default["roles"]["news_planner"], "planck3 (web)")
+        self.assertEqual(cfg_default["roles"]["news_analyzer"], "template")
 
         health = self.rt.get_health()
         ids = [m["id"] for m in health["models"]]
@@ -130,7 +137,56 @@ class TestLocalModelsPackaging(unittest.TestCase):
         errs = [e for e in self.rt.get_errors() if e.get("where") == "gemma_preload"]
         self.assertEqual(errs, [])
 
-        # Chat without any local LLM or cloud key raises an actionable Settings error
+        # Even if Gemma weights exist on disk, preload & default config stay on Planck until explicitly added
+        unconfigured_gemma_dir = self.rt.local_models.models_dir / "google--gemma-4-E4B-it"
+        unconfigured_gemma_dir.mkdir(parents=True, exist_ok=True)
+        (unconfigured_gemma_dir / "config.json").write_text('{"model_type": "gemma4"}', encoding="utf-8")
+        (unconfigured_gemma_dir / "model.safetensors").write_bytes(b"weights")
+        self.assertIsNone(self.rt.resolve_preload_local_llm_id())
+        self.assertEqual(self.rt.get_model_management_config()["roles"]["chat"], "planck3 (web)")
+        self.assertEqual(self.rt.get_model_management_config()["roles"]["effective_chat"], "planck3 (web)")
+
+        with mock.patch.object(self.rt, "ensure_gemma", side_effect=AssertionError("Gemma must not load when Planck is active")):
+            self.rt.start_gemma_preload()
+            time.sleep(0.15)
+            # Planck handles open-tab Q&A and Settings chat cleanly via stream_chat without Gemma
+            tab_evs = list(
+                self.rt.stream_chat(
+                    model_id="planck3 (web)",
+                    messages=[{"role": "user", "content": "Who won the open benchmark award in 2024?"}],
+                    sources=[
+                        {
+                            "id": "tab-1",
+                            "url": "https://example.org/award",
+                            "title": "Award",
+                            "text": "In 2024, Ada Lovelace Institute won the open benchmark award for local models.",
+                        }
+                    ],
+                    web_enabled=False,
+                )
+            )
+            self.assertTrue(any("Ada Lovelace" in str(e.get("delta") or "") for e in tab_evs))
+            settings_evs = list(
+                self.rt.stream_chat(
+                    model_id="planck3 (web)",
+                    messages=[{"role": "user", "content": "check models"}],
+                    sources=[],
+                    web_enabled=False,
+                    origin="settings",
+                    conversation_id="conv-settings",
+                )
+            )
+            self.assertTrue(any("Current model routing" in str(e.get("delta") or "") for e in settings_evs))
+
+        # Once user explicitly configures Gemma in satz_meta, preload resolver recognizes it
+        self.rt.update_model_management_config({"role_chat": "gemma-4-e4b"})
+        self.assertEqual(self.rt.resolve_preload_local_llm_id(), "gemma-4-e4b")
+        with self.rt.store_lock:
+            self.rt.store.db.execute("DELETE FROM satz_meta WHERE key LIKE 'model_role_%'")
+            self.rt.store.db.commit()
+        shutil.rmtree(unconfigured_gemma_dir, ignore_errors=True)
+
+        # Explicitly asking for gemma-4-e4b without any local LLM or cloud key raises an actionable Settings error
         with self.assertRaises(RuntimeError) as ctx:
             list(
                 self.rt.stream_chat(
@@ -175,7 +231,7 @@ class TestLocalModelsPackaging(unittest.TestCase):
             self.rt.store.db.commit()
 
         cfg = self.rt.get_model_management_config()
-        self.assertEqual(cfg["roles"]["chat"], "gemma-4-e4b")
+        self.assertEqual(cfg["roles"]["chat"], "planck3 (web)")
         self.assertEqual(cfg["roles"]["effective_chat"], "gemini:gemini-3-flash-preview")
 
         with mock.patch("satz_web_harness.stream_cloud_chat") as m_cloud:
@@ -245,7 +301,7 @@ class TestLocalModelsPackaging(unittest.TestCase):
             st, res_rm = _post_json(base, "/models/local/remove", {"model_id": mid}, token=tok)
             self.assertEqual(st, 200)
             self.assertTrue(res_rm["ok"])
-            self.assertEqual(res_rm["roles"]["chat"], "gemma-4-e4b")
+            self.assertEqual(res_rm["roles"]["chat"], "planck3 (web)")
         finally:
             srv.shutdown()
             srv.server_close()

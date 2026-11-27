@@ -563,7 +563,7 @@ export const state: AppState = {
   railFilter: "",
   openMenuConvId: null,
   renamingConvId: null,
-  selectedModel: "gemma-4-e4b",
+  selectedModel: "planck3 (web)",
   userOverrodeModelInSession: false,
   webSearchEnabled: false,
   mailContextEnabled: false,
@@ -967,7 +967,7 @@ export function resolveLearnedRouteForPrompt(
     mailEnabled
   );
   const rule = state.routingPolicy?.by_query_type?.[queryType];
-  let effModel: LocalModelId = selectedModel || "gemma-4-e4b";
+  let effModel: LocalModelId = selectedModel || "planck3 (web)";
   let effWeb = Boolean(webEnabled);
   let effMail = Boolean(mailEnabled);
   let escalated = false;
@@ -1830,9 +1830,6 @@ export function getAvailableModelsForPicker(): Array<{
       item.ready ? `${item.label} (local)` : `${item.label} (local · invalid)`
     );
   }
-  if (!gemmaReady) {
-    pushItem("gemma-4-e4b", "gemma-4-e4b (local · not installed)");
-  }
 
   pushItem(
     "planck3 (web)",
@@ -1850,6 +1847,9 @@ export function getAvailableModelsForPicker(): Array<{
       ? "planck (reader · local shipped)"
       : "planck (reader · local)"
   );
+  if (!gemmaReady) {
+    pushItem("gemma-4-e4b", "gemma-4-e4b (local · not installed)");
+  }
 
   for (const prov of cfg?.cloud_providers ?? []) {
     if (!prov.configured && (!prov.models || prov.models.length === 0)) continue;

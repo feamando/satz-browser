@@ -58,9 +58,10 @@ export async function downloadAndInstallAppUpdate(
 
     let downloaded = 0;
     let total = 0;
-    let sidecarStopped = false;
 
-    await update.downloadAndInstall(async (ev) => {
+    // Finish downloading before stopping the sidecar and running install() so
+    // background Python processes never hold file locks on Windows installers.
+    await update.download((ev) => {
       if (ev.event === "Started") {
         total = Number(ev.data.contentLength ?? 0);
         onProgress(0);
@@ -71,25 +72,17 @@ export async function downloadAndInstallAppUpdate(
         }
       } else if (ev.event === "Finished") {
         onProgress(100);
-        if (!sidecarStopped) {
-          sidecarStopped = true;
-          try {
-            await invoke("prepare_for_update");
-          } catch {
-            // Non-fatal if sidecar already stopped
-          }
-        }
       }
     });
 
-    if (!sidecarStopped) {
-      try {
-        await invoke("prepare_for_update");
-      } catch {
-        // Non-fatal
-      }
+    onProgress(100);
+    try {
+      await invoke("prepare_for_update");
+    } catch {
+      // Non-fatal if sidecar is already stopped
     }
 
+    await update.install();
     await relaunch();
     return { ok: true };
   } catch (err) {

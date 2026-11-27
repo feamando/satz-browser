@@ -44,6 +44,9 @@ HALF_LIFE_HOURS = 18.0
 EXPLORE_MIN_SHARE = 0.25
 HIGH_EXPLORE_THRESHOLD = 8.0
 DEFAULT_FETCH_TIMEOUT = 6.0
+_NON_GENERATIVE_NEWS_MODELS = frozenset(
+    {"template", "planck3 (web)", "planck (reader)", "hertz (reader)"}
+)
 
 STOP_TITLE_WORDS = {
     "the", "and", "for", "with", "that", "from", "this", "have", "what", "when",
@@ -2312,7 +2315,7 @@ class SatzNewsEngine:
             )
 
         roles = self.runtime.get_model_management_config()["roles"]
-        analyzer_model = roles.get("news_analyzer") or roles.get("chat") or "gemma-4-e4b"
+        analyzer_model = roles.get("news_analyzer") or roles.get("chat") or "template"
 
         agreed_facts: list[str] = []
         framings: list[dict[str, Any]] = []
@@ -2327,7 +2330,7 @@ class SatzNewsEngine:
             blind_spots.append(f"deduped: {collapsed_wire} syndicated/wire duplicate article(s) were collapsed into their origin family")
 
         # Try structured perspective extraction via configured analyzer model when >= 2 families exist
-        if len(fam_articles) >= 2 and analyzer_model != "template":
+        if len(fam_articles) >= 2 and analyzer_model not in _NON_GENERATIVE_NEWS_MODELS:
             try:
                 src_lines = []
                 for idx, fa in enumerate(fam_articles[:6], 1):
@@ -2702,7 +2705,7 @@ class SatzNewsEngine:
         roles = dict(self.runtime.get_model_management_config()["roles"])
         if roles_override:
             roles.update({k: v for k, v in roles_override.items() if v})
-        analyzer_m = roles.get("news_analyzer") or roles.get("chat") or "gemma-4-e4b"
+        analyzer_m = roles.get("news_analyzer") or roles.get("chat") or "template"
 
         findings_out: list[dict[str, Any]] = []
         seen_imgs: set[str] = set()
@@ -2802,7 +2805,7 @@ class SatzNewsEngine:
         answer_text = fb_answer
         used_writer = "template"
 
-        if analyzer_m != "template":
+        if analyzer_m not in _NON_GENERATIVE_NEWS_MODELS:
             src_ctx = "\n\n".join(
                 f"[{a['idx']}] {a['domain']} (cat={a['category']}, eff={a['trust_effective']:.1f}/10, sys={a['trust_system']:.1f}/10, fam={a['family']}): "
                 f"{a['title']} ({a['url']})\n{neutralize_brain_directives_in_source((a['body_text'] or a['snippet'])[:900])}"
@@ -2952,7 +2955,14 @@ class SatzNewsEngine:
             from src.planck3.readers import HeuristicReader
 
             return HeuristicReader()
-        if model_id == "heuristic":
+        if model_id == "planck3 (web)":
+            try:
+                return self.runtime.ensure_reader("planck (reader)")
+            except Exception:
+                from src.planck3.readers import HeuristicReader
+
+                return HeuristicReader()
+        if model_id in ("heuristic", "template"):
             from src.planck3.readers import HeuristicReader
 
             return HeuristicReader()
@@ -2978,9 +2988,9 @@ class SatzNewsEngine:
         if roles_override:
             roles.update(roles_override)
 
-        planner_m = roles.get("news_planner") or "gemma-4-e4b"
-        reader_m = roles.get("news_reader") or "hertz (reader)"
-        analyzer_m = roles.get("news_analyzer") or roles.get("chat") or "gemma-4-e4b"
+        planner_m = roles.get("news_planner") or "planck3 (web)"
+        reader_m = roles.get("news_reader") or "planck (reader)"
+        analyzer_m = roles.get("news_analyzer") or roles.get("chat") or "template"
 
         t_start = time.perf_counter()
         raw_q = (question or "").strip()
@@ -3337,7 +3347,7 @@ class SatzNewsEngine:
                         or is_mocked_complete
                     )
                 )
-                if can_tr and (analyzer_m == "template" or is_mocked_complete):
+                if can_tr and (analyzer_m in _NON_GENERATIVE_NEWS_MODELS or is_mocked_complete):
                     from satz_translate import detect_language
 
                     tgt_lang = prefs_tr["primary_language"]
@@ -3522,7 +3532,7 @@ class SatzNewsEngine:
             tw_res = tw.write(scrubbed_q, at, cons, snippets_map)
             fb_answer = tw_res["text"]
             fb_writer = "template"
-            if analyzer_m == "template" or not sources_for_card:
+            if analyzer_m in _NON_GENERATIVE_NEWS_MODELS or not sources_for_card:
                 return {"skip_llm": True, "fallback_answer": fb_answer, "fallback_writer": fb_writer}
             src_ctx = "\n".join(
                 f"[{sf['idx']}] {sf['domain']} ({sf['trust']['effective']:.1f}/10, {sf['trust']['category']}): "
@@ -3563,7 +3573,7 @@ class SatzNewsEngine:
         else:
             fb_answer = "No verified news reporting was found for this query. Try refreshing feeds or widening search terms."
 
-        if not sources_for_card or analyzer_m == "template":
+        if not sources_for_card or analyzer_m in _NON_GENERATIVE_NEWS_MODELS:
             return {
                 "skip_llm": True,
                 "fallback_answer": fb_answer,
@@ -4327,7 +4337,7 @@ class SatzNewsEngine:
         is_mocked_complete = "_complete_role_prompt" in getattr(self.runtime, "__dict__", {})
         can_run_llm = (
             allow_llm
-            and analyzer_m != "template"
+            and analyzer_m not in _NON_GENERATIVE_NEWS_MODELS
             and (":" in analyzer_m or getattr(self.runtime, "gemma_model", None) is not None or is_mocked_complete)
         )
         if not can_run_llm:
