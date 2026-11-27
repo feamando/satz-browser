@@ -30,6 +30,8 @@ export interface StartScreenActions {
   onUnlockProfile?: (profileId: string, pin: string) => void;
   onCreateProfile?: (name: string, pin: string) => void;
   onImportProfileFile?: (bundleB64: string, pin: string, localPin?: string) => void;
+  onOpenOnboarding?: () => void;
+  onStartTour?: () => void;
 }
 
 function digestKindMeta(kind?: string): { ico: IconName; label: string } {
@@ -440,7 +442,28 @@ export function renderStartScreen(
   const unlockBusy = Boolean(state.profileUnlocking);
   const unlockDisabledAttr = unlockBusy ? "disabled" : "";
   const unlockPromptHtml = !isUnlocked
-    ? `
+    ? profilesList.length === 0
+      ? `
+      <div class="card start-unlock-card" id="start-demo-profile-card">
+        <div class="card-h">
+          ${icon("spark", "ico-sm")}
+          <b>${escapeHtml(t("onboard.demo_banner_title"))}</b>
+          <span class="end badge soft">${escapeHtml(t("onboard.demo_rail_label"))}</span>
+        </div>
+        <div class="muted">${escapeHtml(t("onboard.demo_banner_sub"))}</div>
+        ${
+          !unlockBusy && state.profileStatusMessage
+            ? `<div class="${renderBannerClass(state.profileStatusMessage)}">${escapeHtml(state.profileStatusMessage)}</div>`
+            : ""
+        }
+        <div class="form-row">
+          <button id="start-open-onboard-btn" class="btn primary" type="button" ${unlockDisabledAttr}>${escapeHtml(t("onboard.demo_setup_btn"))}</button>
+          <button id="start-start-tour-btn" class="btn" type="button" ${unlockDisabledAttr}>${escapeHtml(t("onboard.demo_tour_btn"))}</button>
+        </div>
+        ${renderProfileUploadSectionHtml("start")}
+      </div>
+    `
+      : `
       <div class="card start-unlock-card" id="start-profile-unlock-card">
         <div class="card-h">
           ${icon("lock", "ico-sm")}
@@ -457,38 +480,32 @@ export function renderStartScreen(
             ? `<div class="${renderBannerClass(state.profileStatusMessage)}">${escapeHtml(state.profileStatusMessage)}</div>`
             : ""
         }
-        ${
-          profilesList.length > 0
-            ? `
-              <div class="form-row">
-                <select id="start-unlock-profile-select" class="select" ${unlockDisabledAttr}>
-                  ${profilesList
-                    .map(
-                      (p) =>
-                        `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)} (${escapeHtml(p.id)})</option>`
-                    )
-                    .join("")}
-                </select>
-                <input
-                  id="start-unlock-pin-input"
-                  class="input pin"
-                  type="password"
-                  inputmode="numeric"
-                  maxlength="6"
-                  spellcheck="false"
-                  autocorrect="off"
-                  autocapitalize="off"
-                  placeholder="${escapeHtml(t("profile.pin_placeholder"))}"
-                  ${unlockDisabledAttr}
-                />
-                <button id="start-unlock-profile-btn" class="btn primary" type="button" ${unlockDisabledAttr}>${escapeHtml(unlockBusy ? t("profile.unlocking_short") : t("profile.unlock_btn"))}</button>
-              </div>
-              <div class="sep"></div>
-            `
-            : ""
-        }
+        <div class="form-row">
+          <select id="start-unlock-profile-select" class="select" ${unlockDisabledAttr}>
+            ${profilesList
+              .map(
+                (p) =>
+                  `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)} (${escapeHtml(p.id)})</option>`
+              )
+              .join("")}
+          </select>
+          <input
+            id="start-unlock-pin-input"
+            class="input pin"
+            type="password"
+            inputmode="numeric"
+            maxlength="6"
+            spellcheck="false"
+            autocorrect="off"
+            autocapitalize="off"
+            placeholder="${escapeHtml(t("profile.pin_placeholder"))}"
+            ${unlockDisabledAttr}
+          />
+          <button id="start-unlock-profile-btn" class="btn primary" type="button" ${unlockDisabledAttr}>${escapeHtml(unlockBusy ? t("profile.unlocking_short") : t("profile.unlock_btn"))}</button>
+        </div>
+        <div class="sep"></div>
         <div class="section">
-          <div class="muted">${escapeHtml(profilesList.length > 0 ? t("profile.or_create_new") : t("profile.create_new_hint"))}</div>
+          <div class="muted">${escapeHtml(t("profile.or_create_new"))}</div>
           <div class="form-row">
             <input
               id="start-create-profile-name"
@@ -638,6 +655,17 @@ export function renderStartScreen(
         e.preventDefault();
         triggerStartCreate();
       }
+    });
+
+  container
+    .querySelector("#start-open-onboard-btn")
+    ?.addEventListener("click", () => {
+      actions.onOpenOnboarding?.();
+    });
+  container
+    .querySelector("#start-start-tour-btn")
+    ?.addEventListener("click", () => {
+      actions.onStartTour?.();
     });
 
   bindProfileUploadSectionEvents(container, "start", actions.onImportProfileFile);
@@ -1020,7 +1048,7 @@ export function renderProfileUnlockOverlay(actions: {
     profileInfo?.unlocked && profileInfo?.active_profile
   );
 
-  if (!state.profilePromptOpen || isUnlocked) {
+  if (!state.profilePromptOpen || isUnlocked || state.onboardingStep !== null) {
     if (overlay) {
       overlay.remove();
     }

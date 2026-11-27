@@ -108,14 +108,24 @@ Built on **Tauri v2** (`WebView2` on Windows 11, `WKWebView` on macOS) with a mo
 ```text
 satz-browser/
 ├── .github/workflows/release.yml     # Cross-platform signed preview release workflow (Windows & macOS)
+├── .agents/                          # Antigravity workspace skills & lifecycle hooks (.agents/hooks.json)
+├── .claude/                          # Claude Code lifecycle hooks (.claude/settings.json)
+├── dev/                              # Core engineering hub (see dev/README.md)
+│   ├── docs/SYSTEM_OVERVIEW.md       # High-level surface separation & harness overview (+ ARCHITECTURE, PLATFORMS, RELEASE_RUNBOOK)
+│   ├── versions/                     # NOTES_v0.3.md .. NOTES_v0.9.md, CHANGELOG.md, BINARY_RELEASES.md, snapshots/
+│   ├── analytics/                    # Build sizes/timings, Dev Brain eval history & harness telemetry notes
+│   ├── agents/                       # Antigravity/Claude instructions, hooks/, skills/, behavior/, roles/, evals/
+│   ├── plans/                        # Versioned implementation plans (v0.2 .. v0.13) & tasks.md per plan
+│   └── brain/                        # Committed Dev Brain Graph DB (BRAIN.md, registry.yaml, brain_index.sqlite)
 ├── docs/
-│   ├── PLAN_v0.3_working_browser.md .. PLAN_v0.9_localization.md
-│   ├── NOTES_v0.3.md .. NOTES_v0.9.md
 │   ├── design/DESIGN_SYSTEM.md       # UI tokens, typography, layout & hygiene rules
 │   ├── evals/                        # Replayable harness & prompt-injection evals
 │   ├── screenshots/                  # Current shell & News screenshots (`m1.png`, `news_preview.png`)
 │   └── smoke/                        # Fixtures & verification captures
 ├── scripts/
+│   ├── dev_brain.py                  # Dev Brain indexer, search, monitor, eval & binary release snapshot CLI
+│   ├── release_version.py            # Semver (major/minor/fix) & shipped model revision CLI
+│   ├── agent_background_worker.py    # Detached behavior-to-skill synthesizer & error-to-eval worker
 │   ├── prepare_sidecar_bundle.py     # Stages sidecar, shipped Planck models & Python runtime for release bundles
 │   ├── build_preview.ps1             # Local Windows preview installer build script
 │   ├── build_preview.sh              # Local macOS preview installer build script
@@ -138,6 +148,7 @@ satz-browser/
 │   ├── satz_translate.py             # Persistent article/mail/tab content translation cache
 │   ├── satz_web_harness.py           # Bounded multi-step web + tool search harness
 │   ├── satz_evals.py                 # Automated red-team & regression eval runner
+│   ├── satz_telemetry.py             # Per-instance local <app_data_dir>/dev/ analytics & hosted-ready telemetry
 │   ├── satz_tools/                   # Declarative Settings & News Settings tool registry
 │   ├── planck_vendor/                # Vendored Planck 3.0 core primitives
 │   ├── models/planck/                # Sharded shipped Planck weights (planck13 & xreader_planck) + tokenizer

@@ -1,7 +1,8 @@
 param(
   [switch]$SidecarOnly,
   [switch]$Cuda,
-  [switch]$ForcePython
+  [switch]$ForcePython,
+  [switch]$NoUpdater
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,7 +27,15 @@ if ((Test-Path $KeyPath) -and -not $env:TAURI_SIGNING_PRIVATE_KEY) {
   }
 }
 
+$TauriArgs = @("--no-install", "tauri", "build", "--config", "src-tauri/tauri.bundle.conf.json")
+if ($NoUpdater -or -not $env:TAURI_SIGNING_PRIVATE_KEY) {
+  if (-not $NoUpdater) {
+    Write-Host "[satz-build] No %USERPROFILE%\.tauri\satz.key or TAURI_SIGNING_PRIVATE_KEY found; disabling updater artifact signing (-NoUpdater)."
+  }
+  $TauriArgs += @("--config", "src-tauri/tauri.bundle.noupdater.conf.json")
+}
+
 Write-Host "[satz-build] Running Tauri release bundle..."
-npx --no-install tauri build --config src-tauri/tauri.bundle.conf.json
+& npx @TauriArgs
 if ($LASTEXITCODE -ne 0) { throw "tauri build failed ($LASTEXITCODE)" }
 Write-Host "[satz-build] Done. Installers are under src-tauri/target/release/bundle/"

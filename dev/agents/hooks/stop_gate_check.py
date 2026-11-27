@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Stop hook: auto-sync stale Dev Brain files and block stop on broken links or UI/version regressions."""
+"""Stop hook: capture stop/error telemetry, spawn background analyzer, auto-sync Dev Brain, and check integrity."""
 
 from __future__ import annotations
 
+import json
 import subprocess
+from pathlib import Path
 from typing import Any
 
 import pre_commit_dev_sync
@@ -12,6 +14,7 @@ from hook_common import (
     append_behavior_log,
     emit_noop,
     emit_stop_block,
+    get_conversation_id,
     is_claude_payload,
     read_payload,
 )
@@ -33,12 +36,67 @@ def _git_dirty_paths(pathspecs: list[str]) -> list[str]:
         return []
 
 
+def _capture_turn_telemetry(payload: dict[str, Any]) -> None:
+    try:
+        import behavior_eval_store
+    except Exception:
+        return
+
+    term_reason = str(payload.get("terminationReason") or "")
+    stop_error = str(payload.get("error") or "").strip()
+    transcript_path = str(payload.get("transcriptPath") or payload.get("transcript_path") or "").strip()
+    transcript_err = ""
+
+    if transcript_path:
+        try:
+            tp = Path(transcript_path)
+            if tp.is_file():
+                lines = tp.read_text(encoding="utf-8", errors="ignore").splitlines()[-25:]
+                for raw in reversed(lines):
+                    if not raw.strip():
+                        continue
+                    step = json.loads(raw)
+                    if str(step.get("status") or "").upper() == "ERROR":
+                        transcript_err = str(step.get("content") or step.get("type") or "step ERROR")[:300]
+                        break
+        except Exception:
+            pass
+
+    combined_err = stop_error or transcript_err or (term_reason if term_reason in ("ERROR", "MAX_INVOCATIONS", "MAX_FORCED_INVOCATIONS") else "")
+    has_err = bool(combined_err)
+    try:
+        behavior_eval_store.record_event(
+            harness="claude" if is_claude_payload(payload) else "antigravity",
+            conv_id=get_conversation_id(payload),
+            event_type="stop_error" if has_err else "stop",
+            prompt_text=str(payload.get("lastUserInput") or "")[:400],
+            ok=not has_err,
+            error_text=combined_err,
+            termination_reason=term_reason,
+            transcript_path=transcript_path,
+        )
+        if combined_err and term_reason != "USER_CANCELED":
+            behavior_eval_store.record_error_incident(
+                scope=f"agent:{term_reason or 'stop'}",
+                summary=f"Agent turn ended with error ({term_reason or 'ERROR'}): {combined_err[:220]}",
+                root_cause="Captured automatically by Stop telemetry hook.",
+                fix_ref="dev/agents/evals/error_log.jsonl",
+                severity="high" if term_reason == "ERROR" else "medium",
+            )
+        if behavior_eval_store.should_spawn_worker(has_errors=has_err):
+            behavior_eval_store.spawn_background_worker()
+    except Exception:
+        pass
+
+
 def evaluate_stop(payload: dict[str, Any]) -> str | None:
+    _capture_turn_telemetry(payload)
+
     # Infinite-loop prevention: never block again once continuation is active.
     if bool(payload.get("continuationActive") or payload.get("stop_hook_active")):
         return None
 
-    # In Antigravity, only inspect natural completions (NO_TOOL_CALL), not cancels/errors.
+    # In Antigravity, only block natural completions (NO_TOOL_CALL), not cancels/errors.
     if not is_claude_payload(payload):
         term_reason = payload.get("terminationReason")
         if term_reason is not None and term_reason != "NO_TOOL_CALL":
@@ -47,7 +105,7 @@ def evaluate_stop(payload: dict[str, Any]) -> str | None:
     issues: list[str] = []
 
     try:
-        from scripts.dev_brain import DevBrain
+        from dev_brain import DevBrain
 
         brain = DevBrain(REPO_ROOT)
         health = brain.monitor()
@@ -65,10 +123,8 @@ def evaluate_stop(payload: dict[str, Any]) -> str | None:
                 f"Dev Brain detected {broken_count} broken graph link(s) in dev/ ({preview}). Fix broken references before finishing."
             )
     except Exception:
-        # Fail-open if DB / Python deps aren't built in this environment.
         pass
 
-    # If src/ files changed in git, ensure i18n catalog check passes.
     if _git_dirty_paths(["src"]):
         try:
             i18n_res = subprocess.run(
@@ -85,7 +141,6 @@ def evaluate_stop(payload: dict[str, Any]) -> str | None:
         except Exception:
             pass
 
-    # If any release version manifest changed in git, enforce 3-manifest version parity.
     if _git_dirty_paths(["package.json", "src-tauri/Cargo.toml", "src-tauri/tauri.conf.json"]):
         try:
             pre_commit_dev_sync.check_version_parity()

@@ -41,6 +41,7 @@ export interface NewsViewActions {
   onUnlockProfile?: (profileId: string, pin: string) => void | Promise<void>;
   onUnlockProfileKeychain?: (profileId: string) => void | Promise<void>;
   onCreateProfile?: (name: string, pin: string) => void | Promise<void>;
+  onImportProfileFile?: (bundleB64: string, pin: string, localPin?: string) => void | Promise<void>;
   onOpenNewsSettings?: (targetTab?: string) => void;
   onOpenNewsHome?: () => void;
   onSendPerspectivesTopic?: (
@@ -865,6 +866,7 @@ export function renderNewsLaneView(
       onUnlockProfile: actions.onUnlockProfile,
       onUnlockProfileKeychain: actions.onUnlockProfileKeychain,
       onCreateProfile: actions.onCreateProfile,
+      onImportProfileFile: actions.onImportProfileFile,
     });
     return;
   }
@@ -971,6 +973,7 @@ export function renderNewsSettingsManualView(
       onUnlockProfile: actions.onUnlockProfile,
       onUnlockProfileKeychain: actions.onUnlockProfileKeychain,
       onCreateProfile: actions.onCreateProfile,
+      onImportProfileFile: actions.onImportProfileFile,
     });
     return;
   }

@@ -19,13 +19,15 @@ Links: [[../agents/INSTRUCTIONS.md]] · [[../plans/v0.10-standalone-packaging/v1
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build_preview.ps1
 ```
 Options: `-SidecarOnly` (skip reinstalling `python-runtime`), `-Cuda` (bundle CUDA instead of lean CPU PyTorch), `-ForcePython` (rebuild cached runtime).
-Outputs under `src-tauri/target/release/bundle/`: NSIS `*_x64-setup.exe`, WiX `*_x64_en-US.msi`, and `.sig` files.
+Outputs under `src-tauri/target/release/bundle/`: NSIS `*_x64-setup.exe`, WiX `*_x64_en-US.msi`, and `.sig` files (pass `-NoUpdater`, or omit `~/.tauri/satz.key`, to build local installers without updater `.sig` artifacts).
 
 ### macOS (`aarch64` Apple Silicon / Intel)
 ```bash
 ./scripts/build_preview.sh
 ```
 Outputs under `src-tauri/target/release/bundle/`: `.app`, `.dmg`, and signed updater artifacts.
+- **Note on updater signing (`satz.key`):** Both `build_preview.sh` and `build_preview.ps1` automatically apply `src-tauri/tauri.bundle.noupdater.conf.json` (pass `--no-updater` / `-NoUpdater` explicitly too) when `~/.tauri/satz.key` and `TAURI_SIGNING_PRIVATE_KEY` are absent, so `.app` / `.dmg` builds complete cleanly on secondary Macs without updater signing errors. Copy `~/.tauri/satz.key` out-of-band or rely on GitHub Actions (`TAURI_SIGNING_PRIVATE_KEY` secret) for signed updater releases.
+- **Note on verifying true bundled runtime on dev Macs:** Remove any leftover `"python"` and `"repo_root"` keys from `~/Library/Application Support/com.satz.browser/settings.json` when testing `satz.app`; otherwise `resolve_python_executable_with_resources()` executes your local checkout + `../sgs/.venv` instead of the embedded `Contents/Resources/python-runtime`.
 For **downloaded unsigned macOS previews**, preview users drag `satz.app` to `/Applications` and strip Gatekeeper quarantine once:
 ```bash
 xattr -cr /Applications/satz.app

@@ -723,6 +723,7 @@ export async function syncWebviewsNow(): Promise<void> {
     state.showBrainView ||
     state.commandBarOpen ||
     state.profilePromptOpen ||
+    state.onboardingTourStep !== null ||
     state.postUnlockLoading ||
     state.mailComposeModalOpen ||
     state.chatImagePreview !== null ||

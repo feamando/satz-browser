@@ -1,2 +1,77 @@
 {"ts": "2026-11-26T17:28:00Z", "event": "preference_captured", "id": "standalone-packager-and-updater", "summary": "Chose python-build-standalone + CPU PyTorch bundle in Tauri resources + GitHub Actions + tauri-plugin-updater + unsigned macOS xattr preview workflow."}
 {"ts": "2026-11-27T09:56:00Z", "event": "preference_captured", "id": "commit-dev-brain-sqlite", "summary": "Chose unified dev/ hierarchy, preserving runtime docs/ subfolders, committing dev/brain/brain_index.sqlite in git, and wiring live .agents/ + CLAUDE.md bridges."}
+{"ts": "2026-11-27T09:21:47.940313+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/hook_common.py"], "nodes": 79, "edges": 144}
+{"ts": "2026-11-27T09:21:56.654406+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/pre_tool_guard.py"], "nodes": 79, "edges": 144}
+{"ts": "2026-11-27T09:22:06.089045+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/pre_tool_guard.py"], "nodes": 79, "edges": 144}
+{"ts": "2026-11-27T09:22:09.040248+00:00", "event": "post_edit_brain_sync", "tool": "write_file", "paths": ["dev/agents/hooks/behavior_eval_store.py"], "nodes": 80, "edges": 144}
+{"ts": "2026-11-27T09:23:06.556898+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/behavior_eval_store.py"], "nodes": 80, "edges": 144}
+{"ts": "2026-11-27T09:23:09.616067+00:00", "event": "post_edit_brain_sync", "tool": "write_file", "paths": ["dev/agents/hooks/session_start_context.py"], "nodes": 80, "edges": 144}
+{"ts": "2026-11-27T09:23:18.698630+00:00", "event": "post_edit_brain_sync", "tool": "write_file", "paths": ["dev/agents/hooks/pre_invocation_context.py"], "nodes": 80, "edges": 144}
+{"ts": "2026-11-27T09:23:28.203144+00:00", "event": "post_edit_brain_sync", "tool": "write_file", "paths": ["dev/agents/hooks/post_edit_brain_sync.py"], "nodes": 80, "edges": 144}
+{"ts": "2026-11-27T09:23:38.045554+00:00", "event": "post_edit_brain_sync", "tool": "write_file", "paths": ["dev/agents/hooks/stop_gate_check.py"], "nodes": 80, "edges": 144}
+{"ts": "2026-11-27T09:24:28.732570+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/hooks.json"], "nodes": 80, "edges": 144}
+{"ts": "2026-11-27T09:25:12.473143+00:00", "event": "post_edit_brain_sync", "tool": "write_file", "paths": ["dev/agents/skills/satz-ui-design-i18n/SKILL.md"], "nodes": 81, "edges": 145}
+{"ts": "2026-11-27T09:25:15.350464+00:00", "event": "post_edit_brain_sync", "tool": "write_file", "paths": ["dev/agents/skills/satz-cross-platform-shell/SKILL.md"], "nodes": 82, "edges": 146}
+{"ts": "2026-11-27T09:25:18.327379+00:00", "event": "post_edit_brain_sync", "tool": "write_file", "paths": ["dev/agents/skills/satz-sidecar-models-boundary/SKILL.md"], "nodes": 83, "edges": 147}
+{"ts": "2026-11-27T09:25:21.216859+00:00", "event": "post_edit_brain_sync", "tool": "write_file", "paths": ["dev/agents/skills/satz-tools-safety-boundary/SKILL.md"], "nodes": 84, "edges": 147}
+{"ts": "2026-11-27T09:25:24.281848+00:00", "event": "post_edit_brain_sync", "tool": "write_file", "paths": ["dev/agents/skills/satz-feature-planner/SKILL.md"], "nodes": 85, "edges": 150}
+{"ts": "2026-11-27T09:25:27.249142+00:00", "event": "post_edit_brain_sync", "tool": "write_file", "paths": ["dev/agents/skills/satz-release-manager/SKILL.md"], "nodes": 85, "edges": 151}
+{"ts": "2026-11-27T09:25:51.360048+00:00", "event": "post_edit_brain_sync", "tool": "write_file", "paths": ["dev/docs/SYSTEM_OVERVIEW.md"], "nodes": 86, "edges": 155}
+{"ts": "2026-11-27T09:25:54.338487+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/docs/ARCHITECTURE.md"], "nodes": 86, "edges": 156}
+{"ts": "2026-11-27T09:25:57.294403+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/README.md"], "nodes": 86, "edges": 157}
+{"ts": "2026-11-27T09:27:44.810932+00:00", "event": "post_edit_brain_sync", "tool": "write_file", "paths": ["dev/plans/v0.13-browser-telemetry/v1.md"], "nodes": 87, "edges": 160}
+{"ts": "2026-11-27T09:27:48.110017+00:00", "event": "post_edit_brain_sync", "tool": "write_file", "paths": ["dev/plans/v0.13-browser-telemetry/tasks.md"], "nodes": 88, "edges": 163}
+{"ts": "2026-11-27T09:27:51.408728+00:00", "event": "post_edit_brain_sync", "tool": "write_file", "paths": ["dev/plans/v0.12-agent-core-instructions/v2.md"], "nodes": 89, "edges": 167}
+{"ts": "2026-11-27T09:27:54.778772+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/plans/v0.12-agent-core-instructions/tasks.md"], "nodes": 89, "edges": 168}
+{"ts": "2026-11-27T09:28:36.747673+00:00", "event": "post_edit_brain_sync", "tool": "write_file", "paths": ["dev/plans/v0.5p-action-providers/v1.md"], "nodes": 90, "edges": 171}
+{"ts": "2026-11-27T09:28:39.768612+00:00", "event": "post_edit_brain_sync", "tool": "write_file", "paths": ["dev/plans/v0.5p-action-providers/tasks.md"], "nodes": 91, "edges": 174}
+{"ts": "2026-11-27T09:28:42.793462+00:00", "event": "post_edit_brain_sync", "tool": "write_file", "paths": ["dev/plans/v0.10-standalone-packaging/v2.md"], "nodes": 92, "edges": 177}
+{"ts": "2026-11-27T09:28:45.735885+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/analytics/README.md"], "nodes": 92, "edges": 178}
+{"ts": "2026-11-27T09:28:50.165603+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/evals/README.md"], "nodes": 92, "edges": 178}
+{"ts": "2026-11-27T09:28:53.469632+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/versions/README.md"], "nodes": 92, "edges": 178}
+{"ts": "2026-11-27T09:29:29.383940+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/INSTRUCTIONS.md"], "nodes": 92, "edges": 179}
+{"ts": "2026-11-27T09:31:58.359077+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/post_edit_brain_sync.py"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:32:03.838159+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/stop_gate_check.py"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:54:23.598740+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/plans/v0.3-working-browser/v1.md"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:54:29.294910+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/plans/v0.4-core-shell/v1.md"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:54:34.780639+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/plans/v0.4-core-shell/v1.md"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:54:40.414214+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/plans/v0.4-core-shell/v1.md"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:54:46.525469+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/plans/v0.5-parity-trust-agents/v1.md"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:54:52.142986+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/plans/v0.6-satz-news/v1.md"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:54:57.961609+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/versions/NOTES_v0.6.md"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:55:56.795891+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/versions/snapshots/v0.5.0_3e7ed6c.json"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:56:06.270727+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/pre_tool_guard.py"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:56:15.513714+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/pre_tool_guard.py"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:56:20.943408+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/pre_tool_guard.py"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:56:26.449484+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/behavior_eval_store.py"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:56:32.099028+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/behavior_eval_store.py"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:56:37.790502+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/behavior_eval_store.py"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:57:18.713778+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/pre_commit_dev_sync.py"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:57:24.004936+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/pre_commit_dev_sync.py"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:57:29.588765+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/release_gate.py"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:57:35.199150+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/release_gate.py"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:57:40.848465+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/session_start_context.py"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:57:50.672778+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/evals/agent_eval_cases.yaml"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:57:56.174917+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/README.md"], "nodes": 96, "edges": 182}
+{"ts": "2026-11-27T09:57:58.454947+00:00", "event": "pre_tool_deny", "tool": "edit_file", "reason": "Blocked writing inline private key or TAURI_SIGNING_PRIVATE_KEY secret into workspace file. Keep secrets in GitHub Actions Secrets or external keystore paths."}
+{"ts": "2026-11-27T10:02:06.388441+00:00", "event": "post_edit_brain_sync", "tool": "write_file", "paths": ["dev/agents/skills/satz-git-sync/SKILL.md"], "nodes": 98, "edges": 182}
+{"ts": "2026-11-27T10:02:27.211531+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/INSTRUCTIONS.md"], "nodes": 98, "edges": 182}
+{"ts": "2026-11-27T10:02:38.482833+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/session_start_context.py"], "nodes": 98, "edges": 182}
+{"ts": "2026-11-27T10:02:54.101527+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/session_start_context.py"], "nodes": 98, "edges": 182}
+{"ts": "2026-11-27T10:04:03.876294+00:00", "event": "post_edit_brain_sync", "tool": "write_file", "paths": ["dev/plans/v0.14-first-run-onboarding/v1.md"], "nodes": 99, "edges": 186}
+{"ts": "2026-11-27T10:04:09.887990+00:00", "event": "post_edit_brain_sync", "tool": "write_file", "paths": ["dev/plans/v0.14-first-run-onboarding/tasks.md"], "nodes": 100, "edges": 189}
+{"ts": "2026-11-27T10:04:57.236931+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/post_edit_brain_sync.py"]}
+{"ts": "2026-11-27T10:11:43.549931+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/plans/v0.14-first-run-onboarding/tasks.md"]}
+{"ts": "2026-11-27T10:11:54.957914+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/plans/v0.14-first-run-onboarding/v1.md"]}
+{"ts": "2026-11-27T10:12:00.490110+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/plans/v0.14-first-run-onboarding/tasks.md"]}
+{"ts": "2026-11-27T20:53:04.589744+00:00", "event": "post_edit_brain_sync", "tool": "write_file", "paths": ["dev/versions/snapshots/v0.5.0_a5cc359_macos.json"]}
+{"ts": "2026-11-27T20:53:10.217918+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/analytics/build_telemetry.jsonl"]}
+{"ts": "2026-11-27T20:53:15.782085+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/evals/error_log.jsonl"]}
+{"ts": "2026-11-27T20:53:21.348694+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/analytics/harness_telemetry_notes.md"]}
+{"ts": "2026-11-27T20:53:26.844927+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/docs/RELEASE_RUNBOOK.md"]}
+{"ts": "2026-11-27T20:53:32.658921+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/docs/PLATFORMS.md"]}
+{"ts": "2026-11-27T20:53:38.554249+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/skills/satz-release-manager/SKILL.md"]}
+{"ts": "2026-11-27T20:53:53.082789+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/skills/satz-release-manager/SKILL.md"]}
+{"ts": "2026-11-27T20:57:32.086964+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/docs/RELEASE_RUNBOOK.md"]}
+{"ts": "2026-11-27T20:57:37.165420+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/skills/satz-release-manager/SKILL.md"]}
+{"ts": "2026-11-27T20:57:51.958389+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/skills/satz-release-manager/SKILL.md"]}

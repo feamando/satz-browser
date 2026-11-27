@@ -1056,6 +1056,43 @@ class DevBrain:
                         {"path": fp.relative_to(self.repo_root).as_posix(), "bytes": fp.stat().st_size}
                     )
 
+        def _file_sha256(path: Path) -> str:
+            h = hashlib.sha256()
+            with path.open("rb") as fh:
+                while True:
+                    chunk = fh.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+            return h.hexdigest()
+
+        release_binaries: list[dict[str, Any]] = []
+        rel_root = self.repo_root / "src-tauri" / "target" / "release"
+        if rel_root.is_dir():
+            bin_candidates: list[Path] = []
+            for exe_name in ("satz-browser.exe", "satz.exe", "satz-browser", "satz"):
+                ep = rel_root / exe_name
+                if ep.is_file():
+                    bin_candidates.append(ep)
+            bundle_root = rel_root / "bundle"
+            if bundle_root.is_dir():
+                for bp in sorted(bundle_root.rglob("*")):
+                    if bp.is_file() and bp.suffix.lower() in (".exe", ".msi", ".dmg", ".sig", ".gz", ".zip"):
+                        bin_candidates.append(bp)
+            for fp in bin_candidates:
+                st = fp.stat()
+                entry: dict[str, Any] = {
+                    "path": fp.relative_to(self.repo_root).as_posix(),
+                    "bytes": st.st_size,
+                    "mtime": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "sha256": _file_sha256(fp),
+                }
+                if fp.suffix.lower() == ".sig" and st.st_size <= 2048:
+                    entry["sig_preview"] = fp.read_text(encoding="utf-8", errors="replace").strip()
+                release_binaries.append(entry)
+
+        mon_snap = dict(self.monitor())
+        mon_snap["db_path"] = self.db_path.relative_to(self.repo_root).as_posix()
         ver = str(pkg.get("version") or tauri_cfg.get("version") or "0.0.0")
         snap = {
             "version": ver,
@@ -1068,12 +1105,43 @@ class DevBrain:
             },
             "requirements_runtime_sha256_16": req_hash,
             "shipped_planck_files": planck_chunks,
-            "dev_brain_monitor": self.monitor(),
+            "release_binaries": release_binaries,
+            "dev_brain_monitor": mon_snap,
         }
         snap_dir = self.dev_root / "versions" / "snapshots"
         snap_dir.mkdir(parents=True, exist_ok=True)
         out_path = snap_dir / f"v{ver}_{sha}.json"
         out_path.write_text(json.dumps(snap, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+        # Refresh searchable Markdown ledger under dev/versions/BINARY_RELEASES.md
+        ledger_rows = [
+            "# Built Binaries & Release Snapshot Ledger (`dev/versions/`)",
+            "",
+            "Auto-updated by `python scripts/dev_brain.py snapshot`.",
+            "",
+        ]
+        for snap_file in sorted(snap_dir.glob("*.json"), reverse=True):
+            try:
+                sdata = json.loads(snap_file.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            bins = sdata.get("release_binaries") or []
+            ledger_rows.append(
+                f"## `v{sdata.get('version')}` (`{(sdata.get('git') or {}).get('short_sha')}`, captured `{sdata.get('captured_at')}`)"
+            )
+            ledger_rows.append(f"- Snapshot: [{snap_file.name}](snapshots/{snap_file.name})")
+            if not bins:
+                ledger_rows.append("- Release binaries recorded: none")
+            else:
+                for b in bins:
+                    mb = round(float(b.get("bytes", 0)) / (1024 * 1024), 2)
+                    ledger_rows.append(
+                        f"- `{b.get('path')}` — `{mb} MB` (`{b.get('bytes')}` B, sha256 `{str(b.get('sha256', ''))[:16]}...`, mtime `{b.get('mtime')}`)"
+                    )
+            ledger_rows.append("")
+        (self.dev_root / "versions" / "BINARY_RELEASES.md").write_text(
+            "\n".join(ledger_rows), encoding="utf-8"
+        )
         return out_path
 
 

@@ -43,7 +43,7 @@
   ],
   "dev_brain_monitor": {
     "ok": false,
-    "db_path": "C:\\Users\\feama\\satz-browser\\dev\\brain\\brain_index.sqlite",
+    "db_path": "dev/brain/brain_index.sqlite",
     "encoder": "planck",
     "last_reindex_ts": "2026-11-27T09:01:34Z",
     "disk_files": 69,

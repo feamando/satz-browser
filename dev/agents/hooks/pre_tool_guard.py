@@ -7,11 +7,13 @@ import re
 from typing import Any
 
 import pre_commit_dev_sync
+import security_audit
 from hook_common import (
     REPO_ROOT,
     append_behavior_log,
     emit_noop,
     emit_tool_deny,
+    emit_tool_pass,
     extract_candidate_paths,
     extract_tool_info,
     is_sgs_repo_path,
@@ -37,6 +39,7 @@ CSS_PROP_HEX_RE = re.compile(r":[^;{}\n]*#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-
 PRIVATE_KEY_RE = re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----")
 TAURI_INLINE_KEY_RE = re.compile(r"TAURI_SIGNING_PRIVATE_KEY\s*=\s*['\"]?[A-Za-z0-9+/=]{16,}")
 GIT_TAG_CMD_RE = re.compile(r"\bgit\s+tag\b")
+GIT_PUSH_CMD_RE = re.compile(r"\bgit\s+push\b")
 GIT_TAG_READ_FLAGS_RE = re.compile(r"\bgit\s+tag\b(?:\s+(?:-l|--list|-v|--verify|-n\d*)\b|$)")
 GIT_TAG_VERSION_RE = re.compile(r"\bv?(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.]+)?)\b")
 
@@ -114,6 +117,18 @@ def _check_write_violation(payload: dict[str, Any], args: dict[str, Any]) -> str
                     "Keep secrets in GitHub Actions Secrets or external keystore paths."
                 )
 
+        # Scan candidate workspace edits for API tokens, secret URL params, and unredacted PII/OS user paths.
+        if candidate_paths:
+            rel_first = to_repo_relative(candidate_paths[0])
+            if not rel_first.startswith(".."):
+                sec_findings = security_audit.scan_text_content(rel_first, written_text)
+                if sec_findings:
+                    f0 = sec_findings[0]
+                    return (
+                        f"Blocked security/privacy leak ({f0['category']}) when writing {rel_first}:{f0['line']} "
+                        f"({f0['snippet']}). Anonymize PII/user paths and scrub keys before writing."
+                    )
+
     return None
 
 
@@ -121,6 +136,17 @@ def _check_shell_violation(args: dict[str, Any]) -> str | None:
     cmd = str(args.get("CommandLine") or args.get("command") or "").strip()
     if not cmd:
         return None
+
+    if GIT_PUSH_CMD_RE.search(cmd):
+        audit_res = security_audit.run_audit(mode="unpushed", repo_root=REPO_ROOT)
+        if not audit_res["ok"]:
+            preview = "; ".join(
+                f"{f['category']} in {f['path']}:{f['line']}" for f in audit_res["findings"][:3]
+            )
+            return (
+                f"Blocked git push: security audit detected {audit_res['finding_count']} secret/PII issue(s) "
+                f"({preview}). Run `python scripts/security_audit.py scan --mode unpushed` to inspect and scrub."
+            )
 
     if GIT_TAG_CMD_RE.search(cmd) and not GIT_TAG_READ_FLAGS_RE.match(cmd):
         try:
@@ -170,13 +196,28 @@ def main() -> None:
     try:
         reason = evaluate_tool_call(payload)
         if reason:
-            tool_name, _ = extract_tool_info(payload)
+            tool_name, args = extract_tool_info(payload)
             append_behavior_log({"event": "pre_tool_deny", "tool": tool_name, "reason": reason})
+            try:
+                import behavior_eval_store
+
+                behavior_eval_store.record_event(
+                    harness="claude" if payload.get("hook_event_name") else "antigravity",
+                    conv_id=str(payload.get("conversationId") or payload.get("session_id") or "default"),
+                    event_type="pre_tool_deny",
+                    tool_name=tool_name,
+                    rel_paths=[to_repo_relative(p) for p in extract_candidate_paths(payload)],
+                    ok=False,
+                    error_text=reason,
+                    prompt_text=str(payload.get("lastUserInput") or "")[:300],
+                )
+            except Exception:
+                pass
             emit_tool_deny(reason, payload=payload)
             return
     except Exception:
         pass
-    emit_noop()
+    emit_tool_pass(payload=payload)
 
 
 if __name__ == "__main__":

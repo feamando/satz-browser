@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import sys
@@ -14,6 +15,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+import security_audit  # noqa: E402
 
 
 def check_version_parity() -> str:
@@ -43,21 +46,42 @@ def check_ui_and_weight_limits() -> None:
                 raise AssertionError(f"Model file exceeds 90 MB GitHub limit: {f}")
 
 
+def check_privacy_and_secrets(*, mode: str = "all") -> None:
+    res = security_audit.run_audit(mode=mode, repo_root=REPO_ROOT)
+    if not res["ok"]:
+        preview = "; ".join(
+            f"{f['category']}@{f['path']}:{f['line']}" for f in res["findings"][:5]
+        )
+        raise AssertionError(
+            f"Privacy/security audit failed ({res['finding_count']} finding(s)): {preview}"
+        )
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Satz pre-commit/pre-push validator")
+    parser.add_argument("--check-only", action="store_true", help="Validate without modifying brain_index.sqlite")
+    args, _ = parser.parse_known_args()
+
     ver = check_version_parity()
     check_ui_and_weight_limits()
+    check_privacy_and_secrets(mode="all")
 
     from dev_brain import DevBrain
 
     brain = DevBrain(REPO_ROOT)
-    stats = brain.reindex()
-    mon = brain.monitor()
+    if args.check_only:
+        mon = brain.monitor()
+        stats = {"nodes": mon.get("nodes", 0), "edges": mon.get("edges", 0)}
+    else:
+        stats = brain.reindex()
+        mon = brain.monitor()
     print(
         f"[pre_commit_dev_sync] version={ver} nodes={stats['nodes']} edges={stats['edges']} "
         f"stale={mon['stale_count']} broken_edges={mon['broken_edge_count']}"
     )
     if mon["broken_edge_count"] > 0:
         print(f"[pre_commit_dev_sync] warning: {mon['broken_edge_count']} broken dev/ links", file=sys.stderr)
+        return 1
     return 0
 
 

@@ -118,6 +118,31 @@ export type RailAccordionKey = "pinned" | "conversations" | "sources" | "archive
 
 const RAIL_ACCORDION_KEY = "satz.ui.railAccordion";
 const AGENT_FOLDED_KEY = "satz.ui.agentFolded";
+const ONBOARDING_TOUR_DONE_KEY = "satz.ui.onboardingTourDone";
+
+export type OnboardingStep = "welcome" | "models" | null;
+export type OnboardingMode = "create" | "upload" | "demo";
+export type OnboardingModelTab = "cloud" | "local";
+
+export function getOnboardingTourDonePref(): boolean {
+  try {
+    return window.localStorage.getItem(ONBOARDING_TOUR_DONE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function setOnboardingTourDonePref(done: boolean): void {
+  try {
+    if (done) {
+      window.localStorage.setItem(ONBOARDING_TOUR_DONE_KEY, "1");
+    } else {
+      window.localStorage.removeItem(ONBOARDING_TOUR_DONE_KEY);
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+}
 
 const DEFAULT_RAIL_ACCORDION: Record<RailAccordionKey, boolean> = {
   pinned: true,
@@ -419,6 +444,14 @@ export interface AppState {
   >;
   profilePromptOpen: boolean;
   profilePromptDismissed: boolean;
+  onboardingStep: OnboardingStep;
+  onboardingMode: OnboardingMode;
+  onboardingModelTab: OnboardingModelTab;
+  onboardingCloudProviderId: string;
+  onboardingLocalRepoId: string;
+  onboardingValidationMsg: string;
+  onboardingDemoMode: boolean;
+  onboardingTourStep: number | null;
   profileUnlocking: boolean;
   profileUnlockLabel: string;
   profileImportDraft: {
@@ -574,6 +607,14 @@ export const state: AppState = {
   profileStatusMessage: "",
   profilePromptOpen: false,
   profilePromptDismissed: false,
+  onboardingStep: null,
+  onboardingMode: "create",
+  onboardingModelTab: "cloud",
+  onboardingCloudProviderId: "gemini",
+  onboardingLocalRepoId: "google/gemma-4-E4B-it",
+  onboardingValidationMsg: "",
+  onboardingDemoMode: false,
+  onboardingTourStep: null,
   profileUnlocking: false,
   profileUnlockLabel: "",
   profileImportDraft: null,
@@ -1855,10 +1896,30 @@ export function getDefaultComposeModelId(): LocalModelId {
   return allowed[0]?.id ?? "gemma-4-e4b";
 }
 
+export function hasAnyGenerativeModelConfigured(
+  cfg?: ModelManagementConfig | null
+): boolean {
+  const effectiveCfg = cfg ?? state.modelConfig ?? state.sidecar.model_config ?? null;
+  const lm = effectiveCfg?.local_models ?? null;
+  const gemmaReady = lm
+    ? Boolean(lm.gemma_ready)
+    : state.sidecar.models.some((m) => m.id === "gemma-4-e4b" && m.state !== "missing");
+  if (gemmaReady) return true;
+  if ((lm?.custom_llms ?? []).some((m) => Boolean(m.ready))) return true;
+  if (
+    (effectiveCfg?.cloud_providers ?? []).some(
+      (p) => Boolean(p.configured) || (p.models?.length ?? 0) > 0
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
 /**
  * Syncs `state.selectedModel` to Settings' configured `roles.chat` (or backend
- * `effective_chat` when Gemma is not installed locally) unless the user manually
- * picked a different model for the current chat session.
+ * `effective_chat` when Gemma is not installed locally), falling back cleanly
+ * to `planck3 (web)` when no local LLM or cloud API key is configured yet.
  */
 export function syncConfiguredChatModel(
   cfg?: ModelManagementConfig | null,
@@ -1880,9 +1941,13 @@ export function syncConfiguredChatModel(
   const configuredChat =
     effectiveCfg?.roles?.effective_chat?.trim() ||
     effectiveCfg?.roles?.chat?.trim();
-  if (!configuredChat) return false;
-  if (!state.userOverrodeModelInSession && state.selectedModel !== configuredChat) {
-    state.selectedModel = configuredChat as LocalModelId;
+  const desiredChat: LocalModelId | "" =
+    configuredChat === "gemma-4-e4b" && !hasAnyGenerativeModelConfigured(effectiveCfg)
+      ? "planck3 (web)"
+      : ((configuredChat || "") as LocalModelId | "");
+  if (!desiredChat) return false;
+  if (!state.userOverrodeModelInSession && state.selectedModel !== desiredChat) {
+    state.selectedModel = desiredChat;
     return true;
   }
   return false;

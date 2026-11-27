@@ -16,7 +16,7 @@ if str(HOOKS_DIR) not in sys.path:
 if str(REPO_ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from pre_commit_dev_sync import check_ui_and_weight_limits, check_version_parity
+from pre_commit_dev_sync import check_privacy_and_secrets, check_ui_and_weight_limits, check_version_parity
 
 
 def _run(cmd: list[str], label: str) -> None:
@@ -33,7 +33,8 @@ def main() -> int:
 
     ver = check_version_parity()
     check_ui_and_weight_limits()
-    print(f"[release-gate] Version verified across manifests: {ver}", flush=True)
+    check_privacy_and_secrets(mode="all")
+    print(f"[release-gate] Version & privacy security audit verified: {ver}", flush=True)
 
     _run(["npm", "run", "build"], "Frontend tsc + Vite build")
     _run(["node", "scripts/i18n_extract.mjs", "--check"], "i18n catalog & AST check")

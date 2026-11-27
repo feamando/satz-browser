@@ -211,6 +211,12 @@ import {
   renderNewsLaneView,
   renderNewsSettingsManualView,
 } from "./news";
+import {
+  renderOnboardingOverlay,
+  renderOnboardingTourPopover,
+  updateOnboardingDownloadsInPlace,
+  type OnboardingActions,
+} from "./onboarding";
 import { renderRail } from "./rail";
 import { renderSourcesPanel } from "./sources";
 import {
@@ -231,6 +237,7 @@ import {
   getActiveTabSources,
   getCachedUrlPreview,
   getDefaultComposeModelId,
+  getOnboardingTourDonePref,
   getOriginFromUrl,
   getUiThemePref,
   hasAnyActiveStream,
@@ -239,6 +246,7 @@ import {
   normalizePreviewUrlKey,
   normalizeUrl,
   resolveLearnedRouteForPrompt,
+  setOnboardingTourDonePref,
   setUiAgentFoldedPref,
   state,
   syncConfiguredChatModel,
@@ -731,6 +739,220 @@ function applySidecarUnlockStreamEvent(ev: UnlockStreamEvent): void {
   }
 }
 
+function renderProfilePromptOrOnboarding(): void {
+  renderProfileUnlockOverlay(getProfilePromptActions());
+  renderOnboardingOverlay(getOnboardingActions());
+}
+
+function renderOnboardingTour(): void {
+  renderOnboardingTourPopover({
+    onSetTourStep: (step) => {
+      setOnboardingTourStep(step);
+    },
+    onRenderRail: () => {
+      renderRailRegion();
+    },
+  });
+}
+
+function setOnboardingTourStep(step: number | null): void {
+  state.onboardingTourStep = step;
+  if (step === null) {
+    setOnboardingTourDonePref(true);
+  }
+  renderOnboardingTour();
+  scheduleWebviewLayoutSync();
+}
+
+function startOnboardingTourFromHome(): void {
+  state.showBrainView = false;
+  state.showKnowledgeView = false;
+  state.activeDetail = null;
+  state.activeTabId = "chat";
+  state.compareMode = false;
+  state.profileMenuOpen = false;
+  state.telemetryOpen = false;
+  state.profilePromptOpen = false;
+  state.onboardingStep = null;
+  state.onboardingTourStep = 0;
+  setOnboardingTourDonePref(false);
+  renderAllRegions();
+  scheduleWebviewLayoutSync();
+}
+
+function openProfileGateOrOnboarding(): void {
+  const profilesCount = state.knowledge.profile?.profiles.length ?? 0;
+  if (profilesCount === 0 && !state.knowledge.profile?.unlocked) {
+    if (state.onboardingStep === null) {
+      state.onboardingStep = "welcome";
+      state.onboardingMode = "create";
+    }
+    state.onboardingValidationMsg = "";
+  } else if (!state.knowledge.profile?.unlocked) {
+    state.onboardingStep = null;
+  }
+  state.profilePromptOpen = true;
+  renderProfilePromptOrOnboarding();
+  scheduleWebviewLayoutSync();
+}
+
+function enterOnboardingDemoMode(): void {
+  state.profileImportDraft = null;
+  state.onboardingValidationMsg = "";
+  state.onboardingStep = null;
+  state.onboardingDemoMode = true;
+  state.profilePromptOpen = false;
+  state.profilePromptDismissed = true;
+  syncConfiguredChatModel(state.modelConfig ?? state.sidecar.model_config ?? null, true);
+  if (!getOnboardingTourDonePref()) {
+    state.onboardingTourStep = 0;
+  }
+  renderProfilePromptOrOnboarding();
+  renderAllRegions();
+  scheduleWebviewLayoutSync();
+}
+
+function finishOnboardingModelSetup(): void {
+  state.onboardingStep = null;
+  state.profilePromptOpen = false;
+  state.profilePromptDismissed = false;
+  state.onboardingDemoMode = false;
+  if (!getOnboardingTourDonePref()) {
+    state.onboardingTourStep = 0;
+  }
+  renderProfilePromptOrOnboarding();
+  renderAllRegions();
+  scheduleWebviewLayoutSync();
+}
+
+function getOnboardingActions(): OnboardingActions {
+  return {
+    onCreateProfile: (name: string, pin: string) => {
+      void performProfileUnlockOrCreate({
+        mode: "create",
+        name,
+        pin,
+        closeModalOnSuccess: true,
+        fromOnboarding: true,
+      });
+    },
+    onImportProfileFile: (bundleB64: string, pin: string, localPin?: string) => {
+      void performProfileUnlockOrCreate({
+        mode: "import",
+        bundleB64,
+        pin,
+        localPin,
+        closeModalOnSuccess: true,
+        fromOnboarding: true,
+      });
+    },
+    onStartDemoMode: () => {
+      enterOnboardingDemoMode();
+    },
+    onSaveCloudModelKey: async (providerId: string, apiKey: string) => {
+      const res = await sidecarUpdateModelConfig({
+        provider_id: providerId,
+        api_key: apiKey,
+        refresh_models: true,
+      });
+      if (!res.ok) {
+        const err = res.error ?? t("main.model_cfg_err");
+        state.modelConfigStatusMsg = `${t("common.error_prefix")} ${err}`;
+        return { ok: false, error: err };
+      }
+      const prov = res.cloud_providers?.find((p) => p.id === providerId);
+      const firstModelId = prov?.models?.[0]?.id ?? "";
+      let latestCfg = res;
+      if (firstModelId) {
+        const selRes = await sidecarUpdateModelConfig({ role_chat: firstModelId });
+        if (selRes.ok) latestCfg = selRes;
+      }
+      syncConfiguredChatModel(latestCfg, true);
+      state.modelConfigStatusMsg = res.test_message || t("main.model_cfg_saved");
+      state.sidecar = await sidecarFetchHealth();
+      if (state.sidecar.model_config) {
+        syncConfiguredChatModel(state.sidecar.model_config, false);
+      }
+      renderAllRegions();
+      showAppToast(state.modelConfigStatusMsg);
+      return { ok: true };
+    },
+    onSelectChatModel: async (modelId: string) => {
+      const res = await sidecarUpdateModelConfig({ role_chat: modelId });
+      if (res.ok) {
+        syncConfiguredChatModel(res, true);
+        state.modelConfigStatusMsg = t("main.model_cfg_saved");
+      } else {
+        state.modelConfigStatusMsg = `${t("common.error_prefix")} ${res.error ?? t("main.model_cfg_err")}`;
+      }
+      renderAllRegions();
+      renderOnboardingOverlay(getOnboardingActions());
+    },
+    onStartHfDownload: async (payload) => {
+      const res = await sidecarStartHfDownload(payload);
+      if (res.ok && res.download) {
+        const existing = state.hfDownloads.filter(
+          (d) => d.download_id !== res.download!.download_id
+        );
+        state.hfDownloads = [res.download, ...existing];
+        state.modelConfigStatusMsg = t("main.lm_dl_started", {
+          repo: res.download.repo_id,
+        });
+        ensureHfDownloadPolling();
+        showAppToast(state.modelConfigStatusMsg);
+      } else {
+        state.modelConfigStatusMsg = `${t("common.error_prefix")} ${res.error ?? "download failed"}`;
+        showAppToast(state.modelConfigStatusMsg, "danger");
+      }
+      renderOnboardingOverlay(getOnboardingActions());
+    },
+    onCancelHfDownload: async (downloadId: string) => {
+      const res = await sidecarCancelHfDownload(downloadId);
+      if (res.ok) {
+        const dlRes = await sidecarListHfDownloads();
+        if (dlRes.ok) state.hfDownloads = dlRes.downloads;
+        ensureHfDownloadPolling();
+      }
+      renderOnboardingOverlay(getOnboardingActions());
+    },
+    onLinkExistingLocalFolder: async () => {
+      const res = await sidecarBrowseLocalModel("directory", t("settings.lm_point_title"));
+      if (!res.ok || !res.path) return;
+      const linkRes = await sidecarPointLocalModel({
+        role_slot: "chat_llm",
+        path: res.path,
+        set_active: true,
+      });
+      if (linkRes.ok) {
+        syncConfiguredChatModel(linkRes, true);
+        state.modelConfigStatusMsg =
+          linkRes.message || t("main.lm_linked_ok", { path: res.path });
+        showAppToast(state.modelConfigStatusMsg);
+      } else {
+        state.modelConfigStatusMsg = `${t("common.error_prefix")} ${linkRes.error ?? "failed to link model"}`;
+        showAppToast(state.modelConfigStatusMsg, "danger");
+      }
+      const [docRoles, health] = await Promise.all([
+        sidecarFetchDoctor(),
+        sidecarFetchHealth(),
+      ]);
+      state.doctorRoles = docRoles;
+      state.sidecar = health;
+      renderAllRegions();
+      renderOnboardingOverlay(getOnboardingActions());
+    },
+    onFinishModelSetup: () => {
+      finishOnboardingModelSetup();
+    },
+    onSetTourStep: (step: number | null) => {
+      setOnboardingTourStep(step);
+    },
+    onRenderRail: () => {
+      renderRailRegion();
+    },
+  };
+}
+
 async function performProfileUnlockOrCreate(opts: {
   mode: "unlock" | "keychain" | "create" | "import";
   profileId?: string;
@@ -739,6 +961,7 @@ async function performProfileUnlockOrCreate(opts: {
   bundleB64?: string;
   localPin?: string;
   closeModalOnSuccess?: boolean;
+  fromOnboarding?: boolean;
 }): Promise<{ ok: boolean; error: string }> {
   if (state.profileUnlocking) {
     return { ok: false, error: t("profile.unlocking_progress") };
@@ -781,7 +1004,7 @@ async function performProfileUnlockOrCreate(opts: {
           : t("profile.detail_verifying_pin"),
     state.profileUnlockLabel
   );
-  renderProfileUnlockOverlay(getProfilePromptActions());
+  renderProfilePromptOrOnboarding();
   renderPostUnlockGlassOverlay();
   renderAllRegions();
   scheduleWebviewLayoutSync();
@@ -805,9 +1028,24 @@ async function performProfileUnlockOrCreate(opts: {
     if (ok && res.profile) {
       state.knowledge = { ...state.knowledge, profile: res.profile };
       state.profileImportDraft = null;
-      state.profilePromptOpen = false;
-      if (opts.closeModalOnSuccess) {
+      state.onboardingDemoMode = false;
+      state.onboardingValidationMsg = "";
+      if (opts.mode === "create" && opts.fromOnboarding) {
+        state.onboardingStep = "models";
+        state.profilePromptOpen = true;
         state.profilePromptDismissed = false;
+        state.modelConfigStatusMsg = "";
+        setOnboardingTourDonePref(false);
+      } else {
+        state.onboardingStep = null;
+        state.profilePromptOpen = false;
+        if (opts.mode === "import") {
+          setOnboardingTourDonePref(true);
+          state.onboardingTourStep = null;
+        }
+        if (opts.closeModalOnSuccess) {
+          state.profilePromptDismissed = false;
+        }
       }
       const importedDisplayName =
         res.importedProfileName || res.profile.active_profile?.name || res.importedProfileId || matchedProfName;
@@ -854,7 +1092,7 @@ async function performProfileUnlockOrCreate(opts: {
     state.profileUnlockLabel = "";
     clearUnlockOverlayState();
   }
-  renderProfileUnlockOverlay(getProfilePromptActions());
+  renderProfilePromptOrOnboarding();
   renderAllRegions();
   scheduleWebviewLayoutSync();
   return { ok, error: errMsg };
@@ -1878,10 +2116,20 @@ async function initApp(): Promise<void> {
         return;
       }
       if (state.profilePromptOpen) {
-        state.profilePromptOpen = false;
-        state.profilePromptDismissed = true;
-        renderProfileUnlockOverlay(getProfilePromptActions());
-        scheduleWebviewLayoutSync();
+        if (state.onboardingStep === "models") {
+          finishOnboardingModelSetup();
+        } else if (state.onboardingStep === "welcome") {
+          enterOnboardingDemoMode();
+        } else {
+          state.profilePromptOpen = false;
+          state.profilePromptDismissed = true;
+          renderProfilePromptOrOnboarding();
+          scheduleWebviewLayoutSync();
+        }
+        return;
+      }
+      if (state.onboardingTourStep !== null) {
+        setOnboardingTourStep(null);
         return;
       }
       if (state.mailComposeModalOpen) {
@@ -2148,6 +2396,9 @@ async function initApp(): Promise<void> {
 
   window.addEventListener("resize", () => {
     scheduleWebviewLayoutSync();
+    if (state.onboardingTourStep !== null) {
+      renderOnboardingTour();
+    }
   });
 
   resizeObserver = new ResizeObserver(() => {
@@ -2184,16 +2435,7 @@ async function initApp(): Promise<void> {
     renderViewportRegion();
   });
 
-  await refreshLists();
-  try {
-    await apiEnsureNewsConversation();
-    await apiEnsureDrivesConversation();
-    await apiEnsureSettingsConversation();
-    await apiEnsureNewsSettingsConversation();
-    await apiEnsureNewsPerspectivesConversation();
-  } catch {
-    // Non-fatal if DB call fails in browser-only Vite dev preview
-  }
+  await ensureSystemConversationsAndRefreshLists();
   renderAllRegions();
 
   void pollSidecarState();
@@ -2281,9 +2523,7 @@ async function pollSidecarState(): Promise<void> {
       if (earlyKb) {
         state.knowledge = earlyKb;
         if (!earlyKb.profile?.unlocked && !state.profilePromptDismissed) {
-          state.profilePromptOpen = true;
-          renderProfileUnlockOverlay(getProfilePromptActions());
-          scheduleWebviewLayoutSync();
+          openProfileGateOrOnboarding();
         }
         renderRailRegion();
         if (!state.activeDetail && !state.showKnowledgeView && !state.showBrainView) {
@@ -2334,12 +2574,14 @@ async function pollSidecarState(): Promise<void> {
           if (freshKb) {
             state.knowledge = freshKb;
             if (freshKb.profile?.unlocked) {
-              state.profilePromptOpen = false;
+              if (state.onboardingStep !== "models") {
+                state.profilePromptOpen = false;
+              }
               state.postUnlockLoading = true;
               initPostUnlockHydrationSteps(
                 freshKb.profile?.active_profile?.name ?? freshKb.profile?.active_profile_id ?? ""
               );
-              renderProfileUnlockOverlay(getProfilePromptActions());
+              renderProfilePromptOrOnboarding();
               renderPostUnlockGlassOverlay();
               scheduleWebviewLayoutSync();
               try {
@@ -2350,9 +2592,7 @@ async function pollSidecarState(): Promise<void> {
               renderAllRegions();
               scheduleWebviewLayoutSync();
             } else if (!state.profilePromptDismissed) {
-              state.profilePromptOpen = true;
-              renderProfileUnlockOverlay(getProfilePromptActions());
-              scheduleWebviewLayoutSync();
+              openProfileGateOrOnboarding();
             }
             renderRailRegion();
             if (!state.activeDetail && !state.showKnowledgeView && !state.showBrainView) {
@@ -2361,12 +2601,14 @@ async function pollSidecarState(): Promise<void> {
           }
         } else if (earlyKb) {
           if (earlyKb.profile?.unlocked) {
-            state.profilePromptOpen = false;
+            if (state.onboardingStep !== "models") {
+              state.profilePromptOpen = false;
+            }
             state.postUnlockLoading = true;
             initPostUnlockHydrationSteps(
               earlyKb.profile?.active_profile?.name ?? earlyKb.profile?.active_profile_id ?? ""
             );
-            renderProfileUnlockOverlay(getProfilePromptActions());
+            renderProfilePromptOrOnboarding();
             renderPostUnlockGlassOverlay();
             scheduleWebviewLayoutSync();
             try {
@@ -2385,7 +2627,9 @@ async function pollSidecarState(): Promise<void> {
         ) {
           const backendUnlocked = Boolean(state.sidecar.profile.unlocked);
           if (backendUnlocked) {
-            state.profilePromptOpen = false;
+            if (state.onboardingStep !== "models") {
+              state.profilePromptOpen = false;
+            }
             state.postUnlockLoading = true;
             initPostUnlockHydrationSteps(
               state.knowledge.profile?.profiles.find(
@@ -2394,7 +2638,7 @@ async function pollSidecarState(): Promise<void> {
                 state.sidecar.profile?.active_profile_id ??
                 ""
             );
-            renderProfileUnlockOverlay(getProfilePromptActions());
+            renderProfilePromptOrOnboarding();
             renderPostUnlockGlassOverlay();
             scheduleWebviewLayoutSync();
           }
@@ -2405,13 +2649,17 @@ async function pollSidecarState(): Promise<void> {
           }
           renderAllRegions();
           scheduleWebviewLayoutSync();
-        } else if (state.knowledge.profile?.unlocked && state.profilePromptOpen) {
+        } else if (
+          state.knowledge.profile?.unlocked &&
+          state.profilePromptOpen &&
+          state.onboardingStep !== "models"
+        ) {
           state.profilePromptOpen = false;
           const mCfg = await sidecarGetModelConfig();
           if (mCfg && syncConfiguredChatModel(mCfg, true)) {
             modelChanged = true;
           }
-          renderProfileUnlockOverlay(getProfilePromptActions());
+          renderProfilePromptOrOnboarding();
           scheduleWebviewLayoutSync();
         } else if (state.knowledge.profile?.unlocked) {
           if ((state.sidecar.mail?.accounts_count ?? 0) > 0 && state.mailAccounts.length === 0) {
@@ -2668,6 +2916,20 @@ async function ensureBookmarkFaviconsResolved(): Promise<void> {
   }
 }
 
+async function ensureSystemConversationsAndRefreshLists(): Promise<void> {
+  try {
+    await apiEnsureMailConversation();
+    await apiEnsureNewsConversation();
+    await apiEnsureDrivesConversation();
+    await apiEnsureSettingsConversation();
+    await apiEnsureNewsSettingsConversation();
+    await apiEnsureNewsPerspectivesConversation();
+  } catch {
+    // Non-fatal if DB call fails in browser-only Vite dev preview
+  }
+  await refreshLists();
+}
+
 async function refreshLists(): Promise<void> {
   const [convs, bookmarks] = await Promise.all([
     apiListConversations(),
@@ -2835,6 +3097,7 @@ function renderAllRegions(): void {
   renderCommandBarOverlay(getStartScreenActions());
   renderComposeModalRegion();
   renderPostUnlockGlassOverlay();
+  renderOnboardingTour();
 }
 
 function renderWorkspaceRegions(): void {
@@ -2937,10 +3200,11 @@ function renderRailRegion(): void {
     },
     onOpenProfileUnlock: () => {
       state.profilePromptDismissed = false;
-      state.profilePromptOpen = true;
-      renderProfileUnlockOverlay(getProfilePromptActions());
-      scheduleWebviewLayoutSync();
+      openProfileGateOrOnboarding();
       renderRailRegion();
+    },
+    onReplayOnboardingTour: () => {
+      startOnboardingTourFromHome();
     },
     onLockProfile: async () => {
       state.revealedPasswords = {};
@@ -3511,6 +3775,12 @@ function ensureHfDownloadPolling(): void {
         state.doctorRoles = docRoles;
         state.sidecar = health;
         if (mCfg) syncConfiguredChatModel(mCfg, true);
+        if (state.onboardingStep === "models") {
+          renderOnboardingOverlay(getOnboardingActions());
+        }
+      }
+      if (state.onboardingStep === "models") {
+        updateOnboardingDownloadsInPlace(getOnboardingActions());
       }
       renderViewportRegion();
     })();
@@ -3841,6 +4111,15 @@ function getInlineProfileGateHandlers() {
 
 function getKnowledgeActions(): KnowledgeActions {
   return {
+      onReplayTour: () => {
+        startOnboardingTourFromHome();
+      },
+      onOpenOnboarding: () => {
+        state.profilePromptDismissed = false;
+        state.onboardingStep = "welcome";
+        state.onboardingMode = "create";
+        openProfileGateOrOnboarding();
+      },
       onTogglePauseLearning: async (paused) => {
         const updated = await sidecarSetPauseLearning(paused);
         state.knowledge.pause_learning = updated;
@@ -4702,8 +4981,8 @@ function renderViewportRegion(): void {
         })();
       },
       onOpenProfileUnlock: () => {
-        state.profilePromptOpen = true;
         state.profilePromptDismissed = false;
+        openProfileGateOrOnboarding();
         renderAllRegions();
       },
       ...getInlineProfileGateHandlers(),
@@ -6452,6 +6731,15 @@ function getStartScreenActions() {
         closeModalOnSuccess: true,
       });
     },
+    onOpenOnboarding: () => {
+      state.profilePromptDismissed = false;
+      state.onboardingStep = "welcome";
+      state.onboardingMode = "create";
+      openProfileGateOrOnboarding();
+    },
+    onStartTour: () => {
+      startOnboardingTourFromHome();
+    },
   };
 }
 
@@ -6599,16 +6887,7 @@ async function handleExecuteCommandRoute(
   state.showKnowledgeView = false;
   state.activeTabId = "chat";
   state.agentRailOpen = true;
-  await refreshLists();
-  try {
-    await apiEnsureNewsConversation();
-    await apiEnsureDrivesConversation();
-    await apiEnsureSettingsConversation();
-    await apiEnsureNewsSettingsConversation();
-    await apiEnsureNewsPerspectivesConversation();
-  } catch {
-    // Non-fatal if DB call fails in browser-only Vite dev preview
-  }
+  await ensureSystemConversationsAndRefreshLists();
   renderAllRegions();
   await handleSendChatMessage(question, [], { routeOverride: route });
 }
@@ -6639,16 +6918,7 @@ async function handleStartSubmission(raw: string): Promise<void> {
   state.activeDetail = await apiGetConversation(conv.id);
   state.activeTabId = "chat";
   state.agentRailOpen = true;
-  await refreshLists();
-  try {
-    await apiEnsureNewsConversation();
-    await apiEnsureDrivesConversation();
-    await apiEnsureSettingsConversation();
-    await apiEnsureNewsSettingsConversation();
-    await apiEnsureNewsPerspectivesConversation();
-  } catch {
-    // Non-fatal if DB call fails in browser-only Vite dev preview
-  }
+  await ensureSystemConversationsAndRefreshLists();
   renderAllRegions();
   await handleSendChatMessage(question);
 }
@@ -6665,16 +6935,7 @@ async function startDirectBrowsing(rawUrl: string, tabTitle?: string): Promise<v
   state.compareMode = false;
   state.activeTabId = tab.id;
   state.agentRailOpen = true;
-  await refreshLists();
-  try {
-    await apiEnsureNewsConversation();
-    await apiEnsureDrivesConversation();
-    await apiEnsureSettingsConversation();
-    await apiEnsureNewsSettingsConversation();
-    await apiEnsureNewsPerspectivesConversation();
-  } catch {
-    // Non-fatal if DB call fails in browser-only Vite dev preview
-  }
+  await ensureSystemConversationsAndRefreshLists();
   renderAllRegions();
 }
 
@@ -6708,16 +6969,7 @@ async function handleCreateNewTab(): Promise<void> {
   );
   state.compareMode = false;
   state.activeTabId = tab.id;
-  await refreshLists();
-  try {
-    await apiEnsureNewsConversation();
-    await apiEnsureDrivesConversation();
-    await apiEnsureSettingsConversation();
-    await apiEnsureNewsSettingsConversation();
-    await apiEnsureNewsPerspectivesConversation();
-  } catch {
-    // Non-fatal if DB call fails in browser-only Vite dev preview
-  }
+  await ensureSystemConversationsAndRefreshLists();
   renderAllRegions();
   window.setTimeout(() => {
     const input = document.getElementById(
@@ -6739,16 +6991,7 @@ async function handleCloseTab(tabId: string): Promise<void> {
     const remaining = state.activeDetail?.tabs.filter((t) => t.is_open) ?? [];
     state.activeTabId = remaining.length > 0 ? remaining[0].id : "chat";
   }
-  await refreshLists();
-  try {
-    await apiEnsureNewsConversation();
-    await apiEnsureDrivesConversation();
-    await apiEnsureSettingsConversation();
-    await apiEnsureNewsSettingsConversation();
-    await apiEnsureNewsPerspectivesConversation();
-  } catch {
-    // Non-fatal if DB call fails in browser-only Vite dev preview
-  }
+  await ensureSystemConversationsAndRefreshLists();
   renderAllRegions();
 }
 

@@ -28,7 +28,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content|Write|Edit|MultiEdit|NotebookEdit",
+        "matcher": "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content|run_command|Write|Edit|MultiEdit|NotebookEdit|Bash",
         "hooks": [
           {
             "type": "command",

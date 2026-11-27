@@ -1,6 +1,6 @@
 # Satz Browser Architecture (`v0.5+`)
 
-See also: [PLATFORMS.md](PLATFORMS.md) · [RELEASE_RUNBOOK.md](RELEASE_RUNBOOK.md) · [../agents/INSTRUCTIONS.md](../agents/INSTRUCTIONS.md)
+See also: [SYSTEM_OVERVIEW.md](SYSTEM_OVERVIEW.md) · [PLATFORMS.md](PLATFORMS.md) · [RELEASE_RUNBOOK.md](RELEASE_RUNBOOK.md) · [../agents/INSTRUCTIONS.md](../agents/INSTRUCTIONS.md)
 
 ## System Topology
 

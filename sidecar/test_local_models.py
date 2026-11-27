@@ -404,6 +404,25 @@ class TestLocalModelsPackaging(unittest.TestCase):
             hf_srv.shutdown()
             hf_srv.server_close()
 
+    def test_run_answer_standalone_without_sgs_root(self) -> None:
+        self.assertFalse(self.rt.sgs_root.exists())
+        fake_turn = mock.MagicMock()
+        fake_turn.question = "What is Satz?"
+        fake_turn.result = {
+            "answer_text": "Satz is a local-first browser.",
+            "value": "local-first browser",
+            "tier": "high",
+            "explain": {"band_label": "high", "confidence10": 8.7, "sources": []},
+            "depth": {"sources": []},
+        }
+        fake_session = mock.MagicMock()
+        fake_session.ask.return_value = fake_turn
+        with mock.patch.object(self.rt, "ensure_answerer", return_value=mock.MagicMock()), \
+             mock.patch.object(self.rt, "_get_or_create_answer_session", return_value=fake_session):
+            res = self.rt.run_answer("What is Satz?", session_id="onboard-demo")
+        self.assertEqual(res["answer"], "Satz is a local-first browser.")
+        self.assertEqual(res["confidence10"], 8.7)
+
 
 if __name__ == "__main__":
     unittest.main()

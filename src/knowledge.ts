@@ -47,6 +47,8 @@ import type {
 
 export interface KnowledgeActions {
   onChangeAppearance?: () => void;
+  onReplayTour?: () => void;
+  onOpenOnboarding?: () => void;
   onCheckAppUpdate?: () => Promise<void>;
   onInstallAppUpdate?: () => Promise<void>;
   onOpenSettingsChat?: () => void;
@@ -1567,6 +1569,7 @@ export function renderKnowledgeView(
             <span class="muted">${escapeHtml(t("settings.app_updates_title"))}</span>
             <span class="badge soft">${escapeHtml(t("settings.app_version_label", { version: state.appUpdateStatus.currentVersion || "0.5.0" }))}</span>
             <button id="kb-check-update-btn" type="button" class="btn" ${state.appUpdateStatus.checking || state.appUpdateStatus.installing ? "disabled" : ""}>${escapeHtml(state.appUpdateStatus.checking ? t("settings.app_checking_update") : t("settings.app_check_update_btn"))}</button>
+            <button id="kb-replay-tour-btn" type="button" class="btn">${escapeHtml(t("settings.replay_tour_btn"))}</button>
             ${
               state.appUpdateStatus.availableVersion
                 ? `<button id="kb-install-update-btn" type="button" class="btn primary" ${state.appUpdateStatus.installing ? "disabled" : ""}>${escapeHtml(
@@ -1649,7 +1652,7 @@ export function renderKnowledgeView(
             ${renderProfileUploadSectionHtml("kb")}
             ${
               profilesList.length === 0
-                ? `<div class="muted">${escapeHtml(t("settings.no_profiles"))}</div>`
+                ? `<div class="form-row"><span class="muted">${escapeHtml(t("settings.no_profiles"))}</span>${actions.onOpenOnboarding ? `<button id="kb-open-onboard-btn" type="button" class="btn end">${escapeHtml(t("settings.setup_profile_btn"))}</button>` : ""}</div>`
                 : profilesList
                     .map(
                       (p) => `
@@ -2284,6 +2287,14 @@ export function renderKnowledgeView(
     if (actions.onCheckAppUpdate) {
       void actions.onCheckAppUpdate();
     }
+  });
+
+  container.querySelector("#kb-replay-tour-btn")?.addEventListener("click", () => {
+    actions.onReplayTour?.();
+  });
+
+  container.querySelector("#kb-open-onboard-btn")?.addEventListener("click", () => {
+    actions.onOpenOnboarding?.();
   });
 
   container.querySelector("#kb-install-update-btn")?.addEventListener("click", () => {
