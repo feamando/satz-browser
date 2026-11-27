@@ -64,8 +64,15 @@ jobs:
           REL_VERSION: ${{ steps.meta.outputs.version }}
           REL_SHA: ${{ github.sha }}
         run: |
-          cat <<'EOF' > /tmp/release_notes.md
-          ## Preview Install Notes
+          RELEASE_ID="$(python3 - <<'PY'
+          import json, os, subprocess
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          tag = os.environ["REL_TAG"]
+          ver = os.environ["REL_VERSION"]
+          sha = os.environ["REL_SHA"]
+
+          notes = """## Preview Install Notes
 
           - **macOS (unsigned preview):** Drag `satz.app` from the `.dmg` into `/Applications`, then run once in Terminal before opening:
             ```bash
@@ -73,13 +80,8 @@ jobs:
             ```
           - **Windows:** Run `*_x64-setup.exe`. If SmartScreen appears, choose **More info -> Run anyway**.
           - **Updating existing installs:** Satz checks automatically on launch or manually via **Settings -> Appearance & Language -> App updates -> Check for updates** (your Brain, Vault, Mail, and downloaded local models stay untouched in AppData).
-          EOF
+          """.strip()
 
-          RELEASE_ID="$(python3 - <<'PY'
-          import json, os, subprocess
-
-          repo = os.environ["GITHUB_REPOSITORY"]
-          tag = os.environ["REL_TAG"]
           raw = subprocess.check_output(
               ["gh", "api", f"repos/{repo}/releases?per_page=30"],
               text=True,
@@ -90,33 +92,27 @@ jobs:
                       raise SystemExit(f"Release {tag} is already published (not draft); bump to a new tag.")
                   print(item["id"])
                   raise SystemExit(0)
-          PY
-          )"
 
-          if [[ -z "$RELEASE_ID" ]]; then
-            gh release create "$REL_TAG" \
-              --draft \
-              --target "$REL_SHA" \
-              --title "Satz Browser ${REL_VERSION}" \
-              --notes-file /tmp/release_notes.md
-
-            RELEASE_ID="$(python3 - <<'PY'
-          import json, os, subprocess
-
-          repo = os.environ["GITHUB_REPOSITORY"]
-          tag = os.environ["REL_TAG"]
-          raw = subprocess.check_output(
-              ["gh", "api", f"repos/{repo}/releases?per_page=30"],
+          payload = {
+              "tag_name": tag,
+              "target_commitish": sha,
+              "name": f"Satz Browser {ver}",
+              "body": notes,
+              "draft": True,
+              "prerelease": False,
+          }
+          created_raw = subprocess.check_output(
+              ["gh", "api", "-X", "POST", f"repos/{repo}/releases", "--input", "-"],
+              input=json.dumps(payload),
               text=True,
           )
-          for item in json.loads(raw):
-              if item.get("tag_name") == tag and item.get("draft"):
-                  print(item["id"])
-                  raise SystemExit(0)
-          raise SystemExit(f"Failed to locate created draft release for {tag}")
+          created = json.loads(created_raw)
+          rel_id = created.get("id")
+          if not rel_id:
+              raise SystemExit(f"Failed to create draft release for {tag}: {created}")
+          print(rel_id)
           PY
           )"
-          fi
 
           echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
 
