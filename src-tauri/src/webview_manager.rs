@@ -1393,6 +1393,7 @@ fn trigger_dom_capture_with_completion<R: tauri::Runtime>(
         let res = webview.with_webview(move |platform_wv| unsafe {
             use block2::RcBlock;
             use objc2::runtime::AnyObject;
+            use objc2::AnyThread;
             use objc2_foundation::{
                 NSError, NSJSONSerialization, NSJSONWritingOptions, NSString, NSUTF8StringEncoding,
             };
@@ -1650,6 +1651,7 @@ fn eval_webview_script_string<R: tauri::Runtime>(
         let res = webview.with_webview(move |platform_wv| unsafe {
             use block2::RcBlock;
             use objc2::runtime::AnyObject;
+            use objc2::AnyThread;
             use objc2_foundation::{
                 NSError, NSJSONSerialization, NSJSONWritingOptions, NSString, NSUTF8StringEncoding,
             };
