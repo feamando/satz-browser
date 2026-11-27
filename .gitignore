@@ -17,6 +17,7 @@ src-tauri/gen/
 *.db-wal
 *.sqlite
 *.sqlite3
+!dev/brain/brain_index.sqlite
 
 # Logs & OS artifacts
 *.log

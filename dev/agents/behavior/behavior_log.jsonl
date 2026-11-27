@@ -1,0 +1,2 @@
+{"ts": "2026-11-26T17:28:00Z", "event": "preference_captured", "id": "standalone-packager-and-updater", "summary": "Chose python-build-standalone + CPU PyTorch bundle in Tauri resources + GitHub Actions + tauri-plugin-updater + unsigned macOS xattr preview workflow."}
+{"ts": "2026-11-27T09:56:00Z", "event": "preference_captured", "id": "commit-dev-brain-sqlite", "summary": "Chose unified dev/ hierarchy, preserving runtime docs/ subfolders, committing dev/brain/brain_index.sqlite in git, and wiring live .agents/ + CLAUDE.md bridges."}

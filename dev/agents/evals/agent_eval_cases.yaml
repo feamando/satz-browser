@@ -1,0 +1,14 @@
+version: 1
+cases:
+  - id: gate-version-parity
+    check: "package.json, src-tauri/Cargo.toml, and src-tauri/tauri.conf.json report identical semver."
+    script: "dev/agents/hooks/pre_commit_dev_sync.py"
+  - id: gate-planck-shard-limit
+    check: "All files in sidecar/models/planck/ are strictly <= 90 MB (no Git LFS needed)."
+    script: "sidecar/test_local_models.py"
+  - id: gate-isolated-python-runtime
+    check: "Staged python-runtime passes test_local_models with python.exe -I and no ../sgs."
+    script: "scripts/prepare_sidecar_bundle.py"
+  - id: gate-dev-brain-accuracy
+    check: "Dev Brain labeled retrieval eval meets MRR >= 0.70 and Recall@5 >= 0.85."
+    script: "scripts/dev_brain.py eval --min-mrr 0.70 --min-recall5 0.85"

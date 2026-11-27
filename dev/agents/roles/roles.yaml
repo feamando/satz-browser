@@ -1,0 +1,49 @@
+version: 1
+roles:
+  - id: release-manager
+    title: Release Manager
+    owns:
+      - ".github/workflows/release.yml"
+      - "scripts/prepare_sidecar_bundle.py"
+      - "scripts/build_preview.ps1"
+      - "scripts/build_preview.sh"
+      - "src-tauri/tauri.conf.json"
+      - "src-tauri/tauri.bundle.conf.json"
+      - "dev/versions/*"
+    required_gates:
+      - "python dev/agents/hooks/release_gate.py"
+      - "python scripts/dev_brain.py snapshot"
+    skill: satz-release-manager
+
+  - id: platform-verifier
+    title: Windows & macOS Platform Verifier
+    owns:
+      - "src-tauri/src/*"
+      - "src/updater.ts"
+      - "dev/docs/PLATFORMS.md"
+    required_gates:
+      - "cargo test --manifest-path src-tauri/Cargo.toml"
+      - "isolated staged python-runtime test_local_models"
+
+  - id: dev-brain-architect
+    title: Dev Brain Graph & Knowledge Architect
+    owns:
+      - "scripts/dev_brain.py"
+      - "dev/brain/*"
+      - "dev/plans/*"
+    required_gates:
+      - "python scripts/dev_brain.py reindex"
+      - "python scripts/dev_brain.py monitor"
+      - "python scripts/dev_brain.py eval --min-mrr 0.70 --min-recall5 0.85"
+    skill: satz-dev-brain
+
+  - id: eval-security-auditor
+    title: Eval & Security Auditor
+    owns:
+      - "dev/agents/evals/*"
+      - "sidecar/satz_evals.py"
+      - "docs/evals/*"
+    required_gates:
+      - "unittest sidecar.test_evals_and_redteam"
+      - "dev_brain.py eval"
+    skill: satz-eval-auditor

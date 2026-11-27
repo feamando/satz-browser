@@ -1,0 +1,1693 @@
+$schema: brain://registry/v2
+$version: 2
+$updated: '2026-11-27T09:13:02Z'
+entities:
+  dev-agents-behavior-behavior-log-jsonl:
+    $type: note
+    name: behavior_log
+    tier: 2
+    $status: active
+    $ref: ../agents/behavior/behavior_log.jsonl
+    summary: '{"ts": "2026-11-26T17:28:00Z", "event": "preference_captured", "id":
+      "standalone-packager-and-updater", "summary": "Chose python-build-standalone
+      + CPU PyTorch bundle in Tauri resources + GitHub Actio'
+    aliases:
+    - dev/agents/behavior/behavior_log.jsonl
+    - behavior_log
+    attributes:
+      dev_kind: behavior
+      area: agents/behavior
+      path: dev/agents/behavior/behavior_log.jsonl
+      content_hash: 57f70c7e6346
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-behavior-developer-patterns-yaml:
+    $type: note
+    name: developer_patterns
+    tier: 2
+    $status: active
+    $ref: ../agents/behavior/developer_patterns.yaml
+    summary: 'rule: "Develop primarily on Windows (RTX 4090) and test/ship cleanly
+      on macOS Apple Silicon without requiring ../sgs or local Gemma weights by default."'
+    aliases:
+    - dev/agents/behavior/developer_patterns.yaml
+    - developer_patterns
+    attributes:
+      dev_kind: behavior
+      area: agents/behavior
+      path: dev/agents/behavior/developer_patterns.yaml
+      content_hash: 11b2df0e6694
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-behavior-readme:
+    $type: note
+    name: Developer Behavior Analysis (`dev/agents/behavior/`)
+    tier: 2
+    $status: active
+    $ref: ../agents/behavior/README.md
+    summary: Captures Nikita Gorshkov's verified engineering preferences, recurring
+      friction patterns, and tool/workflow adjustments so Antigravity and Claude Code
+      adapt cleanly across sessions.
+    aliases:
+    - dev/agents/behavior/README.md
+    - developer behavior analysis (`dev/agents/behavior/`)
+    attributes:
+      dev_kind: behavior
+      area: agents/behavior
+      path: dev/agents/behavior/README.md
+      content_hash: 29a7f664553f
+    relationships:
+    - dev-agents-behavior-behavior-log-jsonl
+    - dev-agents-behavior-developer-patterns-yaml
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-core-dev-flows:
+    $type: decision
+    name: Core Development Flows (`satz-browser`)
+    tier: 1
+    $status: active
+    $ref: ../agents/core_dev_flows.md
+    summary: 'Reference from [INSTRUCTIONS.md](INSTRUCTIONS.md) · Hub: [dev/](../README.md)
+      · Platform Parity: [PLATFORMS.md](../docs/PLATFORMS.md)'
+    aliases:
+    - dev/agents/core_dev_flows.md
+    - core development flows (`satz-browser`)
+    attributes:
+      dev_kind: instructions
+      area: agents
+      path: dev/agents/core_dev_flows.md
+      content_hash: 4350d8186584
+    relationships:
+    - dev-readme
+    - dev-agents-instructions
+    - dev-agents-evals-error-log-jsonl
+    - dev-agents-skills-satz-eval-auditor-skill
+    - dev-docs-platforms
+    - dev-plans-template-v1
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-evals-agent-eval-cases-yaml:
+    $type: note
+    name: agent_eval_cases
+    tier: 2
+    $status: active
+    $ref: ../agents/evals/agent_eval_cases.yaml
+    summary: 'check: "package.json, src-tauri/Cargo.toml, and src-tauri/tauri.conf.json
+      report identical semver."'
+    aliases:
+    - dev/agents/evals/agent_eval_cases.yaml
+    - agent_eval_cases
+    attributes:
+      dev_kind: eval
+      area: agents/evals
+      path: dev/agents/evals/agent_eval_cases.yaml
+      content_hash: 9807ece64684
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-evals-dev-brain-eval-cases-json:
+    $type: note
+    name: dev_brain_eval_cases
+    tier: 2
+    $status: active
+    $ref: ../agents/evals/dev_brain_eval_cases.json
+    summary: '"id": "q-release-xattr-macos",'
+    aliases:
+    - dev/agents/evals/dev_brain_eval_cases.json
+    - dev_brain_eval_cases
+    attributes:
+      dev_kind: eval
+      area: agents/evals
+      path: dev/agents/evals/dev_brain_eval_cases.json
+      content_hash: 367717de6f73
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-evals-error-log-jsonl:
+    $type: note
+    name: error_log
+    tier: 2
+    $status: active
+    $ref: ../agents/evals/error_log.jsonl
+    summary: '{"ts": "2026-11-26T16:08:00Z", "id": "err-xreader-onednn-stopiteration",
+      "scope": "sidecar/planck_vendor/xreader.py", "severity": "high", "summary":
+      "CrossReader(quant=''int8'') raised StopIteration on '
+    aliases:
+    - dev/agents/evals/error_log.jsonl
+    - error_log
+    attributes:
+      dev_kind: eval
+      area: agents/evals
+      path: dev/agents/evals/error_log.jsonl
+      content_hash: 4c87d05a902a
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-evals-readme:
+    $type: note
+    name: Agent Evals & Error Logging (`dev/agents/evals/`)
+    tier: 2
+    $status: active
+    $ref: ../agents/evals/README.md
+    summary: Stores development pipeline regression cases, structured engineering
+      error/postmortem logs, and the ground-truth retrieval benchmark for `dev/brain/`.
+    aliases:
+    - dev/agents/evals/README.md
+    - agent evals & error logging (`dev/agents/evals/`)
+    attributes:
+      dev_kind: eval
+      area: agents/evals
+      path: dev/agents/evals/README.md
+      content_hash: 30798aeec13d
+    relationships:
+    - dev-agents-evals-agent-eval-cases-yaml
+    - dev-agents-evals-dev-brain-eval-cases-json
+    - dev-agents-evals-error-log-jsonl
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-hooks-hook-common-py:
+    $type: skill
+    name: hook_common
+    tier: 2
+    $status: active
+    $ref: ../agents/hooks/hook_common.py
+    summary: '"""Shared helpers for Satz-Browser lifecycle hooks (Antigravity & Claude
+      Code)."""'
+    aliases:
+    - dev/agents/hooks/hook_common.py
+    - hook_common
+    attributes:
+      dev_kind: hook
+      area: agents/hooks
+      path: dev/agents/hooks/hook_common.py
+      content_hash: 2c11515395d0
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-hooks-hooks-json:
+    $type: skill
+    name: hooks
+    tier: 2
+    $status: active
+    $ref: ../agents/hooks/hooks.json
+    summary: '"satz-agent-lifecycle": {'
+    aliases:
+    - dev/agents/hooks/hooks.json
+    - hooks
+    attributes:
+      dev_kind: hook
+      area: agents/hooks
+      path: dev/agents/hooks/hooks.json
+      content_hash: 2bb2295950b0
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-hooks-post-edit-brain-sync-py:
+    $type: skill
+    name: post_edit_brain_sync
+    tier: 2
+    $status: active
+    $ref: ../agents/hooks/post_edit_brain_sync.py
+    summary: '"""PostToolUse hook: keep Dev Brain synchronized after dev/ edits &
+      log manifest parity."""'
+    aliases:
+    - dev/agents/hooks/post_edit_brain_sync.py
+    - post_edit_brain_sync
+    attributes:
+      dev_kind: hook
+      area: agents/hooks
+      path: dev/agents/hooks/post_edit_brain_sync.py
+      content_hash: 45d4025c0c7d
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-hooks-pre-commit-dev-sync-py:
+    $type: skill
+    name: pre_commit_dev_sync
+    tier: 2
+    $status: active
+    $ref: ../agents/hooks/pre_commit_dev_sync.py
+    summary: '"""Pre-commit / dev-sync validator:'
+    aliases:
+    - dev/agents/hooks/pre_commit_dev_sync.py
+    - pre_commit_dev_sync
+    attributes:
+      dev_kind: hook
+      area: agents/hooks
+      path: dev/agents/hooks/pre_commit_dev_sync.py
+      content_hash: 001a65eb787d
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-hooks-pre-invocation-context-py:
+    $type: skill
+    name: pre_invocation_context
+    tier: 2
+    $status: active
+    $ref: ../agents/hooks/pre_invocation_context.py
+    summary: '"""PreInvocation / UserPromptSubmit hook: inject read-only Dev Brain
+      context relevant to the prompt."""'
+    aliases:
+    - dev/agents/hooks/pre_invocation_context.py
+    - pre_invocation_context
+    attributes:
+      dev_kind: hook
+      area: agents/hooks
+      path: dev/agents/hooks/pre_invocation_context.py
+      content_hash: e1c8c782fffc
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-hooks-pre-tool-guard-py:
+    $type: skill
+    name: Strip CSS comments before checking property declarations for hardcoded hex
+      literals.
+    tier: 2
+    $status: active
+    $ref: ../agents/hooks/pre_tool_guard.py
+    summary: '"""PreToolUse guard hook: enforce hard Satz-Browser invariants across
+      Antigravity & Claude Code."""'
+    aliases:
+    - dev/agents/hooks/pre_tool_guard.py
+    - strip css comments before checking property declarations for hardcoded hex literals.
+    attributes:
+      dev_kind: hook
+      area: agents/hooks
+      path: dev/agents/hooks/pre_tool_guard.py
+      content_hash: 488f7882611e
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-hooks-readme:
+    $type: skill
+    name: Agent & Pipeline Hooks (`dev/agents/hooks/`)
+    tier: 2
+    $status: active
+    $ref: ../agents/hooks/README.md
+    summary: Cross-platform lifecycle automation hooks for Antigravity, Claude Code,
+      and local release verification.
+    aliases:
+    - dev/agents/hooks/README.md
+    - agent & pipeline hooks (`dev/agents/hooks/`)
+    attributes:
+      dev_kind: hook
+      area: agents/hooks
+      path: dev/agents/hooks/README.md
+      content_hash: 4023855af1c3
+    relationships:
+    - dev-agents-hooks-hook-common-py
+    - dev-agents-hooks-hooks-json
+    - dev-agents-hooks-post-edit-brain-sync-py
+    - dev-agents-hooks-pre-commit-dev-sync-py
+    - dev-agents-hooks-pre-invocation-context-py
+    - dev-agents-hooks-pre-tool-guard-py
+    - dev-agents-hooks-release-gate-py
+    - dev-agents-hooks-session-start-context-py
+    - dev-agents-hooks-stop-gate-check-py
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-hooks-release-gate-py:
+    $type: skill
+    name: release_gate
+    tier: 2
+    $status: active
+    $ref: ../agents/hooks/release_gate.py
+    summary: '"""Release Gate validator run prior to tagging or bundling standalone
+      Satz releases."""'
+    aliases:
+    - dev/agents/hooks/release_gate.py
+    - release_gate
+    attributes:
+      dev_kind: hook
+      area: agents/hooks
+      path: dev/agents/hooks/release_gate.py
+      content_hash: f320038fea4a
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-hooks-session-start-context-py:
+    $type: skill
+    name: session_start_context
+    tier: 2
+    $status: active
+    $ref: ../agents/hooks/session_start_context.py
+    summary: '"""SessionStart hook: inject core Satz-Browser instructions, active
+      plans, and Dev Brain status."""'
+    aliases:
+    - dev/agents/hooks/session_start_context.py
+    - session_start_context
+    attributes:
+      dev_kind: hook
+      area: agents/hooks
+      path: dev/agents/hooks/session_start_context.py
+      content_hash: 7b6a9f851c5e
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-hooks-stop-gate-check-py:
+    $type: skill
+    name: 'Infinite-loop prevention: never block again once continuation is active.'
+    tier: 2
+    $status: active
+    $ref: ../agents/hooks/stop_gate_check.py
+    summary: '"""Stop hook: auto-sync stale Dev Brain files and block stop on broken
+      links or UI/version regressions."""'
+    aliases:
+    - dev/agents/hooks/stop_gate_check.py
+    - 'infinite-loop prevention: never block again once continuation is active.'
+    attributes:
+      dev_kind: hook
+      area: agents/hooks
+      path: dev/agents/hooks/stop_gate_check.py
+      content_hash: 5893c81b7dc6
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-instructions:
+    $type: decision
+    name: Satz Browser Agent & Model Core Instructions
+    tier: 1
+    $status: active
+    $ref: ../agents/INSTRUCTIONS.md
+    summary: Applies to **Antigravity**, **Claude Code**, and all development subagents
+      working in `satz-browser`.
+    aliases:
+    - dev/agents/INSTRUCTIONS.md
+    - satz browser agent & model core instructions
+    attributes:
+      dev_kind: instructions
+      area: agents
+      path: dev/agents/INSTRUCTIONS.md
+      content_hash: 06e79cfb0431
+    relationships:
+    - dev-readme
+    - dev-agents-behavior-readme
+    - dev-agents-behavior-behavior-log-jsonl
+    - dev-agents-behavior-developer-patterns-yaml
+    - dev-agents-core-dev-flows
+    - dev-agents-evals-readme
+    - dev-agents-evals-agent-eval-cases-yaml
+    - dev-agents-evals-dev-brain-eval-cases-json
+    - dev-agents-evals-error-log-jsonl
+    - dev-agents-hooks-readme
+    - dev-agents-hooks-post-edit-brain-sync-py
+    - dev-agents-hooks-pre-commit-dev-sync-py
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-release-management:
+    $type: decision
+    name: Release Management Protocol (`satz-browser`)
+    tier: 1
+    $status: active
+    $ref: ../agents/release_management.md
+    summary: 'Reference from [INSTRUCTIONS.md](INSTRUCTIONS.md) · Runbook: [RELEASE_RUNBOOK.md](../docs/RELEASE_RUNBOOK.md)
+      · Skill: [satz-release-manager](skills/satz-release-manager/SKILL.md)'
+    aliases:
+    - dev/agents/release_management.md
+    - release management protocol (`satz-browser`)
+    attributes:
+      dev_kind: instructions
+      area: agents
+      path: dev/agents/release_management.md
+      content_hash: ebcc0b699e76
+    relationships:
+    - dev-agents-instructions
+    - dev-agents-skills-satz-release-manager-skill
+    - dev-analytics-build-telemetry-jsonl
+    - dev-docs-release-runbook
+    - dev-versions-changelog
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-roles-readme:
+    $type: person
+    name: Agent Role Management (`dev/agents/roles/`)
+    tier: 1
+    $status: active
+    $ref: ../agents/roles/README.md
+    summary: Defines specialized roles for single-agent subagents, Antigravity swarms,
+      and Claude Code agent delegation in `satz-browser` development.
+    aliases:
+    - dev/agents/roles/README.md
+    - agent role management (`dev/agents/roles/`)
+    attributes:
+      dev_kind: role
+      area: agents/roles
+      path: dev/agents/roles/README.md
+      content_hash: bdaa089e4e64
+    relationships:
+    - dev-agents-roles-roles-yaml
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-roles-roles-yaml:
+    $type: person
+    name: roles
+    tier: 1
+    $status: active
+    $ref: ../agents/roles/roles.yaml
+    summary: '".github/workflows/release.yml"'
+    aliases:
+    - dev/agents/roles/roles.yaml
+    - roles
+    attributes:
+      dev_kind: role
+      area: agents/roles
+      path: dev/agents/roles/roles.yaml
+      content_hash: 31f2e7537d12
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-skills-satz-dev-brain-skill:
+    $type: skill
+    name: satz-dev-brain
+    tier: 1
+    $status: active
+    $ref: ../agents/skills/satz-dev-brain/SKILL.md
+    summary: Use this skill to search, inspect graph relationships, re-index, monitor
+      integrity, and run accuracy evals against the Satz Development Brain DB in dev/brain/.
+    aliases:
+    - dev/agents/skills/satz-dev-brain/SKILL.md
+    - satz-dev-brain
+    attributes:
+      dev_kind: skill
+      area: agents/skills
+      path: dev/agents/skills/satz-dev-brain/SKILL.md
+      content_hash: 6b47ebdd2500
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-skills-satz-eval-auditor-skill:
+    $type: skill
+    name: satz-eval-auditor
+    tier: 1
+    $status: active
+    $ref: ../agents/skills/satz-eval-auditor/SKILL.md
+    summary: Use this skill to run app regression evals, prompt-injection red-team
+      gates, Dev Brain retrieval evals, and to record engineering errors in dev/agents/evals/error_log.jsonl.
+    aliases:
+    - dev/agents/skills/satz-eval-auditor/SKILL.md
+    - satz-eval-auditor
+    attributes:
+      dev_kind: skill
+      area: agents/skills
+      path: dev/agents/skills/satz-eval-auditor/SKILL.md
+      content_hash: ebf964e155a4
+    relationships:
+    - dev-agents-evals-readme
+    updated: '2026-11-27T09:12:58Z'
+  dev-agents-skills-satz-release-manager-skill:
+    $type: skill
+    name: satz-release-manager
+    tier: 1
+    $status: active
+    $ref: ../agents/skills/satz-release-manager/SKILL.md
+    summary: Use this skill whenever preparing, verifying, tagging, building, or debugging
+      standalone Windows and macOS releases, PyTorch CPU bundling, updater signatures,
+      or GitHub Actions release workflows for s
+    aliases:
+    - dev/agents/skills/satz-release-manager/SKILL.md
+    - satz-release-manager
+    attributes:
+      dev_kind: skill
+      area: agents/skills
+      path: dev/agents/skills/satz-release-manager/SKILL.md
+      content_hash: 47ebc4062bf9
+    relationships:
+    - dev-docs-release-runbook
+    updated: '2026-11-27T09:12:58Z'
+  dev-analytics-build-telemetry-jsonl:
+    $type: note
+    name: build_telemetry
+    tier: 2
+    $status: active
+    $ref: ../analytics/build_telemetry.jsonl
+    summary: '{"ts": "2026-11-26T16:28:00Z", "event": "standalone_preview_build",
+      "version": "0.5.0", "os": "windows-x64", "torch": "2.15.0+cpu", "sidecar_mb":
+      267.1, "python_runtime_mb": 912.3, "nsis_setup_mb": 40'
+    aliases:
+    - dev/analytics/build_telemetry.jsonl
+    - build_telemetry
+    attributes:
+      dev_kind: analytics
+      area: analytics
+      path: dev/analytics/build_telemetry.jsonl
+      content_hash: 30bd21dfa353
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-analytics-dev-brain-eval-history-jsonl:
+    $type: note
+    name: dev_brain_eval_history
+    tier: 2
+    $status: active
+    $ref: ../analytics/dev_brain_eval_history.jsonl
+    summary: '{"ts": "2026-11-27T09:01:45Z", "encoder": "planck", "cases_total": 15,
+      "hit_at_1": 0.7333, "recall_at_3": 1.0, "recall_at_5": 1.0, "mrr": 0.8556, "term_accuracy":
+      0.9333, "avg_latency_ms": 205.94, "pa'
+    aliases:
+    - dev/analytics/dev_brain_eval_history.jsonl
+    - dev_brain_eval_history
+    attributes:
+      dev_kind: analytics
+      area: analytics
+      path: dev/analytics/dev_brain_eval_history.jsonl
+      content_hash: 73f21087eef1
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-analytics-harness-telemetry-notes:
+    $type: note
+    name: Harness Telemetry & Developer Observations
+    tier: 2
+    $status: active
+    $ref: ../analytics/harness_telemetry_notes.md
+    summary: 'Tracks recurring signals across desktop runtime usage and build telemetry
+      to guide agent instructions, model fallbacks, and harness design:'
+    aliases:
+    - dev/analytics/harness_telemetry_notes.md
+    - harness telemetry & developer observations
+    attributes:
+      dev_kind: analytics
+      area: analytics
+      path: dev/analytics/harness_telemetry_notes.md
+      content_hash: c367bad8a9d4
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-analytics-readme:
+    $type: note
+    name: Development Analytics & Telemetry (`dev/analytics/`)
+    tier: 2
+    $status: active
+    $ref: ../analytics/README.md
+    summary: Tracks build sizes, packaging timings, test pass counts, Dev Brain retrieval
+      quality trends, and runtime harness telemetry observations.
+    aliases:
+    - dev/analytics/README.md
+    - development analytics & telemetry (`dev/analytics/`)
+    attributes:
+      dev_kind: analytics
+      area: analytics
+      path: dev/analytics/README.md
+      content_hash: 903742364bcc
+    relationships:
+    - dev-analytics-build-telemetry-jsonl
+    - dev-analytics-dev-brain-eval-history-jsonl
+    - dev-analytics-harness-telemetry-notes
+    updated: '2026-11-27T09:12:58Z'
+  dev-docs-architecture:
+    $type: note
+    name: Satz Browser Architecture (`v0.5+`)
+    tier: 1
+    $status: active
+    $ref: ../docs/ARCHITECTURE.md
+    summary: 'See also: [PLATFORMS.md](PLATFORMS.md) · [RELEASE_RUNBOOK.md](RELEASE_RUNBOOK.md)
+      · [../agents/INSTRUCTIONS.md](../agents/INSTRUCTIONS.md)'
+    aliases:
+    - dev/docs/ARCHITECTURE.md
+    - satz browser architecture (`v0.5+`)
+    attributes:
+      dev_kind: doc
+      area: docs
+      path: dev/docs/ARCHITECTURE.md
+      content_hash: c06dcd3c4568
+    relationships:
+    - dev-agents-instructions
+    - dev-docs-platforms
+    - dev-docs-release-runbook
+    updated: '2026-11-27T09:12:58Z'
+  dev-docs-platforms:
+    $type: note
+    name: 'Satz Platforms: Windows vs macOS'
+    tier: 1
+    $status: active
+    $ref: ../docs/PLATFORMS.md
+    summary: Nikita Gorshkov · 2026-11-03 · Living doc · SGS / Satz · Windows 11 (RTX
+      4090 box) + macOS (M3 Pro, 18 GB)
+    aliases:
+    - dev/docs/PLATFORMS.md
+    - 'satz platforms: windows vs macos'
+    attributes:
+      dev_kind: doc
+      area: docs
+      path: dev/docs/PLATFORMS.md
+      content_hash: 2537d996db1b
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-docs-release-runbook:
+    $type: note
+    name: Release Runbook (Windows & macOS Standalone Previews)
+    tier: 1
+    $status: active
+    $ref: ../docs/RELEASE_RUNBOOK.md
+    summary: 'Links: [[../agents/INSTRUCTIONS.md]] · [[../plans/v0.10-standalone-packaging/v1.md]]
+      · [PLATFORMS.md](PLATFORMS.md)'
+    aliases:
+    - dev/docs/RELEASE_RUNBOOK.md
+    - release runbook (windows & macos standalone previews)
+    attributes:
+      dev_kind: doc
+      area: docs
+      path: dev/docs/RELEASE_RUNBOOK.md
+      content_hash: e9520b0f3a05
+    relationships:
+    - dev-agents-instructions
+    - dev-docs-platforms
+    - dev-plans-v0-10-standalone-packaging-v1
+    updated: '2026-11-27T09:12:58Z'
+  dev-docs-research-satz-news-reader:
+    $type: note
+    name: 'Research Notes: Satz / Planck 3.0 News & Knowledge Reader'
+    tier: 1
+    $status: active
+    $ref: ../docs/RESEARCH_satz_news_reader.md
+    summary: 'Scope: Read-only synthesis of recent Planck 3.0 and Satz work in `../sgs`
+      (`SETUP_092026_planck3.md`, `SETUP_planck_20261008.md`, `SETUP_planck_20261009.md`,
+      `SETUP_planck_20261019.md`, `SETUP_planck_'
+    aliases:
+    - dev/docs/RESEARCH_satz_news_reader.md
+    - 'research notes: satz / planck 3.0 news & knowledge reader'
+    attributes:
+      dev_kind: doc
+      area: docs
+      path: dev/docs/RESEARCH_satz_news_reader.md
+      content_hash: e950adc0b524
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-docs-review-v0-4-macos:
+    $type: note
+    name: 'Satz v0.4 Review: macOS Field Test and Brain Check'
+    tier: 1
+    $status: active
+    $ref: ../docs/REVIEW_v0.4_macos.md
+    summary: 'Nikita Gorshkov · 2026-11-03 · Status: Input to `docs/PLAN_v0.5.md`
+      · SGS / Satz · Build `4963e38` (debug) on macOS 15, M3 Pro'
+    aliases:
+    - dev/docs/REVIEW_v0.4_macos.md
+    - 'satz v0.4 review: macos field test and brain check'
+    attributes:
+      dev_kind: doc
+      area: docs
+      path: dev/docs/REVIEW_v0.4_macos.md
+      content_hash: cf6c7add64d4
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-template-tasks:
+    $type: project
+    name: 'Tasks: `<plan-slug>`'
+    tier: 2
+    $status: Not Started
+    $ref: ../plans/_template/tasks.md
+    summary: '[ ] Design & plan approval (`v1.md`)'
+    aliases:
+    - dev/plans/_template/tasks.md
+    - 'tasks: `<plan-slug>`'
+    attributes:
+      dev_kind: tasks
+      area: plans
+      path: dev/plans/_template/tasks.md
+      content_hash: d0d849264d65
+    relationships:
+    - dev-plans-template-v1
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-template-v1:
+    $type: project
+    name: Plan Template (`<plan-slug>` · v1)
+    tier: 1
+    $status: Draft | Approved | In Progress | Complete
+    $ref: ../plans/_template/v1.md
+    summary: Owner:** Nikita Gorshkov
+    aliases:
+    - dev/plans/_template/v1.md
+    - plan template (`<plan-slug>` · v1)
+    attributes:
+      dev_kind: plan
+      area: plans
+      path: dev/plans/_template/v1.md
+      content_hash: e4efd21e16e1
+    relationships:
+    - dev-plans-template-tasks
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-readme:
+    $type: project
+    name: Development Plans (`dev/plans/`)
+    tier: 1
+    $status: active
+    $ref: ../plans/README.md
+    summary: 'Every feature initiative or milestone lives in its own subfolder under
+      `dev/plans/<plan-slug>/` containing:'
+    aliases:
+    - dev/plans/README.md
+    - development plans (`dev/plans/`)
+    attributes:
+      dev_kind: plan
+      area: plans
+      path: dev/plans/README.md
+      content_hash: ef8fbd706c19
+    relationships:
+    - dev-plans-template-v1
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-v0-10-standalone-packaging-tasks:
+    $type: project
+    name: 'Tasks: `v0.10-standalone-packaging`'
+    tier: 2
+    $status: Complete (awaiting first GitHub secret + `v*` tag push for macOS CI build)
+    $ref: ../plans/v0.10-standalone-packaging/tasks.md
+    summary: Status:** Complete (awaiting first GitHub secret + `v*` tag push for
+      macOS CI build)
+    aliases:
+    - dev/plans/v0.10-standalone-packaging/tasks.md
+    - 'tasks: `v0.10-standalone-packaging`'
+    attributes:
+      dev_kind: tasks
+      area: plans
+      path: dev/plans/v0.10-standalone-packaging/tasks.md
+      content_hash: f961e5938aa8
+    relationships:
+    - dev-plans-v0-10-standalone-packaging-v1
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-v0-10-standalone-packaging-v1:
+    $type: project
+    name: Standalone Packaging, Local Models & Auto-Update Plan (v0.10 · v1)
+    tier: 1
+    $status: Complete (Windows bundle & CI/updater wired; macOS bundle ready for CI/Mac
+      run)
+    $ref: ../plans/v0.10-standalone-packaging/v1.md
+    summary: Owner:** Nikita Gorshkov
+    aliases:
+    - dev/plans/v0.10-standalone-packaging/v1.md
+    - standalone packaging, local models & auto-update plan (v0.10 · v1)
+    attributes:
+      dev_kind: plan
+      area: plans
+      path: dev/plans/v0.10-standalone-packaging/v1.md
+      content_hash: 17b31643e77e
+    relationships:
+    - dev-docs-architecture
+    - dev-docs-release-runbook
+    - dev-plans-v0-10-standalone-packaging-tasks
+    - dev-versions-changelog
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-v0-11-dev-pipeline-brain-tasks:
+    $type: project
+    name: 'Tasks: `v0.11-dev-pipeline-brain`'
+    tier: 2
+    $status: Complete
+    $ref: ../plans/v0.11-dev-pipeline-brain/tasks.md
+    summary: '[x] Update `.gitignore` with `!dev/brain/brain_index.sqlite` exception'
+    aliases:
+    - dev/plans/v0.11-dev-pipeline-brain/tasks.md
+    - 'tasks: `v0.11-dev-pipeline-brain`'
+    attributes:
+      dev_kind: tasks
+      area: plans
+      path: dev/plans/v0.11-dev-pipeline-brain/tasks.md
+      content_hash: 88a1ba456869
+    relationships:
+    - dev-plans-v0-11-dev-pipeline-brain-v1
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-v0-11-dev-pipeline-brain-v1:
+    $type: project
+    name: Development Pipeline & Dev Brain Graph DB Plan (v0.11 · v1)
+    tier: 1
+    $status: In Progress
+    $ref: ../plans/v0.11-dev-pipeline-brain/v1.md
+    summary: Owner:** Nikita Gorshkov
+    aliases:
+    - dev/plans/v0.11-dev-pipeline-brain/v1.md
+    - development pipeline & dev brain graph db plan (v0.11 · v1)
+    attributes:
+      dev_kind: plan
+      area: plans
+      path: dev/plans/v0.11-dev-pipeline-brain/v1.md
+      content_hash: 1f1132aa9e3a
+    relationships:
+    - dev-readme
+    - dev-agents-instructions
+    - dev-plans-v0-11-dev-pipeline-brain-tasks
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-v0-12-agent-core-instructions-tasks:
+    $type: project
+    name: 'Tasks: `v0.12-agent-core-instructions`'
+    tier: 2
+    $status: Complete
+    $ref: ../plans/v0.12-agent-core-instructions/tasks.md
+    summary: '[x] Author `dev/agents/INSTRUCTIONS.md`, `core_dev_flows.md`, and `release_management.md`'
+    aliases:
+    - dev/plans/v0.12-agent-core-instructions/tasks.md
+    - 'tasks: `v0.12-agent-core-instructions`'
+    attributes:
+      dev_kind: tasks
+      area: plans
+      path: dev/plans/v0.12-agent-core-instructions/tasks.md
+      content_hash: 44287aaa1705
+    relationships:
+    - dev-plans-v0-12-agent-core-instructions-v1
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-v0-12-agent-core-instructions-v1:
+    $type: project
+    name: Antigravity & Claude Code Agent Core Instructions Plan (v0.12 · v1)
+    tier: 1
+    $status: Complete
+    $ref: ../plans/v0.12-agent-core-instructions/v1.md
+    summary: Owner:** Nikita Gorshkov
+    aliases:
+    - dev/plans/v0.12-agent-core-instructions/v1.md
+    - antigravity & claude code agent core instructions plan (v0.12 · v1)
+    attributes:
+      dev_kind: plan
+      area: plans
+      path: dev/plans/v0.12-agent-core-instructions/v1.md
+      content_hash: 13a709f9d711
+    relationships:
+    - dev-agents-instructions
+    - dev-agents-core-dev-flows
+    - dev-agents-release-management
+    - dev-plans-v0-12-agent-core-instructions-tasks
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-v0-2-foundation-tasks:
+    $type: project
+    name: 'Tasks: `v0.2-foundation`'
+    tier: 2
+    $status: Complete (Historical Baseline)
+    $ref: ../plans/v0.2-foundation/tasks.md
+    summary: Status:** Complete (Historical Baseline)
+    aliases:
+    - dev/plans/v0.2-foundation/tasks.md
+    - 'tasks: `v0.2-foundation`'
+    attributes:
+      dev_kind: tasks
+      area: plans
+      path: dev/plans/v0.2-foundation/tasks.md
+      content_hash: d6a8a4780d25
+    relationships:
+    - dev-plans-v0-2-foundation-v1
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-v0-2-foundation-v1:
+    $type: project
+    name: 'Satz: AI-Native Browser Planning File'
+    tier: 1
+    $status: active
+    $ref: ../plans/v0.2-foundation/v1.md
+    summary: Nikita Gorshkov · 2026-10-19 · Draft v0.2 · Prototype (public later)
+      · SGS · Mac \+ Windows · Builds on Planck 3.0 and memail
+    aliases:
+    - dev/plans/v0.2-foundation/v1.md
+    - 'satz: ai-native browser planning file'
+    attributes:
+      dev_kind: plan
+      area: plans
+      path: dev/plans/v0.2-foundation/v1.md
+      content_hash: 982671135a37
+    relationships:
+    - dev-plans-v0-2-foundation-tasks
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-v0-3-working-browser-tasks:
+    $type: project
+    name: 'Tasks: `v0.3-working-browser`'
+    tier: 2
+    $status: Complete (Historical Baseline)
+    $ref: ../plans/v0.3-working-browser/tasks.md
+    summary: Status:** Complete (Historical Baseline)
+    aliases:
+    - dev/plans/v0.3-working-browser/tasks.md
+    - 'tasks: `v0.3-working-browser`'
+    attributes:
+      dev_kind: tasks
+      area: plans
+      path: dev/plans/v0.3-working-browser/tasks.md
+      content_hash: 00d6e8bb7a9e
+    relationships:
+    - dev-plans-v0-3-working-browser-v1
+    - dev-versions-notes-v0-3
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-v0-3-working-browser-v1:
+    $type: project
+    name: 'Satz v0.3: Working Browser Plan (for Gemini in Antigravity)'
+    tier: 1
+    $status: active
+    $ref: ../plans/v0.3-working-browser/v1.md
+    summary: 'Nikita Gorshkov · 2026-10-20 · Status: Ready to execute · SGS / Satz
+      · Target: Windows 11 (4090 box) first, macOS second · Supersedes the Phase 0
+      lock in `.gemini/antigravity.md`'
+    aliases:
+    - dev/plans/v0.3-working-browser/v1.md
+    - 'satz v0.3: working browser plan (for gemini in antigravity)'
+    attributes:
+      dev_kind: plan
+      area: plans
+      path: dev/plans/v0.3-working-browser/v1.md
+      content_hash: 3cd80dfc0a8b
+    relationships:
+    - dev-plans-v0-3-working-browser-tasks
+    - dev-versions-notes-v0-3
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-v0-4-core-shell-tasks:
+    $type: project
+    name: 'Tasks: `v0.4-core-shell`'
+    tier: 2
+    $status: Complete (Historical Baseline)
+    $ref: ../plans/v0.4-core-shell/tasks.md
+    summary: Status:** Complete (Historical Baseline)
+    aliases:
+    - dev/plans/v0.4-core-shell/tasks.md
+    - 'tasks: `v0.4-core-shell`'
+    attributes:
+      dev_kind: tasks
+      area: plans
+      path: dev/plans/v0.4-core-shell/tasks.md
+      content_hash: 73e9070df964
+    relationships:
+    - dev-plans-v0-4-core-shell-v1
+    - dev-versions-notes-v0-4
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-v0-4-core-shell-v1:
+    $type: project
+    name: 'Satz v0.4: Secure, Faster, Mail (for Gemini in Antigravity)'
+    tier: 1
+    $status: active
+    $ref: ../plans/v0.4-core-shell/v1.md
+    summary: 'Nikita Gorshkov · 2026-10-27 · Status: Ready to execute · SGS / Satz
+      · Target: Windows 11 (4090 box) first, macOS second · Follows `docs/PLAN_v0.3_working_browser.md`
+      (M1 to M7 done, last commit 2c303'
+    aliases:
+    - dev/plans/v0.4-core-shell/v1.md
+    - 'satz v0.4: secure, faster, mail (for gemini in antigravity)'
+    attributes:
+      dev_kind: plan
+      area: plans
+      path: dev/plans/v0.4-core-shell/v1.md
+      content_hash: d51435d6e983
+    relationships:
+    - dev-plans-v0-4-core-shell-tasks
+    - dev-versions-notes-v0-4
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-v0-5-parity-trust-agents-tasks:
+    $type: project
+    name: 'Tasks: `v0.5-parity-trust-agents`'
+    tier: 2
+    $status: Complete (Historical Baseline)
+    $ref: ../plans/v0.5-parity-trust-agents/tasks.md
+    summary: Status:** Complete (Historical Baseline)
+    aliases:
+    - dev/plans/v0.5-parity-trust-agents/tasks.md
+    - 'tasks: `v0.5-parity-trust-agents`'
+    attributes:
+      dev_kind: tasks
+      area: plans
+      path: dev/plans/v0.5-parity-trust-agents/tasks.md
+      content_hash: ad9e150b05d9
+    relationships:
+    - dev-plans-v0-5-parity-trust-agents-v1
+    - dev-versions-notes-v0-5
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-v0-5-parity-trust-agents-v1:
+    $type: project
+    name: 'Satz v0.5: Parity, Trust, Agents (for Gemini in Antigravity)'
+    tier: 1
+    $status: active
+    $ref: ../plans/v0.5-parity-trust-agents/v1.md
+    summary: 'Nikita Gorshkov · 2026-11-03 · Status: Ready to execute · SGS / Satz
+      · Target: Windows 11 (4090 box) and macOS (M3 Pro) as equal targets · Follows
+      `docs/PLAN_v0.4.md` (M8 to M15 done, last commit `496'
+    aliases:
+    - dev/plans/v0.5-parity-trust-agents/v1.md
+    - 'satz v0.5: parity, trust, agents (for gemini in antigravity)'
+    attributes:
+      dev_kind: plan
+      area: plans
+      path: dev/plans/v0.5-parity-trust-agents/v1.md
+      content_hash: 4b1a8ed9f5ca
+    relationships:
+    - dev-plans-v0-5-parity-trust-agents-tasks
+    - dev-versions-notes-v0-5
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-v0-6-satz-news-tasks:
+    $type: project
+    name: 'Tasks: `v0.6-satz-news`'
+    tier: 2
+    $status: Complete (Historical Baseline)
+    $ref: ../plans/v0.6-satz-news/tasks.md
+    summary: Status:** Complete (Historical Baseline)
+    aliases:
+    - dev/plans/v0.6-satz-news/tasks.md
+    - 'tasks: `v0.6-satz-news`'
+    attributes:
+      dev_kind: tasks
+      area: plans
+      path: dev/plans/v0.6-satz-news/tasks.md
+      content_hash: ec2b8a1f2102
+    relationships:
+    - dev-plans-v0-6-satz-news-v1
+    - dev-versions-notes-v0-6
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-v0-6-satz-news-v1:
+    $type: project
+    name: 'Satz v0.6 Plan: Satz News (Pinned Conversation, Common Brain & Multi-Model
+      Reader)'
+    tier: 1
+    $status: active
+    $ref: ../plans/v0.6-satz-news/v1.md
+    summary: 'Author: Antigravity (Architecture Plan from `../sgs` Planck 3.0 Research
+      + `satz-browser` codebase)'
+    aliases:
+    - dev/plans/v0.6-satz-news/v1.md
+    - 'satz v0.6 plan: satz news (pinned conversation, common brain & multi-model
+      reader)'
+    attributes:
+      dev_kind: plan
+      area: plans
+      path: dev/plans/v0.6-satz-news/v1.md
+      content_hash: b90fc55c32f6
+    relationships:
+    - dev-docs-research-satz-news-reader
+    - dev-plans-v0-2-foundation-v1
+    - dev-plans-v0-5-parity-trust-agents-v1
+    - dev-plans-v0-6-satz-news-tasks
+    - dev-versions-notes-v0-6
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-v0-7-design-system-tasks:
+    $type: project
+    name: 'Tasks: `v0.7-design-system`'
+    tier: 2
+    $status: Complete (Historical Baseline)
+    $ref: ../plans/v0.7-design-system/tasks.md
+    summary: Status:** Complete (Historical Baseline)
+    aliases:
+    - dev/plans/v0.7-design-system/tasks.md
+    - 'tasks: `v0.7-design-system`'
+    attributes:
+      dev_kind: tasks
+      area: plans
+      path: dev/plans/v0.7-design-system/tasks.md
+      content_hash: 6f078579783e
+    relationships:
+    - dev-plans-v0-7-design-system-v1
+    - dev-versions-notes-v0-7
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-v0-7-design-system-v1:
+    $type: project
+    name: 'Satz v0.7 Plan: Design System Migration'
+    tier: 1
+    $status: active
+    $ref: ../plans/v0.7-design-system/v1.md
+    summary: 'Author: Nikita Gorshkov (with Claude) · 2026-11-18 · Status: Ready for
+      execution · Executor: Gemini / Antigravity · Follows: `docs/PLAN_v0.6_satz_news.md`'
+    aliases:
+    - dev/plans/v0.7-design-system/v1.md
+    - 'satz v0.7 plan: design system migration'
+    attributes:
+      dev_kind: plan
+      area: plans
+      path: dev/plans/v0.7-design-system/v1.md
+      content_hash: ee68660299fc
+    relationships:
+    - dev-plans-v0-7-design-system-tasks
+    - dev-versions-notes-v0-7
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-v0-8-settings-chat-tasks:
+    $type: project
+    name: 'Tasks: `v0.8-settings-chat`'
+    tier: 2
+    $status: Complete (Historical Baseline)
+    $ref: ../plans/v0.8-settings-chat/tasks.md
+    summary: Status:** Complete (Historical Baseline)
+    aliases:
+    - dev/plans/v0.8-settings-chat/tasks.md
+    - 'tasks: `v0.8-settings-chat`'
+    attributes:
+      dev_kind: tasks
+      area: plans
+      path: dev/plans/v0.8-settings-chat/tasks.md
+      content_hash: 1b6c77bdcf8d
+    relationships:
+    - dev-plans-v0-8-settings-chat-v1
+    - dev-versions-notes-v0-8
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-v0-8-settings-chat-v1:
+    $type: project
+    name: 'Satz v0.8 Plan: Conversational Settings Workspace & Declarative Tool Registry'
+    tier: 1
+    $status: active
+    $ref: ../plans/v0.8-settings-chat/v1.md
+    summary: 'Author: Nikita Gorshkov (with Antigravity) · 2026-11-24 · Status: Ready
+      for execution · Follows: `docs/PLAN_v0.7_design_system.md` · Spec: `docs/design/DESIGN_SYSTEM.md`'
+    aliases:
+    - dev/plans/v0.8-settings-chat/v1.md
+    - 'satz v0.8 plan: conversational settings workspace & declarative tool registry'
+    attributes:
+      dev_kind: plan
+      area: plans
+      path: dev/plans/v0.8-settings-chat/v1.md
+      content_hash: 9cda7f35788b
+    relationships:
+    - dev-plans-v0-8-settings-chat-tasks
+    - dev-versions-notes-v0-8
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-v0-9-localization-tasks:
+    $type: project
+    name: 'Tasks: `v0.9-localization`'
+    tier: 2
+    $status: Complete (Historical Baseline)
+    $ref: ../plans/v0.9-localization/tasks.md
+    summary: Status:** Complete (Historical Baseline)
+    aliases:
+    - dev/plans/v0.9-localization/tasks.md
+    - 'tasks: `v0.9-localization`'
+    attributes:
+      dev_kind: tasks
+      area: plans
+      path: dev/plans/v0.9-localization/tasks.md
+      content_hash: 1a114f35503e
+    relationships:
+    - dev-plans-v0-9-localization-v1
+    - dev-versions-notes-v0-9
+    updated: '2026-11-27T09:12:58Z'
+  dev-plans-v0-9-localization-v1:
+    $type: project
+    name: 'Satz v0.9 Plan: App-Wide UI Localization with User-Model Translation'
+    tier: 1
+    $status: active
+    $ref: ../plans/v0.9-localization/v1.md
+    summary: 'Status: Ready for Execution (`L1`–`L5`)'
+    aliases:
+    - dev/plans/v0.9-localization/v1.md
+    - 'satz v0.9 plan: app-wide ui localization with user-model translation'
+    attributes:
+      dev_kind: plan
+      area: plans
+      path: dev/plans/v0.9-localization/v1.md
+      content_hash: a64d906c90c0
+    relationships:
+    - dev-plans-v0-9-localization-tasks
+    - dev-versions-notes-v0-9
+    updated: '2026-11-27T09:12:58Z'
+  dev-readme:
+    $type: note
+    name: Satz Browser Development Hub (`dev/`)
+    tier: 2
+    $status: active
+    $ref: ../README.md
+    summary: Central engineering workspace for managing Satz Browser architecture,
+      documentation, releases, version snapshots, analytics, agent instructions/skills/hooks/roles/evals,
+      versioned plans, and the **Dev
+    aliases:
+    - dev/README.md
+    - satz browser development hub (`dev/`)
+    attributes:
+      dev_kind: dev_doc
+      area: dev
+      path: dev/README.md
+      content_hash: 44aaa2fc7543
+    relationships:
+    - dev-agents-instructions
+    - dev-agents-behavior-readme
+    - dev-agents-evals-readme
+    - dev-agents-hooks-readme
+    - dev-agents-roles-readme
+    - dev-analytics-readme
+    - dev-analytics-build-telemetry-jsonl
+    - dev-analytics-dev-brain-eval-history-jsonl
+    - dev-docs-architecture
+    - dev-docs-platforms
+    - dev-docs-release-runbook
+    - dev-plans-readme
+    updated: '2026-11-27T09:12:58Z'
+  dev-versions-changelog:
+    $type: decision
+    name: Changelog
+    tier: 1
+    $status: active
+    $ref: ../versions/CHANGELOG.md
+    summary: All notable milestone releases and pipeline changes for `satz-browser`.
+      Historical milestone logs remain preserved in `NOTES_v0.3.md` through `NOTES_v0.9.md`.
+    aliases:
+    - dev/versions/CHANGELOG.md
+    - changelog
+    attributes:
+      dev_kind: version
+      area: versions
+      path: dev/versions/CHANGELOG.md
+      content_hash: 5ac1bb71ea9f
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  dev-versions-notes-v0-3:
+    $type: decision
+    name: Satz v0.3 Execution Notes
+    tier: 1
+    $status: active
+    $ref: ../versions/NOTES_v0.3.md
+    summary: 'Owner: Nikita Gorshkov · Date: 2026-10-20 · Target: Windows 11 (4090
+      box) first, macOS second'
+    aliases:
+    - dev/versions/NOTES_v0.3.md
+    - satz v0.3 execution notes
+    attributes:
+      dev_kind: version
+      area: versions
+      path: dev/versions/NOTES_v0.3.md
+      content_hash: 59584b5c0f2b
+    relationships:
+    - dev-plans-v0-3-working-browser-v1
+    updated: '2026-11-27T09:12:58Z'
+  dev-versions-notes-v0-4:
+    $type: decision
+    name: Satz v0.4 Execution Notes
+    tier: 1
+    $status: active
+    $ref: ../versions/NOTES_v0.4.md
+    summary: 'Owner: Nikita Gorshkov · Date: 2026-10-27 · Target: Windows 11 (4090
+      box) first, macOS second · Spec: `docs/PLAN_v0.4.md`'
+    aliases:
+    - dev/versions/NOTES_v0.4.md
+    - satz v0.4 execution notes
+    attributes:
+      dev_kind: version
+      area: versions
+      path: dev/versions/NOTES_v0.4.md
+      content_hash: c71346ab49db
+    relationships:
+    - dev-plans-v0-4-core-shell-v1
+    updated: '2026-11-27T09:12:58Z'
+  dev-versions-notes-v0-5:
+    $type: decision
+    name: Satz v0.5 Execution Notes
+    tier: 1
+    $status: active
+    $ref: ../versions/NOTES_v0.5.md
+    summary: 'Owner: Nikita Gorshkov · Date: 2026-11-09 · Spec: `docs/PLAN_v0.5.md`
+      · Platforms: Windows 11 (RTX 4090 box) + macOS (M3 Pro, 18 GB)'
+    aliases:
+    - dev/versions/NOTES_v0.5.md
+    - satz v0.5 execution notes
+    attributes:
+      dev_kind: version
+      area: versions
+      path: dev/versions/NOTES_v0.5.md
+      content_hash: 27abf8294289
+    relationships:
+    - dev-plans-v0-5-parity-trust-agents-v1
+    updated: '2026-11-27T09:12:58Z'
+  dev-versions-notes-v0-6:
+    $type: decision
+    name: 'Satz v0.6 Execution Notes: Satz News'
+    tier: 1
+    $status: active
+    $ref: ../versions/NOTES_v0.6.md
+    summary: 'Owner: Nikita Gorshkov · Date: 2026-11-17 · Spec: `docs/PLAN_v0.6_satz_news.md`
+      · Research: `docs/RESEARCH_satz_news_reader.md` · Platform Verified: Windows
+      11'
+    aliases:
+    - dev/versions/NOTES_v0.6.md
+    - 'satz v0.6 execution notes: satz news'
+    attributes:
+      dev_kind: version
+      area: versions
+      path: dev/versions/NOTES_v0.6.md
+      content_hash: 40bafdcaf3d1
+    relationships:
+    - dev-plans-v0-6-satz-news-v1
+    updated: '2026-11-27T09:12:58Z'
+  dev-versions-notes-v0-7:
+    $type: decision
+    name: 'Satz v0.7 Notes: Design System Migration'
+    tier: 1
+    $status: active
+    $ref: ../versions/NOTES_v0.7.md
+    summary: 'Plan: `docs/PLAN_v0.7_design_system.md` · Spec: `docs/design/DESIGN_SYSTEM.md`
+      · Platform verified: Windows (`1440x900`)'
+    aliases:
+    - dev/versions/NOTES_v0.7.md
+    - 'satz v0.7 notes: design system migration'
+    attributes:
+      dev_kind: version
+      area: versions
+      path: dev/versions/NOTES_v0.7.md
+      content_hash: 9b511128025e
+    relationships:
+    - dev-plans-v0-7-design-system-v1
+    updated: '2026-11-27T09:12:58Z'
+  dev-versions-notes-v0-8:
+    $type: decision
+    name: 'Satz v0.8 Notes: Conversational Settings Workspace & Declarative Tool Registry'
+    tier: 1
+    $status: Complete (`docs/PLAN_v0.8_settings_chat.md` §1)
+    $ref: ../versions/NOTES_v0.8.md
+    summary: 'Plan: `docs/PLAN_v0.8_settings_chat.md` · Spec: `docs/design/DESIGN_SYSTEM.md`
+      (v1.2) · Platform: Windows (`1440x900`)'
+    aliases:
+    - dev/versions/NOTES_v0.8.md
+    - 'satz v0.8 notes: conversational settings workspace & declarative tool registry'
+    attributes:
+      dev_kind: version
+      area: versions
+      path: dev/versions/NOTES_v0.8.md
+      content_hash: 82ef29a68c85
+    relationships:
+    - dev-plans-v0-8-settings-chat-v1
+    updated: '2026-11-27T09:12:58Z'
+  dev-versions-notes-v0-9:
+    $type: decision
+    name: 'Satz v0.9 Notes: App-Wide UI Localization with User-Model Translation'
+    tier: 1
+    $status: Complete
+    $ref: ../versions/NOTES_v0.9.md
+    summary: 'Plan: `docs/PLAN_v0.9_localization.md` · Spec: `docs/design/DESIGN_SYSTEM.md`
+      (v1.2) · Platform: Windows (`1440x900`)'
+    aliases:
+    - dev/versions/NOTES_v0.9.md
+    - 'satz v0.9 notes: app-wide ui localization with user-model translation'
+    attributes:
+      dev_kind: version
+      area: versions
+      path: dev/versions/NOTES_v0.9.md
+      content_hash: 1a822e928461
+    relationships:
+    - dev-plans-v0-9-localization-v1
+    updated: '2026-11-27T09:12:58Z'
+  dev-versions-readme:
+    $type: decision
+    name: Version History & Release Snapshots (`dev/versions/`)
+    tier: 1
+    $status: active
+    $ref: ../versions/README.md
+    summary: Stores milestone implementation notes (`NOTES_v0.3.md`..`NOTES_v0.9.md`),
+      [CHANGELOG.md](CHANGELOG.md), and machine-readable release snapshots under [snapshots/](snapshots/).
+    aliases:
+    - dev/versions/README.md
+    - version history & release snapshots (`dev/versions/`)
+    attributes:
+      dev_kind: version
+      area: versions
+      path: dev/versions/README.md
+      content_hash: 32a8156348ef
+    relationships:
+    - dev-versions-changelog
+    updated: '2026-11-27T09:12:58Z'
+  dev-versions-snapshots-v0-5-0-3e7ed6c-json:
+    $type: decision
+    name: v0.5.0_3e7ed6c
+    tier: 2
+    $status: active
+    $ref: ../versions/snapshots/v0.5.0_3e7ed6c.json
+    summary: '"captured_at": "2026-11-27T09:02:48Z",'
+    aliases:
+    - dev/versions/snapshots/v0.5.0_3e7ed6c.json
+    - v0.5.0_3e7ed6c
+    attributes:
+      dev_kind: snapshot
+      area: versions
+      path: dev/versions/snapshots/v0.5.0_3e7ed6c.json
+      content_hash: a61dd053e995
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  docs-design-components-html:
+    $type: note
+    name: components
+    tier: 2
+    $status: active
+    $ref: ../../docs/design/components.html
+    summary: <html lang="en" data-layout="floating">
+    aliases:
+    - docs/design/components.html
+    - components
+    attributes:
+      dev_kind: design
+      area: docs/design
+      path: docs/design/components.html
+      content_hash: 36923e3d5901
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  docs-design-design-system:
+    $type: note
+    name: Satz Design System
+    tier: 2
+    $status: active
+    $ref: ../../docs/design/DESIGN_SYSTEM.md
+    summary: 'Version 1.2 · 2026-11-24 · Status: migrated (D1-D9 + v0.8 Settings Chat
+      complete) · Owner: Nikita Gorshkov'
+    aliases:
+    - docs/design/DESIGN_SYSTEM.md
+    - satz design system
+    attributes:
+      dev_kind: design
+      area: docs/design
+      path: docs/design/DESIGN_SYSTEM.md
+      content_hash: cd371c847ebf
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  docs-design-satz-directions-html:
+    $type: note
+    name: satz-directions
+    tier: 2
+    $status: active
+    $ref: ../../docs/design/satz-directions.html
+    summary: <title>Satz Interface Studies</title>
+    aliases:
+    - docs/design/satz-directions.html
+    - satz-directions
+    attributes:
+      dev_kind: design
+      area: docs/design
+      path: docs/design/satz-directions.html
+      content_hash: b0599853f91c
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  docs-evals-eval-20261120-idealo-unsubscribe-action-json:
+    $type: note
+    name: eval_20261120_idealo_unsubscribe_action
+    tier: 2
+    $status: active
+    $ref: ../../docs/evals/eval_20261120_idealo_unsubscribe_action.json
+    summary: '"eval_id": "eval_20261120_idealo_unsubscribe_action",'
+    aliases:
+    - docs/evals/eval_20261120_idealo_unsubscribe_action.json
+    - eval_20261120_idealo_unsubscribe_action
+    attributes:
+      dev_kind: runtime_eval
+      area: docs/evals
+      path: docs/evals/eval_20261120_idealo_unsubscribe_action.json
+      content_hash: 5d01225aef33
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  docs-evals-eval-20261121-order-mail-citation-grounding-json:
+    $type: note
+    name: eval_20261121_order_mail_citation_grounding
+    tier: 2
+    $status: active
+    $ref: ../../docs/evals/eval_20261121_order_mail_citation_grounding.json
+    summary: '"eval_id": "eval_20261121_order_mail_citation_grounding",'
+    aliases:
+    - docs/evals/eval_20261121_order_mail_citation_grounding.json
+    - eval_20261121_order_mail_citation_grounding
+    attributes:
+      dev_kind: runtime_eval
+      area: docs/evals
+      path: docs/evals/eval_20261121_order_mail_citation_grounding.json
+      content_hash: ae7f1531ee49
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  docs-evals-eval-20261121-prompt-injection-ignore-prev-json:
+    $type: note
+    name: eval_20261121_prompt_injection_ignore_prev
+    tier: 2
+    $status: active
+    $ref: ../../docs/evals/eval_20261121_prompt_injection_ignore_prev.json
+    summary: '"eval_id": "eval_20261121_prompt_injection_ignore_prev",'
+    aliases:
+    - docs/evals/eval_20261121_prompt_injection_ignore_prev.json
+    - eval_20261121_prompt_injection_ignore_prev
+    attributes:
+      dev_kind: runtime_eval
+      area: docs/evals
+      path: docs/evals/eval_20261121_prompt_injection_ignore_prev.json
+      content_hash: 9fce14b015db
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  docs-evals-eval-20261124-settings-prompt-injection-json:
+    $type: note
+    name: eval_20261124_settings_prompt_injection
+    tier: 2
+    $status: active
+    $ref: ../../docs/evals/eval_20261124_settings_prompt_injection.json
+    summary: '"eval_id": "eval_20261124_settings_prompt_injection",'
+    aliases:
+    - docs/evals/eval_20261124_settings_prompt_injection.json
+    - eval_20261124_settings_prompt_injection
+    attributes:
+      dev_kind: runtime_eval
+      area: docs/evals
+      path: docs/evals/eval_20261124_settings_prompt_injection.json
+      content_hash: ff5dd11a5470
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  docs-evals-eval-20261125-213147-case-c90c-json:
+    $type: note
+    name: eval_20261125_213147_case_c90c
+    tier: 2
+    $status: active
+    $ref: ../../docs/evals/eval_20261125_213147_case_c90c.json
+    summary: '"eval_id": "eval_20261125_213147_case_c90c",'
+    aliases:
+    - docs/evals/eval_20261125_213147_case_c90c.json
+    - eval_20261125_213147_case_c90c
+    attributes:
+      dev_kind: runtime_eval
+      area: docs/evals
+      path: docs/evals/eval_20261125_213147_case_c90c.json
+      content_hash: cc9c1b00e305
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+  docs-evals-readme:
+    $type: note
+    name: Satz Regression Evals (`docs/evals/`)
+    tier: 2
+    $status: active
+    $ref: ../../docs/evals/README.md
+    summary: Sanitized local regression fixtures captured directly from failed assistant
+      turns using the one-click **"Save failure as eval"** button in Chat or `POST
+      /evals/capture`.
+    aliases:
+    - docs/evals/README.md
+    - satz regression evals (`docs/evals/`)
+    attributes:
+      dev_kind: runtime_eval
+      area: docs/evals
+      path: docs/evals/README.md
+      content_hash: bc0d97e332c0
+    relationships: []
+    updated: '2026-11-27T09:12:58Z'
+alias_index:
+  behavior_log: dev-agents-behavior-behavior-log-jsonl
+  dev/agents/behavior/behavior_log.jsonl: dev-agents-behavior-behavior-log-jsonl
+  developer_patterns: dev-agents-behavior-developer-patterns-yaml
+  dev/agents/behavior/developer_patterns.yaml: dev-agents-behavior-developer-patterns-yaml
+  developer behavior analysis (`dev/agents/behavior/`): dev-agents-behavior-readme
+  dev/agents/behavior/readme.md: dev-agents-behavior-readme
+  core development flows (`satz-browser`): dev-agents-core-dev-flows
+  dev/agents/core_dev_flows.md: dev-agents-core-dev-flows
+  agent_eval_cases: dev-agents-evals-agent-eval-cases-yaml
+  dev/agents/evals/agent_eval_cases.yaml: dev-agents-evals-agent-eval-cases-yaml
+  dev_brain_eval_cases: dev-agents-evals-dev-brain-eval-cases-json
+  dev/agents/evals/dev_brain_eval_cases.json: dev-agents-evals-dev-brain-eval-cases-json
+  error_log: dev-agents-evals-error-log-jsonl
+  dev/agents/evals/error_log.jsonl: dev-agents-evals-error-log-jsonl
+  agent evals & error logging (`dev/agents/evals/`): dev-agents-evals-readme
+  dev/agents/evals/readme.md: dev-agents-evals-readme
+  hook_common: dev-agents-hooks-hook-common-py
+  dev/agents/hooks/hook_common.py: dev-agents-hooks-hook-common-py
+  hooks: dev-agents-hooks-hooks-json
+  dev/agents/hooks/hooks.json: dev-agents-hooks-hooks-json
+  post_edit_brain_sync: dev-agents-hooks-post-edit-brain-sync-py
+  dev/agents/hooks/post_edit_brain_sync.py: dev-agents-hooks-post-edit-brain-sync-py
+  pre_commit_dev_sync: dev-agents-hooks-pre-commit-dev-sync-py
+  dev/agents/hooks/pre_commit_dev_sync.py: dev-agents-hooks-pre-commit-dev-sync-py
+  pre_invocation_context: dev-agents-hooks-pre-invocation-context-py
+  dev/agents/hooks/pre_invocation_context.py: dev-agents-hooks-pre-invocation-context-py
+  strip css comments before checking property declarations for hardcoded hex literals.: dev-agents-hooks-pre-tool-guard-py
+  dev/agents/hooks/pre_tool_guard.py: dev-agents-hooks-pre-tool-guard-py
+  agent & pipeline hooks (`dev/agents/hooks/`): dev-agents-hooks-readme
+  dev/agents/hooks/readme.md: dev-agents-hooks-readme
+  release_gate: dev-agents-hooks-release-gate-py
+  dev/agents/hooks/release_gate.py: dev-agents-hooks-release-gate-py
+  session_start_context: dev-agents-hooks-session-start-context-py
+  dev/agents/hooks/session_start_context.py: dev-agents-hooks-session-start-context-py
+  'infinite-loop prevention: never block again once continuation is active.': dev-agents-hooks-stop-gate-check-py
+  dev/agents/hooks/stop_gate_check.py: dev-agents-hooks-stop-gate-check-py
+  satz browser agent & model core instructions: dev-agents-instructions
+  dev/agents/instructions.md: dev-agents-instructions
+  release management protocol (`satz-browser`): dev-agents-release-management
+  dev/agents/release_management.md: dev-agents-release-management
+  agent role management (`dev/agents/roles/`): dev-agents-roles-readme
+  dev/agents/roles/readme.md: dev-agents-roles-readme
+  roles: dev-agents-roles-roles-yaml
+  dev/agents/roles/roles.yaml: dev-agents-roles-roles-yaml
+  satz-dev-brain: dev-agents-skills-satz-dev-brain-skill
+  dev/agents/skills/satz-dev-brain/skill.md: dev-agents-skills-satz-dev-brain-skill
+  satz-eval-auditor: dev-agents-skills-satz-eval-auditor-skill
+  dev/agents/skills/satz-eval-auditor/skill.md: dev-agents-skills-satz-eval-auditor-skill
+  satz-release-manager: dev-agents-skills-satz-release-manager-skill
+  dev/agents/skills/satz-release-manager/skill.md: dev-agents-skills-satz-release-manager-skill
+  build_telemetry: dev-analytics-build-telemetry-jsonl
+  dev/analytics/build_telemetry.jsonl: dev-analytics-build-telemetry-jsonl
+  dev_brain_eval_history: dev-analytics-dev-brain-eval-history-jsonl
+  dev/analytics/dev_brain_eval_history.jsonl: dev-analytics-dev-brain-eval-history-jsonl
+  harness telemetry & developer observations: dev-analytics-harness-telemetry-notes
+  dev/analytics/harness_telemetry_notes.md: dev-analytics-harness-telemetry-notes
+  development analytics & telemetry (`dev/analytics/`): dev-analytics-readme
+  dev/analytics/readme.md: dev-analytics-readme
+  satz browser architecture (`v0.5+`): dev-docs-architecture
+  dev/docs/architecture.md: dev-docs-architecture
+  'satz platforms: windows vs macos': dev-docs-platforms
+  dev/docs/platforms.md: dev-docs-platforms
+  release runbook (windows & macos standalone previews): dev-docs-release-runbook
+  dev/docs/release_runbook.md: dev-docs-release-runbook
+  'research notes: satz / planck 3.0 news & knowledge reader': dev-docs-research-satz-news-reader
+  dev/docs/research_satz_news_reader.md: dev-docs-research-satz-news-reader
+  'satz v0.4 review: macos field test and brain check': dev-docs-review-v0-4-macos
+  dev/docs/review_v0.4_macos.md: dev-docs-review-v0-4-macos
+  'tasks: `<plan-slug>`': dev-plans-template-tasks
+  dev/plans/_template/tasks.md: dev-plans-template-tasks
+  plan template (`<plan-slug>` · v1): dev-plans-template-v1
+  dev/plans/_template/v1.md: dev-plans-template-v1
+  development plans (`dev/plans/`): dev-plans-readme
+  dev/plans/readme.md: dev-plans-readme
+  'tasks: `v0.10-standalone-packaging`': dev-plans-v0-10-standalone-packaging-tasks
+  dev/plans/v0.10-standalone-packaging/tasks.md: dev-plans-v0-10-standalone-packaging-tasks
+  standalone packaging, local models & auto-update plan (v0.10 · v1): dev-plans-v0-10-standalone-packaging-v1
+  dev/plans/v0.10-standalone-packaging/v1.md: dev-plans-v0-10-standalone-packaging-v1
+  'tasks: `v0.11-dev-pipeline-brain`': dev-plans-v0-11-dev-pipeline-brain-tasks
+  dev/plans/v0.11-dev-pipeline-brain/tasks.md: dev-plans-v0-11-dev-pipeline-brain-tasks
+  development pipeline & dev brain graph db plan (v0.11 · v1): dev-plans-v0-11-dev-pipeline-brain-v1
+  dev/plans/v0.11-dev-pipeline-brain/v1.md: dev-plans-v0-11-dev-pipeline-brain-v1
+  'tasks: `v0.12-agent-core-instructions`': dev-plans-v0-12-agent-core-instructions-tasks
+  dev/plans/v0.12-agent-core-instructions/tasks.md: dev-plans-v0-12-agent-core-instructions-tasks
+  antigravity & claude code agent core instructions plan (v0.12 · v1): dev-plans-v0-12-agent-core-instructions-v1
+  dev/plans/v0.12-agent-core-instructions/v1.md: dev-plans-v0-12-agent-core-instructions-v1
+  'tasks: `v0.2-foundation`': dev-plans-v0-2-foundation-tasks
+  dev/plans/v0.2-foundation/tasks.md: dev-plans-v0-2-foundation-tasks
+  'satz: ai-native browser planning file': dev-plans-v0-2-foundation-v1
+  dev/plans/v0.2-foundation/v1.md: dev-plans-v0-2-foundation-v1
+  'tasks: `v0.3-working-browser`': dev-plans-v0-3-working-browser-tasks
+  dev/plans/v0.3-working-browser/tasks.md: dev-plans-v0-3-working-browser-tasks
+  'satz v0.3: working browser plan (for gemini in antigravity)': dev-plans-v0-3-working-browser-v1
+  dev/plans/v0.3-working-browser/v1.md: dev-plans-v0-3-working-browser-v1
+  'tasks: `v0.4-core-shell`': dev-plans-v0-4-core-shell-tasks
+  dev/plans/v0.4-core-shell/tasks.md: dev-plans-v0-4-core-shell-tasks
+  'satz v0.4: secure, faster, mail (for gemini in antigravity)': dev-plans-v0-4-core-shell-v1
+  dev/plans/v0.4-core-shell/v1.md: dev-plans-v0-4-core-shell-v1
+  'tasks: `v0.5-parity-trust-agents`': dev-plans-v0-5-parity-trust-agents-tasks
+  dev/plans/v0.5-parity-trust-agents/tasks.md: dev-plans-v0-5-parity-trust-agents-tasks
+  'satz v0.5: parity, trust, agents (for gemini in antigravity)': dev-plans-v0-5-parity-trust-agents-v1
+  dev/plans/v0.5-parity-trust-agents/v1.md: dev-plans-v0-5-parity-trust-agents-v1
+  'tasks: `v0.6-satz-news`': dev-plans-v0-6-satz-news-tasks
+  dev/plans/v0.6-satz-news/tasks.md: dev-plans-v0-6-satz-news-tasks
+  'satz v0.6 plan: satz news (pinned conversation, common brain & multi-model reader)': dev-plans-v0-6-satz-news-v1
+  dev/plans/v0.6-satz-news/v1.md: dev-plans-v0-6-satz-news-v1
+  'tasks: `v0.7-design-system`': dev-plans-v0-7-design-system-tasks
+  dev/plans/v0.7-design-system/tasks.md: dev-plans-v0-7-design-system-tasks
+  'satz v0.7 plan: design system migration': dev-plans-v0-7-design-system-v1
+  dev/plans/v0.7-design-system/v1.md: dev-plans-v0-7-design-system-v1
+  'tasks: `v0.8-settings-chat`': dev-plans-v0-8-settings-chat-tasks
+  dev/plans/v0.8-settings-chat/tasks.md: dev-plans-v0-8-settings-chat-tasks
+  'satz v0.8 plan: conversational settings workspace & declarative tool registry': dev-plans-v0-8-settings-chat-v1
+  dev/plans/v0.8-settings-chat/v1.md: dev-plans-v0-8-settings-chat-v1
+  'tasks: `v0.9-localization`': dev-plans-v0-9-localization-tasks
+  dev/plans/v0.9-localization/tasks.md: dev-plans-v0-9-localization-tasks
+  'satz v0.9 plan: app-wide ui localization with user-model translation': dev-plans-v0-9-localization-v1
+  dev/plans/v0.9-localization/v1.md: dev-plans-v0-9-localization-v1
+  satz browser development hub (`dev/`): dev-readme
+  dev/readme.md: dev-readme
+  changelog: dev-versions-changelog
+  dev/versions/changelog.md: dev-versions-changelog
+  satz v0.3 execution notes: dev-versions-notes-v0-3
+  dev/versions/notes_v0.3.md: dev-versions-notes-v0-3
+  satz v0.4 execution notes: dev-versions-notes-v0-4
+  dev/versions/notes_v0.4.md: dev-versions-notes-v0-4
+  satz v0.5 execution notes: dev-versions-notes-v0-5
+  dev/versions/notes_v0.5.md: dev-versions-notes-v0-5
+  'satz v0.6 execution notes: satz news': dev-versions-notes-v0-6
+  dev/versions/notes_v0.6.md: dev-versions-notes-v0-6
+  'satz v0.7 notes: design system migration': dev-versions-notes-v0-7
+  dev/versions/notes_v0.7.md: dev-versions-notes-v0-7
+  'satz v0.8 notes: conversational settings workspace & declarative tool registry': dev-versions-notes-v0-8
+  dev/versions/notes_v0.8.md: dev-versions-notes-v0-8
+  'satz v0.9 notes: app-wide ui localization with user-model translation': dev-versions-notes-v0-9
+  dev/versions/notes_v0.9.md: dev-versions-notes-v0-9
+  version history & release snapshots (`dev/versions/`): dev-versions-readme
+  dev/versions/readme.md: dev-versions-readme
+  v0.5.0_3e7ed6c: dev-versions-snapshots-v0-5-0-3e7ed6c-json
+  dev/versions/snapshots/v0.5.0_3e7ed6c.json: dev-versions-snapshots-v0-5-0-3e7ed6c-json
+  components: docs-design-components-html
+  docs/design/components.html: docs-design-components-html
+  satz design system: docs-design-design-system
+  docs/design/design_system.md: docs-design-design-system
+  satz-directions: docs-design-satz-directions-html
+  docs/design/satz-directions.html: docs-design-satz-directions-html
+  eval_20261120_idealo_unsubscribe_action: docs-evals-eval-20261120-idealo-unsubscribe-action-json
+  docs/evals/eval_20261120_idealo_unsubscribe_action.json: docs-evals-eval-20261120-idealo-unsubscribe-action-json
+  eval_20261121_order_mail_citation_grounding: docs-evals-eval-20261121-order-mail-citation-grounding-json
+  docs/evals/eval_20261121_order_mail_citation_grounding.json: docs-evals-eval-20261121-order-mail-citation-grounding-json
+  eval_20261121_prompt_injection_ignore_prev: docs-evals-eval-20261121-prompt-injection-ignore-prev-json
+  docs/evals/eval_20261121_prompt_injection_ignore_prev.json: docs-evals-eval-20261121-prompt-injection-ignore-prev-json
+  eval_20261124_settings_prompt_injection: docs-evals-eval-20261124-settings-prompt-injection-json
+  docs/evals/eval_20261124_settings_prompt_injection.json: docs-evals-eval-20261124-settings-prompt-injection-json
+  eval_20261125_213147_case_c90c: docs-evals-eval-20261125-213147-case-c90c-json
+  docs/evals/eval_20261125_213147_case_c90c.json: docs-evals-eval-20261125-213147-case-c90c-json
+  satz regression evals (`docs/evals/`): docs-evals-readme
+  docs/evals/readme.md: docs-evals-readme

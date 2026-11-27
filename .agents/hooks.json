@@ -1,0 +1,49 @@
+{
+  "satz-agent-lifecycle": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node ../dev/agents/hooks/hook_runner.mjs session_start_context",
+        "timeout": 15
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "node ../dev/agents/hooks/hook_runner.mjs pre_invocation_context",
+        "timeout": 15
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content|run_command|Write|Edit|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ../dev/agents/hooks/hook_runner.mjs pre_tool_guard",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content|Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ../dev/agents/hooks/hook_runner.mjs post_edit_brain_sync",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node ../dev/agents/hooks/hook_runner.mjs stop_gate_check",
+        "timeout": 15
+      }
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+version: 1
+owner: Nikita Gorshkov
+patterns:
+  - id: dual-os-parity
+    rule: "Develop primarily on Windows (RTX 4090) and test/ship cleanly on macOS Apple Silicon without requiring ../sgs or local Gemma weights by default."
+  - id: no-git-lfs-sharding
+    rule: "Split shipped model checkpoints into <90 MB shards with manifest.json instead of enabling Git LFS."
+  - id: relocatable-cpu-bundle-dev-cuda
+    rule: "Ship lean CPU PyTorch in standalone NSIS/DMG preview installers while keeping .venv / ../sgs/.venv CUDA priority intact for local dev."
+  - id: token-css-no-dashes
+    rule: "Strictly use CSS variables from tokens.css (zero raw hex) and zero em/en dashes in UI copy."
+  - id: transparent-fallbacks
+    rule: "Never fall back silently to deprecated slugs; log exact fallback reasons and make missing-model states actionable via Settings -> Models."
+  - id: rebuild-and-verify-app
+    rule: "After frontend or Rust edits on Windows, verify cargo test, npm run build, tauri build, and launch satz-browser.exe cleanly."

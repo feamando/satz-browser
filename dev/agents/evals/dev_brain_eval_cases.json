@@ -1,0 +1,104 @@
+[
+  {
+    "id": "q-release-xattr-macos",
+    "query": "unsigned macOS preview dmg xattr quarantine command",
+    "expected_any": ["dev/docs/RELEASE_RUNBOOK.md", "dev/agents/skills/satz-release-manager/SKILL.md"],
+    "expected_terms": ["xattr"]
+  },
+  {
+    "id": "q-standalone-packaging-plan",
+    "query": "relocatable python-build-standalone tauri-plugin-updater cpu pytorch",
+    "expected_any": ["dev/plans/v0.10-standalone-packaging/v1.md", "dev/plans/v0.10-standalone-packaging/tasks.md"],
+    "expected_terms": ["python-build-standalone", "tauri-plugin-updater"]
+  },
+  {
+    "id": "q-build-sizes-telemetry",
+    "query": "nsis setup installer size python_runtime_mb telemetry",
+    "expected_any": ["dev/analytics/build_telemetry.jsonl", "dev/analytics/harness_telemetry_notes.md"],
+    "expected_terms": ["402.07", "912.3"]
+  },
+  {
+    "id": "q-xreader-onednn-bug",
+    "query": "CrossReader int8 StopIteration onednn supported_engines error",
+    "expected_any": ["dev/agents/evals/error_log.jsonl", "dev/versions/CHANGELOG.md"],
+    "expected_terms": ["onednn"]
+  },
+  {
+    "id": "q-dev-brain-architecture",
+    "query": "running brain index graph DB monitor eval MRR Recall",
+    "expected_any": ["dev/plans/v0.11-dev-pipeline-brain/v1.md", "dev/brain/README.md", "dev/agents/skills/satz-dev-brain/SKILL.md"],
+    "expected_terms": ["Recall", "MRR"]
+  },
+  {
+    "id": "q-agent-roles-release",
+    "query": "release-manager platform-verifier role ownership required gates",
+    "expected_any": ["dev/agents/roles/roles.yaml", "dev/agents/roles/README.md"],
+    "expected_terms": ["release-manager", "platform-verifier"]
+  },
+  {
+    "id": "q-developer-behavior-rules",
+    "query": "no Git LFS 90 MB sharding zero raw hex em dashes pattern",
+    "expected_any": ["dev/agents/behavior/developer_patterns.yaml", "dev/agents/INSTRUCTIONS.md"],
+    "expected_terms": ["LFS", "90"]
+  },
+  {
+    "id": "q-hooks-post-edit",
+    "query": "PostToolUse hook post_edit_brain_sync pre_commit_dev_sync version parity",
+    "expected_any": ["dev/agents/hooks/README.md", "dev/agents/hooks/hooks.json", "dev/agents/hooks/post_edit_brain_sync.py"],
+    "expected_terms": ["PostToolUse", "version"]
+  },
+  {
+    "id": "q-localization-notes",
+    "query": "app-wide UI localization i18n catalog LLM batch translation L1 L5",
+    "expected_any": ["dev/versions/NOTES_v0.9.md", "dev/plans/v0.9-localization/v1.md"],
+    "expected_terms": ["EN_CATALOG", "satz_i18n.py"]
+  },
+  {
+    "id": "q-platforms-wkwebview-capture",
+    "query": "WKWebView WebView2 Touch ID Keychain live tab DOM capture macOS M3 Pro",
+    "expected_any": ["dev/docs/PLATFORMS.md", "dev/docs/REVIEW_v0.4_macos.md"],
+    "expected_terms": ["WKWebView", "WebView2"]
+  },
+  {
+    "id": "q-news-reader-research",
+    "query": "Satz News perspective spread trust band source registry reader research",
+    "expected_any": ["dev/docs/RESEARCH_satz_news_reader.md", "dev/plans/v0.6-satz-news/v1.md"],
+    "expected_terms": ["trust"]
+  },
+  {
+    "id": "q-version-snapshot-protocol",
+    "query": "version history snapshots CHANGELOG v0.5.0 JSON snapshot command",
+    "expected_any": ["dev/versions/README.md", "dev/versions/CHANGELOG.md"],
+    "expected_terms": ["snapshots"]
+  },
+  {
+    "id": "q-design-system-plan",
+    "query": "design system migration tokens typography Inter Besley D1 D9",
+    "expected_any": ["dev/plans/v0.7-design-system/v1.md", "dev/versions/NOTES_v0.7.md"],
+    "expected_terms": ["Besley"]
+  },
+  {
+    "id": "q-settings-chat-tools",
+    "query": "conversational settings workspace declarative tool registry secret staging",
+    "expected_any": ["dev/plans/v0.8-settings-chat/v1.md", "dev/versions/NOTES_v0.8.md"],
+    "expected_terms": ["settings"]
+  },
+  {
+    "id": "q-eval-auditor-redteam",
+    "query": "prompt-injection red-team gates satz_evals regression fixtures",
+    "expected_any": ["dev/agents/skills/satz-eval-auditor/SKILL.md", "dev/agents/evals/README.md"],
+    "expected_terms": ["red-team"]
+  },
+  {
+    "id": "q-core-dev-flows-loop",
+    "query": "core development flows WebView2 WKWebView design tokens desktop re-verify",
+    "expected_any": ["dev/agents/core_dev_flows.md", "dev/agents/INSTRUCTIONS.md"],
+    "expected_terms": ["WebView2", "WKWebView"]
+  },
+  {
+    "id": "q-release-management-gate",
+    "query": "release_gate three manifests semver parity Ed25519 updater prepare_for_update",
+    "expected_any": ["dev/agents/release_management.md", "dev/agents/hooks/release_gate.py"],
+    "expected_terms": ["release_gate", "prepare_for_update"]
+  }
+]

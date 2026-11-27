@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Pre-commit / dev-sync validator:
+1. Verifies version parity across package.json, src-tauri/Cargo.toml, tauri.conf.json.
+2. Ensures no em/en dashes in src/i18n/catalog.ts UI text and all model chunks < 90 MB.
+3. Re-indexes dev/brain/ cleanly with SQLite journal_mode=DELETE (no leftover WAL/SHM).
+"""
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+
+def check_version_parity() -> str:
+    pkg = json.loads((REPO_ROOT / "package.json").read_text(encoding="utf-8"))["version"].strip()
+    tauri_cfg = json.loads((REPO_ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))["version"].strip()
+    cargo_raw = (REPO_ROOT / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8")
+    m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', cargo_raw)
+    cargo_ver = m.group(1).strip() if m else ""
+    if not (pkg == tauri_cfg == cargo_ver):
+        raise AssertionError(
+            f"Version mismatch: package.json={pkg!r}, Cargo.toml={cargo_ver!r}, tauri.conf.json={tauri_cfg!r}"
+        )
+    return pkg
+
+
+def check_ui_and_weight_limits() -> None:
+    cat_path = REPO_ROOT / "src" / "i18n" / "catalog.ts"
+    cat_txt = cat_path.read_text(encoding="utf-8")
+    if "\u2014" in cat_txt or "\u2013" in cat_txt:
+        raise AssertionError("Found disallowed em/en dash inside src/i18n/catalog.ts")
+
+    planck_dir = REPO_ROOT / "sidecar" / "models" / "planck"
+    limit = 90 * 1024 * 1024
+    if planck_dir.is_dir():
+        for f in planck_dir.rglob("*"):
+            if f.is_file() and f.stat().st_size > limit:
+                raise AssertionError(f"Model file exceeds 90 MB GitHub limit: {f}")
+
+
+def main() -> int:
+    ver = check_version_parity()
+    check_ui_and_weight_limits()
+
+    from dev_brain import DevBrain
+
+    brain = DevBrain(REPO_ROOT)
+    stats = brain.reindex()
+    mon = brain.monitor()
+    print(
+        f"[pre_commit_dev_sync] version={ver} nodes={stats['nodes']} edges={stats['edges']} "
+        f"stale={mon['stale_count']} broken_edges={mon['broken_edge_count']}"
+    )
+    if mon["broken_edge_count"] > 0:
+        print(f"[pre_commit_dev_sync] warning: {mon['broken_edge_count']} broken dev/ links", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

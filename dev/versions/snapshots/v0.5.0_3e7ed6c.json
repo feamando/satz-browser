@@ -1,0 +1,76 @@
+{
+  "version": "0.5.0",
+  "captured_at": "2026-11-27T09:02:48Z",
+  "git": {
+    "branch": "main",
+    "short_sha": "3e7ed6c"
+  },
+  "manifests": {
+    "package_json": "0.5.0",
+    "tauri_conf": "0.5.0",
+    "cargo_toml": "0.5.0"
+  },
+  "requirements_runtime_sha256_16": "150186ad68a5c04d",
+  "shipped_planck_files": [
+    {
+      "path": "sidecar/models/planck/planck13/manifest.json",
+      "bytes": 248
+    },
+    {
+      "path": "sidecar/models/planck/planck13/model.pt.part000",
+      "bytes": 71303168
+    },
+    {
+      "path": "sidecar/models/planck/planck13/model.pt.part001",
+      "bytes": 66543030
+    },
+    {
+      "path": "sidecar/models/planck/tokenizer.model",
+      "bytes": 709375
+    },
+    {
+      "path": "sidecar/models/planck/xreader_planck/manifest.json",
+      "bytes": 248
+    },
+    {
+      "path": "sidecar/models/planck/xreader_planck/model.pt.part000",
+      "bytes": 71303168
+    },
+    {
+      "path": "sidecar/models/planck/xreader_planck/model.pt.part001",
+      "bytes": 67586090
+    }
+  ],
+  "dev_brain_monitor": {
+    "ok": false,
+    "db_path": "C:\\Users\\feama\\satz-browser\\dev\\brain\\brain_index.sqlite",
+    "encoder": "planck",
+    "last_reindex_ts": "2026-11-27T09:01:34Z",
+    "disk_files": 69,
+    "nodes": 68,
+    "fts_nodes": 68,
+    "embeddings": 68,
+    "edges": 99,
+    "orphan_nodes": 12,
+    "stale_count": 2,
+    "stale_files": [
+      "dev/analytics/dev_brain_eval_history.jsonl",
+      "dev/plans/v0.6-satz-news/v1.md"
+    ],
+    "extra_files": [],
+    "broken_edge_count": 0,
+    "broken_links": [],
+    "registry_and_brain_md_ok": true,
+    "latest_eval": {
+      "run_id": "eval-1795770105",
+      "ran_at": "2026-11-27T09:01:45Z",
+      "encoder": "planck",
+      "hit_at_1": 0.7333,
+      "recall_at_3": 1.0,
+      "recall_at_5": 1.0,
+      "mrr": 0.8556,
+      "term_accuracy": 0.9333,
+      "passed": 1
+    }
+  }
+}
