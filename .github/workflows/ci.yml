@@ -82,6 +82,7 @@ jobs:
         shell: bash
         env:
           SATZ_MEMORY_KEYRING: "1"
+          SATZ_DISABLE_AUTO_NEWS_SYNC: "1"
           PYTHONUTF8: "1"
         run: |
           if [[ "${RUNNER_OS}" == "Windows" ]]; then

@@ -1,6 +1,6 @@
 $schema: brain://registry/v2
 $version: 2
-$updated: '2026-11-28T09:34:26Z'
+$updated: '2026-11-28T09:54:39Z'
 entities:
   dev-readme:
     $type: note
@@ -32,7 +32,7 @@ entities:
     - dev-docs-platforms
     - dev-docs-release-runbook
     - dev-docs-system-overview
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-instructions:
     $type: decision
     name: Satz Browser Agent & Model Core Instructions
@@ -62,7 +62,7 @@ entities:
     - dev-agents-hooks-readme
     - dev-agents-hooks-behavior-eval-store-py
     - dev-agents-hooks-post-edit-brain-sync-py
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-behavior-readme:
     $type: note
     name: Developer Behavior Analysis (`dev/agents/behavior/`)
@@ -83,7 +83,7 @@ entities:
     relationships:
     - dev-agents-behavior-behavior-log-jsonl
     - dev-agents-behavior-developer-patterns-yaml
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-behavior-behavior-log-jsonl:
     $type: note
     name: behavior_log
@@ -100,9 +100,9 @@ entities:
       dev_kind: behavior
       area: agents/behavior
       path: dev/agents/behavior/behavior_log.jsonl
-      content_hash: 7490ac558a6e
+      content_hash: bf62bf827d77
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-behavior-developer-patterns-yaml:
     $type: note
     name: developer_patterns
@@ -120,7 +120,7 @@ entities:
       path: dev/agents/behavior/developer_patterns.yaml
       content_hash: 11b2df0e6694
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-behavior-rule-candidates-json:
     $type: note
     name: rule_candidates
@@ -137,7 +137,7 @@ entities:
       path: dev/agents/behavior/rule_candidates.json
       content_hash: 854b5a823c7a
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-core-dev-flows:
     $type: decision
     name: Core Development Flows (`satz-browser`)
@@ -161,7 +161,7 @@ entities:
     - dev-agents-skills-satz-eval-auditor-skill
     - dev-docs-platforms
     - dev-plans-template-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-evals-readme:
     $type: note
     name: Agent Evals & Error Logging (`dev/agents/evals/`)
@@ -182,7 +182,7 @@ entities:
     - dev-agents-evals-agent-eval-cases-yaml
     - dev-agents-evals-dev-brain-eval-cases-json
     - dev-agents-evals-error-log-jsonl
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-evals-agent-eval-cases-yaml:
     $type: note
     name: agent_eval_cases
@@ -200,7 +200,7 @@ entities:
       path: dev/agents/evals/agent_eval_cases.yaml
       content_hash: 6d65910f9a81
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-evals-auto-eval-cases-yaml:
     $type: note
     name: auto_eval_cases
@@ -217,7 +217,7 @@ entities:
       path: dev/agents/evals/auto_eval_cases.yaml
       content_hash: 1a2a8885f846
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-evals-dev-brain-eval-cases-json:
     $type: note
     name: dev_brain_eval_cases
@@ -234,7 +234,7 @@ entities:
       path: dev/agents/evals/dev_brain_eval_cases.json
       content_hash: 367717de6f73
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-evals-error-log-jsonl:
     $type: note
     name: error_log
@@ -251,9 +251,9 @@ entities:
       dev_kind: eval
       area: agents/evals
       path: dev/agents/evals/error_log.jsonl
-      content_hash: 57e11be3ec03
+      content_hash: 9342d8ac7cca
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-evals-eval-history-jsonl:
     $type: note
     name: eval_history
@@ -269,9 +269,9 @@ entities:
       dev_kind: eval
       area: agents/evals
       path: dev/agents/evals/eval_history.jsonl
-      content_hash: fb0ce267ee9e
+      content_hash: 9c38ba8158aa
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-hooks-readme:
     $type: skill
     name: Agent & Pipeline Hooks (`dev/agents/hooks/`)
@@ -298,7 +298,7 @@ entities:
     - dev-agents-hooks-release-gate-py
     - dev-agents-hooks-session-start-context-py
     - dev-agents-hooks-stop-gate-check-py
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-hooks-behavior-eval-store-py:
     $type: skill
     name: behavior_eval_store
@@ -316,7 +316,7 @@ entities:
       path: dev/agents/hooks/behavior_eval_store.py
       content_hash: 9436d5376cd1
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-hooks-hook-common-py:
     $type: skill
     name: Antigravity requires decision on PreToolUse; 'ask' preserves Always Allow
@@ -336,7 +336,7 @@ entities:
       path: dev/agents/hooks/hook_common.py
       content_hash: 95bda00a4fde
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-hooks-hooks-json:
     $type: skill
     name: hooks
@@ -353,7 +353,7 @@ entities:
       path: dev/agents/hooks/hooks.json
       content_hash: 704fb3bdfa7f
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-hooks-post-edit-brain-sync-py:
     $type: skill
     name: Fast local telemetry + error capture across all matched tool calls.
@@ -371,7 +371,7 @@ entities:
       path: dev/agents/hooks/post_edit_brain_sync.py
       content_hash: 4cc9254aa940
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-hooks-pre-commit-dev-sync-py:
     $type: skill
     name: pre_commit_dev_sync
@@ -388,7 +388,7 @@ entities:
       path: dev/agents/hooks/pre_commit_dev_sync.py
       content_hash: add9c67331f9
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-hooks-pre-invocation-context-py:
     $type: skill
     name: Fast local behavior telemetry capture (<15ms, gitignored SQLite).
@@ -406,7 +406,7 @@ entities:
       path: dev/agents/hooks/pre_invocation_context.py
       content_hash: db7b92e14ff8
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-hooks-pre-tool-guard-py:
     $type: skill
     name: Strip CSS comments before checking property declarations for hardcoded hex
@@ -425,7 +425,7 @@ entities:
       path: dev/agents/hooks/pre_tool_guard.py
       content_hash: 05fa02d2769d
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-hooks-release-gate-py:
     $type: skill
     name: release_gate
@@ -441,9 +441,9 @@ entities:
       dev_kind: hook
       area: agents/hooks
       path: dev/agents/hooks/release_gate.py
-      content_hash: 1e7d1c886e94
+      content_hash: 1029530a1d3c
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-hooks-session-start-context-py:
     $type: skill
     name: session_start_context
@@ -461,7 +461,7 @@ entities:
       path: dev/agents/hooks/session_start_context.py
       content_hash: 4ecdff8ee90f
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-hooks-stop-gate-check-py:
     $type: skill
     name: 'Infinite-loop prevention: never block again once continuation is active.'
@@ -479,7 +479,7 @@ entities:
       path: dev/agents/hooks/stop_gate_check.py
       content_hash: 34e35c4c2fd9
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-release-management:
     $type: decision
     name: Release Management Protocol (`satz-browser`)
@@ -501,7 +501,7 @@ entities:
     - dev-agents-skills-satz-release-manager-skill
     - dev-analytics-build-telemetry-jsonl
     - dev-docs-release-runbook
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-roles-readme:
     $type: person
     name: Agent Role Management (`dev/agents/roles/`)
@@ -520,7 +520,7 @@ entities:
       content_hash: bdaa089e4e64
     relationships:
     - dev-agents-roles-roles-yaml
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-roles-roles-yaml:
     $type: person
     name: roles
@@ -537,7 +537,7 @@ entities:
       path: dev/agents/roles/roles.yaml
       content_hash: 31f2e7537d12
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-skills-satz-cross-platform-shell-skill:
     $type: skill
     name: satz-cross-platform-shell
@@ -557,7 +557,7 @@ entities:
       content_hash: 170269e5ff8e
     relationships:
     - dev-docs-platforms
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-skills-satz-dev-brain-skill:
     $type: skill
     name: satz-dev-brain
@@ -575,7 +575,7 @@ entities:
       path: dev/agents/skills/satz-dev-brain/SKILL.md
       content_hash: 6b47ebdd2500
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-skills-satz-eval-auditor-skill:
     $type: skill
     name: satz-eval-auditor
@@ -594,7 +594,7 @@ entities:
       content_hash: ebf964e155a4
     relationships:
     - dev-agents-evals-readme
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-skills-satz-feature-planner-skill:
     $type: skill
     name: satz-feature-planner
@@ -616,7 +616,7 @@ entities:
     - dev-readme
     - dev-agents-core-dev-flows
     - dev-plans-readme
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-skills-satz-git-sync-skill:
     $type: skill
     name: satz-git-sync
@@ -635,7 +635,7 @@ entities:
       path: dev/agents/skills/satz-git-sync/SKILL.md
       content_hash: 28cb19599f69
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-skills-satz-release-manager-skill:
     $type: skill
     name: satz-release-manager
@@ -656,7 +656,7 @@ entities:
     relationships:
     - dev-agents-release-management
     - dev-docs-release-runbook
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-skills-satz-sidecar-models-boundary-skill:
     $type: skill
     name: satz-sidecar-models-boundary
@@ -676,7 +676,7 @@ entities:
       content_hash: f5727e6a4d84
     relationships:
     - dev-agents-evals-error-log-jsonl
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-skills-satz-tools-safety-boundary-skill:
     $type: skill
     name: satz-tools-safety-boundary
@@ -695,7 +695,7 @@ entities:
       path: dev/agents/skills/satz-tools-safety-boundary/SKILL.md
       content_hash: 3d449bda9821
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-agents-skills-satz-ui-design-i18n-skill:
     $type: skill
     name: satz-ui-design-i18n
@@ -714,7 +714,7 @@ entities:
       content_hash: 699532ccea13
     relationships:
     - docs-design-design-system
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-analytics-readme:
     $type: note
     name: Development Analytics & Telemetry (`dev/analytics/`)
@@ -736,7 +736,7 @@ entities:
     - dev-analytics-dev-brain-eval-history-jsonl
     - dev-analytics-harness-telemetry-notes
     - dev-plans-v0-13-browser-telemetry-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-analytics-build-telemetry-jsonl:
     $type: note
     name: build_telemetry
@@ -753,9 +753,9 @@ entities:
       dev_kind: analytics
       area: analytics
       path: dev/analytics/build_telemetry.jsonl
-      content_hash: 253d1e594011
+      content_hash: a99a36f037e8
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-analytics-dev-brain-eval-history-jsonl:
     $type: note
     name: dev_brain_eval_history
@@ -774,7 +774,7 @@ entities:
       path: dev/analytics/dev_brain_eval_history.jsonl
       content_hash: 57ec7229602b
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-analytics-harness-telemetry-notes:
     $type: note
     name: Harness Telemetry & Developer Observations
@@ -792,7 +792,7 @@ entities:
       path: dev/analytics/harness_telemetry_notes.md
       content_hash: 09a7d45d88ea
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-docs-architecture:
     $type: note
     name: Satz Browser Architecture (`v0.5+`)
@@ -814,7 +814,7 @@ entities:
     - dev-docs-platforms
     - dev-docs-release-runbook
     - dev-docs-system-overview
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-docs-platforms:
     $type: note
     name: 'Satz Platforms: Windows vs macOS'
@@ -832,7 +832,7 @@ entities:
       path: dev/docs/PLATFORMS.md
       content_hash: abfab10ab172
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-docs-release-runbook:
     $type: note
     name: Release Runbook (Windows & macOS Standalone Previews)
@@ -853,7 +853,7 @@ entities:
     - dev-agents-instructions
     - dev-docs-platforms
     - dev-plans-v0-10-standalone-packaging-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-docs-research-satz-news-reader:
     $type: note
     name: 'Research Notes: Satz / Planck 3.0 News & Knowledge Reader'
@@ -872,7 +872,7 @@ entities:
       path: dev/docs/RESEARCH_satz_news_reader.md
       content_hash: e950adc0b524
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-docs-review-v0-4-macos:
     $type: note
     name: 'Satz v0.4 Review: macOS Field Test and Brain Check'
@@ -890,7 +890,7 @@ entities:
       path: dev/docs/REVIEW_v0.4_macos.md
       content_hash: cf6c7add64d4
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-docs-system-overview:
     $type: note
     name: Satz Browser High-Level System Overview & Harness Architecture
@@ -912,7 +912,7 @@ entities:
     - dev-docs-architecture
     - dev-docs-platforms
     - dev-docs-release-runbook
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-readme:
     $type: project
     name: Development Plans (`dev/plans/`)
@@ -931,7 +931,7 @@ entities:
       content_hash: ef8fbd706c19
     relationships:
     - dev-plans-template-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-template-tasks:
     $type: project
     name: 'Tasks: `<plan-slug>`'
@@ -949,7 +949,7 @@ entities:
       content_hash: d0d849264d65
     relationships:
     - dev-plans-template-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-template-v1:
     $type: project
     name: Plan Template (`<plan-slug>` · v1)
@@ -967,7 +967,7 @@ entities:
       content_hash: e4efd21e16e1
     relationships:
     - dev-plans-template-tasks
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-10-standalone-packaging-tasks:
     $type: project
     name: 'Tasks: `v0.10-standalone-packaging`'
@@ -986,7 +986,7 @@ entities:
     relationships:
     - dev-plans-v0-10-standalone-packaging-v1
     - dev-plans-v0-10-standalone-packaging-v2
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-10-standalone-packaging-v1:
     $type: project
     name: Standalone Packaging, Local Models & Auto-Update Plan (v0.10 · v1)
@@ -1008,7 +1008,7 @@ entities:
     - dev-docs-release-runbook
     - dev-plans-v0-10-standalone-packaging-tasks
     - dev-versions-changelog
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-10-standalone-packaging-v2:
     $type: project
     name: Standalone Packaging, Cross-Platform Release & Auto-Update Plan (v0.10 ·
@@ -1030,7 +1030,7 @@ entities:
     - dev-agents-release-management
     - dev-docs-release-runbook
     - dev-plans-v0-10-standalone-packaging-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-11-dev-pipeline-brain-tasks:
     $type: project
     name: 'Tasks: `v0.11-dev-pipeline-brain`'
@@ -1048,7 +1048,7 @@ entities:
       content_hash: 88a1ba456869
     relationships:
     - dev-plans-v0-11-dev-pipeline-brain-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-11-dev-pipeline-brain-v1:
     $type: project
     name: Development Pipeline & Dev Brain Graph DB Plan (v0.11 · v1)
@@ -1068,7 +1068,7 @@ entities:
     - dev-readme
     - dev-agents-instructions
     - dev-plans-v0-11-dev-pipeline-brain-tasks
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-12-agent-core-instructions-tasks:
     $type: project
     name: 'Tasks: `v0.12-agent-core-instructions`'
@@ -1087,7 +1087,7 @@ entities:
     relationships:
     - dev-plans-v0-12-agent-core-instructions-v1
     - dev-plans-v0-12-agent-core-instructions-v2
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-12-agent-core-instructions-v1:
     $type: project
     name: Antigravity & Claude Code Agent Core Instructions Plan (v0.12 · v1)
@@ -1108,7 +1108,7 @@ entities:
     - dev-agents-core-dev-flows
     - dev-agents-release-management
     - dev-plans-v0-12-agent-core-instructions-tasks
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-12-agent-core-instructions-v2:
     $type: project
     name: Antigravity & Claude Code Agent Core Instructions Plan (v0.12 · v2)
@@ -1129,7 +1129,7 @@ entities:
     - dev-agents-core-dev-flows
     - dev-agents-release-management
     - dev-plans-v0-12-agent-core-instructions-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-13-browser-telemetry-tasks:
     $type: project
     name: 'Tasks: `v0.13-browser-telemetry`'
@@ -1149,7 +1149,7 @@ entities:
     relationships:
     - dev-plans-v0-13-browser-telemetry-v1
     - dev-plans-v0-13-browser-telemetry-v2
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-13-browser-telemetry-v1:
     $type: project
     name: Per-Instance Browser Analytics, Telemetry & Hosted Sync Plan (v0.13 · v1)
@@ -1171,7 +1171,7 @@ entities:
     - dev-docs-system-overview
     - dev-plans-template-v1
     - dev-plans-v0-13-browser-telemetry-tasks
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-13-browser-telemetry-v2:
     $type: project
     name: Per-Instance Browser Analytics, Telemetry & Hosted Sync Plan (v0.13 · v2)
@@ -1192,7 +1192,7 @@ entities:
     - dev-plans-v0-13-browser-telemetry-tasks
     - dev-plans-v0-13-browser-telemetry-v1
     - dev-plans-v0-17-macos-parity-telemetry-ci-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-14-first-run-onboarding-tasks:
     $type: project
     name: 'Tasks: `v0.14-first-run-onboarding`'
@@ -1211,7 +1211,7 @@ entities:
       content_hash: 75caf7911902
     relationships:
     - dev-plans-v0-14-first-run-onboarding-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-14-first-run-onboarding-v1:
     $type: project
     name: First-Run Onboarding, Model Setup & Guided Tour (`v0.14-first-run-onboarding`
@@ -1235,7 +1235,7 @@ entities:
     - dev-plans-v0-14-first-run-onboarding-tasks
     - dev-plans-v0-4-core-shell-v1
     - dev-plans-v0-9-localization-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-15-planck-default-launcher-tasks:
     $type: project
     name: 'Tasks: `v0.15-planck-default-launcher`'
@@ -1254,7 +1254,7 @@ entities:
       content_hash: afce8919b822
     relationships:
     - dev-plans-v0-15-planck-default-launcher-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-15-planck-default-launcher-v1:
     $type: project
     name: Planck-Default Launcher & Lightweight Onboarding Plan (`v0.15-planck-default-launcher`
@@ -1277,7 +1277,7 @@ entities:
     - dev-docs-system-overview
     - dev-plans-v0-14-first-run-onboarding-v1
     - dev-plans-v0-15-planck-default-launcher-tasks
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-16-autoupdater-release-automation-tasks:
     $type: project
     name: 'Tasks: `v0.16-autoupdater-release-automation`'
@@ -1296,7 +1296,7 @@ entities:
       content_hash: d211a65b239c
     relationships:
     - dev-plans-v0-16-autoupdater-release-automation-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-16-autoupdater-release-automation-v1:
     $type: project
     name: Autoupdater & Automated Cross-Platform Release Pipeline (`v0.16` - v1)
@@ -1317,7 +1317,7 @@ entities:
     - dev-docs-release-runbook
     - dev-plans-v0-10-standalone-packaging-v2
     - dev-plans-v0-16-autoupdater-release-automation-tasks
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-17-macos-parity-telemetry-ci-tasks:
     $type: project
     name: 'Tasks: `v0.17-macos-parity-telemetry-ci`'
@@ -1333,10 +1333,10 @@ entities:
       dev_kind: tasks
       area: plans
       path: dev/plans/v0.17-macos-parity-telemetry-ci/tasks.md
-      content_hash: bb08528d8c3b
+      content_hash: 7ed4e82586cf
     relationships:
     - dev-plans-v0-17-macos-parity-telemetry-ci-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-17-macos-parity-telemetry-ci-v1:
     $type: project
     name: Mac Parity, Complete Browser Telemetry & Cross-OS CI Hardening (`v0.17-macos-parity-telemetry-ci`
@@ -1360,7 +1360,7 @@ entities:
     - dev-plans-v0-10-standalone-packaging-tasks
     - dev-plans-v0-13-browser-telemetry-v2
     - dev-plans-v0-17-macos-parity-telemetry-ci-tasks
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-2-foundation-tasks:
     $type: project
     name: 'Tasks: `v0.2-foundation`'
@@ -1378,7 +1378,7 @@ entities:
       content_hash: d6a8a4780d25
     relationships:
     - dev-plans-v0-2-foundation-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-2-foundation-v1:
     $type: project
     name: 'Satz: AI-Native Browser Planning File'
@@ -1397,7 +1397,7 @@ entities:
       content_hash: 982671135a37
     relationships:
     - dev-plans-v0-2-foundation-tasks
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-3-working-browser-tasks:
     $type: project
     name: 'Tasks: `v0.3-working-browser`'
@@ -1416,7 +1416,7 @@ entities:
     relationships:
     - dev-plans-v0-3-working-browser-v1
     - dev-versions-notes-v0-3
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-3-working-browser-v1:
     $type: project
     name: 'Satz v0.3: Working Browser Plan (for Gemini in Antigravity)'
@@ -1437,7 +1437,7 @@ entities:
     relationships:
     - dev-plans-v0-3-working-browser-tasks
     - dev-versions-notes-v0-3
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-4-core-shell-tasks:
     $type: project
     name: 'Tasks: `v0.4-core-shell`'
@@ -1456,7 +1456,7 @@ entities:
     relationships:
     - dev-plans-v0-4-core-shell-v1
     - dev-versions-notes-v0-4
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-4-core-shell-v1:
     $type: project
     name: 'Satz v0.4: Secure, Faster, Mail (for Gemini in Antigravity)'
@@ -1477,7 +1477,7 @@ entities:
     relationships:
     - dev-plans-v0-4-core-shell-tasks
     - dev-versions-notes-v0-4
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-5-parity-trust-agents-tasks:
     $type: project
     name: 'Tasks: `v0.5-parity-trust-agents`'
@@ -1496,7 +1496,7 @@ entities:
     relationships:
     - dev-plans-v0-5-parity-trust-agents-v1
     - dev-versions-notes-v0-5
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-5-parity-trust-agents-v1:
     $type: project
     name: 'Satz v0.5: Parity, Trust, Agents (for Gemini in Antigravity)'
@@ -1517,7 +1517,7 @@ entities:
     relationships:
     - dev-plans-v0-5-parity-trust-agents-tasks
     - dev-versions-notes-v0-5
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-5p-action-providers-tasks:
     $type: project
     name: 'Tasks: `v0.5p-action-providers`'
@@ -1535,7 +1535,7 @@ entities:
       content_hash: bf9d75ea224f
     relationships:
     - dev-plans-v0-5p-action-providers-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-5p-action-providers-v1:
     $type: project
     name: Extensible Default Action Provider Playbook & Dynamic Profile Registry (v0.5+
@@ -1558,7 +1558,7 @@ entities:
     - dev-plans-v0-5-parity-trust-agents-v1
     - dev-plans-v0-5p-action-providers-tasks
     - dev-plans-v0-8-settings-chat-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-6-satz-news-tasks:
     $type: project
     name: 'Tasks: `v0.6-satz-news`'
@@ -1577,7 +1577,7 @@ entities:
     relationships:
     - dev-plans-v0-6-satz-news-v1
     - dev-versions-notes-v0-6
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-6-satz-news-v1:
     $type: project
     name: 'Satz v0.6 Plan: Satz News (Pinned Conversation, Common Brain & Multi-Model
@@ -1602,7 +1602,7 @@ entities:
     - dev-plans-v0-5-parity-trust-agents-v1
     - dev-plans-v0-6-satz-news-tasks
     - dev-versions-notes-v0-6
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-7-design-system-tasks:
     $type: project
     name: 'Tasks: `v0.7-design-system`'
@@ -1621,7 +1621,7 @@ entities:
     relationships:
     - dev-plans-v0-7-design-system-v1
     - dev-versions-notes-v0-7
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-7-design-system-v1:
     $type: project
     name: 'Satz v0.7 Plan: Design System Migration'
@@ -1641,7 +1641,7 @@ entities:
     relationships:
     - dev-plans-v0-7-design-system-tasks
     - dev-versions-notes-v0-7
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-8-settings-chat-tasks:
     $type: project
     name: 'Tasks: `v0.8-settings-chat`'
@@ -1660,7 +1660,7 @@ entities:
     relationships:
     - dev-plans-v0-8-settings-chat-v1
     - dev-versions-notes-v0-8
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-8-settings-chat-v1:
     $type: project
     name: 'Satz v0.8 Plan: Conversational Settings Workspace & Declarative Tool Registry'
@@ -1680,7 +1680,7 @@ entities:
     relationships:
     - dev-plans-v0-8-settings-chat-tasks
     - dev-versions-notes-v0-8
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-9-localization-tasks:
     $type: project
     name: 'Tasks: `v0.9-localization`'
@@ -1699,7 +1699,7 @@ entities:
     relationships:
     - dev-plans-v0-9-localization-v1
     - dev-versions-notes-v0-9
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-plans-v0-9-localization-v1:
     $type: project
     name: 'Satz v0.9 Plan: App-Wide UI Localization with User-Model Translation'
@@ -1718,7 +1718,7 @@ entities:
     relationships:
     - dev-plans-v0-9-localization-tasks
     - dev-versions-notes-v0-9
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-versions-binary-releases:
     $type: decision
     name: Built Binaries & Release Snapshot Ledger (`dev/versions/`)
@@ -1740,7 +1740,7 @@ entities:
     - dev-versions-snapshots-v0-5-0-a5cc359-macos-json
     - dev-versions-snapshots-v0-5-1-8cb4f64-json
     - dev-versions-snapshots-v0-5-2-6bf9d71-json
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-versions-changelog:
     $type: decision
     name: Changelog
@@ -1758,7 +1758,7 @@ entities:
       path: dev/versions/CHANGELOG.md
       content_hash: 105953e61416
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-versions-notes-v0-3:
     $type: decision
     name: Satz v0.3 Execution Notes
@@ -1777,7 +1777,7 @@ entities:
       content_hash: 59584b5c0f2b
     relationships:
     - dev-plans-v0-3-working-browser-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-versions-notes-v0-4:
     $type: decision
     name: Satz v0.4 Execution Notes
@@ -1796,7 +1796,7 @@ entities:
       content_hash: c71346ab49db
     relationships:
     - dev-plans-v0-4-core-shell-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-versions-notes-v0-5:
     $type: decision
     name: Satz v0.5 Execution Notes
@@ -1815,7 +1815,7 @@ entities:
       content_hash: 27abf8294289
     relationships:
     - dev-plans-v0-5-parity-trust-agents-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-versions-notes-v0-6:
     $type: decision
     name: 'Satz v0.6 Execution Notes: Satz News'
@@ -1835,7 +1835,7 @@ entities:
       content_hash: ff034f2cfba2
     relationships:
     - dev-plans-v0-6-satz-news-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-versions-notes-v0-7:
     $type: decision
     name: 'Satz v0.7 Notes: Design System Migration'
@@ -1854,7 +1854,7 @@ entities:
       content_hash: 9b511128025e
     relationships:
     - dev-plans-v0-7-design-system-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-versions-notes-v0-8:
     $type: decision
     name: 'Satz v0.8 Notes: Conversational Settings Workspace & Declarative Tool Registry'
@@ -1873,7 +1873,7 @@ entities:
       content_hash: 82ef29a68c85
     relationships:
     - dev-plans-v0-8-settings-chat-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-versions-notes-v0-9:
     $type: decision
     name: 'Satz v0.9 Notes: App-Wide UI Localization with User-Model Translation'
@@ -1892,7 +1892,7 @@ entities:
       content_hash: 1a822e928461
     relationships:
     - dev-plans-v0-9-localization-v1
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-versions-readme:
     $type: decision
     name: Version History & Release Snapshots (`dev/versions/`)
@@ -1913,7 +1913,7 @@ entities:
     relationships:
     - dev-versions-binary-releases
     - dev-versions-changelog
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-versions-snapshots-v0-5-0-3e7ed6c-json:
     $type: decision
     name: v0.5.0_3e7ed6c
@@ -1930,7 +1930,7 @@ entities:
       path: dev/versions/snapshots/v0.5.0_3e7ed6c.json
       content_hash: 83a788870f44
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-versions-snapshots-v0-5-0-a5cc359-json:
     $type: decision
     name: v0.5.0_a5cc359
@@ -1947,7 +1947,7 @@ entities:
       path: dev/versions/snapshots/v0.5.0_a5cc359.json
       content_hash: 608697a3de04
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-versions-snapshots-v0-5-0-a5cc359-macos-json:
     $type: decision
     name: v0.5.0_a5cc359_macos
@@ -1964,7 +1964,7 @@ entities:
       path: dev/versions/snapshots/v0.5.0_a5cc359_macos.json
       content_hash: b1d5dadc0a01
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-versions-snapshots-v0-5-1-8cb4f64-json:
     $type: decision
     name: v0.5.1_8cb4f64
@@ -1981,7 +1981,7 @@ entities:
       path: dev/versions/snapshots/v0.5.1_8cb4f64.json
       content_hash: 487dd42c6aa6
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   dev-versions-snapshots-v0-5-2-6bf9d71-json:
     $type: decision
     name: v0.5.2_6bf9d71
@@ -1998,7 +1998,7 @@ entities:
       path: dev/versions/snapshots/v0.5.2_6bf9d71.json
       content_hash: 7a70ff5efa17
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   docs-design-design-system:
     $type: note
     name: Satz Design System
@@ -2016,7 +2016,7 @@ entities:
       path: docs/design/DESIGN_SYSTEM.md
       content_hash: 251d05df182c
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   docs-design-components-html:
     $type: note
     name: components
@@ -2033,7 +2033,7 @@ entities:
       path: docs/design/components.html
       content_hash: 36923e3d5901
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   docs-design-satz-directions-html:
     $type: note
     name: satz-directions
@@ -2050,7 +2050,7 @@ entities:
       path: docs/design/satz-directions.html
       content_hash: b0599853f91c
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   docs-evals-readme:
     $type: note
     name: Satz Regression Evals (`docs/evals/`)
@@ -2069,7 +2069,7 @@ entities:
       path: docs/evals/README.md
       content_hash: bc0d97e332c0
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   docs-evals-eval-20261120-idealo-unsubscribe-action-json:
     $type: note
     name: eval_20261120_idealo_unsubscribe_action
@@ -2086,7 +2086,7 @@ entities:
       path: docs/evals/eval_20261120_idealo_unsubscribe_action.json
       content_hash: 5d01225aef33
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   docs-evals-eval-20261121-order-mail-citation-grounding-json:
     $type: note
     name: eval_20261121_order_mail_citation_grounding
@@ -2103,7 +2103,7 @@ entities:
       path: docs/evals/eval_20261121_order_mail_citation_grounding.json
       content_hash: ae7f1531ee49
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   docs-evals-eval-20261121-prompt-injection-ignore-prev-json:
     $type: note
     name: eval_20261121_prompt_injection_ignore_prev
@@ -2120,7 +2120,7 @@ entities:
       path: docs/evals/eval_20261121_prompt_injection_ignore_prev.json
       content_hash: 9fce14b015db
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   docs-evals-eval-20261124-settings-prompt-injection-json:
     $type: note
     name: eval_20261124_settings_prompt_injection
@@ -2137,7 +2137,7 @@ entities:
       path: docs/evals/eval_20261124_settings_prompt_injection.json
       content_hash: ff5dd11a5470
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
   docs-evals-eval-20261125-213147-case-c90c-json:
     $type: note
     name: eval_20261125_213147_case_c90c
@@ -2154,7 +2154,7 @@ entities:
       path: docs/evals/eval_20261125_213147_case_c90c.json
       content_hash: cc9c1b00e305
     relationships: []
-    updated: '2026-11-28T09:34:24Z'
+    updated: '2026-11-28T09:54:36Z'
 alias_index:
   satz browser development hub (`dev/`): dev-readme
   dev/readme.md: dev-readme

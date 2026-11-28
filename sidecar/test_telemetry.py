@@ -185,7 +185,9 @@ class TestSatzTelemetry(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 rt.close()
+                self.assertIsNone(rt.mail._conn)
                 collector.shutdown()
+                collector.server_close()
                 collector.server_close()
 
 

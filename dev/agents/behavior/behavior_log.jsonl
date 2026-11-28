@@ -116,3 +116,7 @@
 {"ts": "2026-11-28T09:26:16.264949+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/plans/v0.17-macos-parity-telemetry-ci/tasks.md"]}
 {"ts": "2026-11-28T09:32:22.059549+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/pre_commit_dev_sync.py"]}
 {"ts": "2026-11-28T09:32:28.829400+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/docs/PLATFORMS.md"]}
+{"ts": "2026-11-28T09:52:01.415176+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/hooks/release_gate.py"]}
+{"ts": "2026-11-28T09:52:50.010854+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/analytics/build_telemetry.jsonl"]}
+{"ts": "2026-11-28T09:52:54.233109+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/agents/evals/error_log.jsonl"]}
+{"ts": "2026-11-28T09:52:58.284842+00:00", "event": "post_edit_brain_sync", "tool": "edit_file", "paths": ["dev/plans/v0.17-macos-parity-telemetry-ci/tasks.md"]}

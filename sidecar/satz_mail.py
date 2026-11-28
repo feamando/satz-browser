@@ -808,6 +808,35 @@ class SatzMailManager:
             self._active_db_path = target_path
             return conn
 
+    def _close_active_connection(self) -> None:
+        """Stops mail sync/worker threads and closes any open profile mail.sqlite connection."""
+        try:
+            self.stop_all_sync_threads()
+        except Exception:
+            pass
+        for timer in list(self._send_timers.values()):
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+        self._send_timers.clear()
+        if self.pipeline is not None:
+            try:
+                self.pipeline.stop_worker()
+            except Exception:
+                pass
+        with self.db_lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
+            self._active_db_path = None
+
+    def close(self) -> None:
+        self._close_active_connection()
+
     def rebind_profile(self, *, defer_sync_start: bool = False) -> None:
         emit = getattr(self.runtime, "emit_unlock_progress", None)
         with self.db_lock:

@@ -57,6 +57,7 @@ class TestSatzNewsEngine(unittest.TestCase):
         store_path = self.temp_dir / "planck_store.sqlite"
         self.rt = SatzSidecarRuntime(sgs_root=SGS_ROOT, store_path=store_path)
         self.rt.mail.pipeline.stop_worker()
+        self.rt.stop_news_sync_worker()
         self.rt.passwords.create_profile("Alice News", "123456")
         self.rt._refresh_active_profile_brain()
 
@@ -160,8 +161,10 @@ class TestSatzNewsEngine(unittest.TestCase):
         self.assertTrue(srcs[0]["conflict"])
 
         all_sources_res = self.rt.news.list_sources()
-        # Includes full SGS source_registry.json (222) + source_trust.json extras + feeds (>= 240)
-        self.assertGreaterEqual(all_sources_res["total"], 240)
+        has_sgs_trust = (self.rt.sgs_root / "config" / "planck3" / "source_trust.json").exists()
+        expected_min = 240 if has_sgs_trust else 220
+        # Standalone bundle includes bundled source_registry.json (222) + starter feeds (>= 220); SGS adds source_trust.json extras (>= 240)
+        self.assertGreaterEqual(all_sources_res["total"], expected_min)
         self.assertEqual(all_sources_res["total"], len(all_sources_res["sources"]))
 
     def test_faithful_news_gate_and_cloud_reader_integration(self) -> None:

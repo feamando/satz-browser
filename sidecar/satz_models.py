@@ -613,8 +613,10 @@ class SatzSidecarRuntime:
         self.news_sync_lock = threading.Lock()
         self.news_refresh_interval_secs = max(5.0, float(news_interval_minutes) * 60.0)
         self.news_sync_in_progress = False
+        self._news_sync_disabled = os.environ.get("SATZ_DISABLE_AUTO_NEWS_SYNC", "").strip() == "1"
         self.news_thread = threading.Thread(target=self._news_sync_loop, daemon=True)
-        self.news_thread.start()
+        if not self._news_sync_disabled:
+            self.news_thread.start()
 
     def record_error(self, scope: str, err: Exception | str) -> dict[str, Any]:
         entry = {
@@ -3758,7 +3760,7 @@ class SatzSidecarRuntime:
         while not getattr(self, "_closed", False):
             item = self.ingest_queue.get()
             try:
-                if getattr(self, "_closed", False) or self.pause_learning:
+                if item.get("__stop__") or getattr(self, "_closed", False) or self.pause_learning:
                     continue
                 item_pid = item.get("profile_id")
                 cur_pid = self.passwords.active_profile_id if self.passwords.unlocked else None
@@ -4591,12 +4593,24 @@ class SatzSidecarRuntime:
             finally:
                 self.news_sync_in_progress = False
 
+    def stop_news_sync_worker(self, timeout: float = 1.5) -> None:
+        self._news_sync_disabled = True
+        try:
+            self.news_wake_event.set()
+        except Exception:
+            pass
+        t = getattr(self, "news_thread", None)
+        if t is not None and t.is_alive() and threading.current_thread() is not t:
+            t.join(timeout=max(0.0, float(timeout)))
+
     def _news_sync_loop(self):
+        if getattr(self, "_news_sync_disabled", False):
+            return
         # Allow sidecar startup/Gemma preload and short tests to complete cleanly before background feed ping
         self.news_wake_event.wait(timeout=12.0)
-        while not getattr(self, "_closed", False):
+        while not getattr(self, "_closed", False) and not getattr(self, "_news_sync_disabled", False):
             self.news_wake_event.clear()
-            if getattr(self, "_closed", False):
+            if getattr(self, "_closed", False) or getattr(self, "_news_sync_disabled", False):
                 break
             if not self.pause_learning:
                 try:
@@ -4608,6 +4622,8 @@ class SatzSidecarRuntime:
 
     def close(self) -> None:
         self._closed = True
+        self._news_sync_disabled = True
+        self._warmup_gen = getattr(self, "_warmup_gen", 0) + 1
         try:
             while not self.ingest_queue.empty():
                 try:
@@ -4615,11 +4631,7 @@ class SatzSidecarRuntime:
                     self.ingest_queue.task_done()
                 except queue.Empty:
                     break
-        except Exception:
-            pass
-        try:
-            if getattr(self, "mail", None) is not None and getattr(self.mail, "pipeline", None) is not None:
-                self.mail.pipeline.stop_worker()
+            self.ingest_queue.put_nowait({"__stop__": True})
         except Exception:
             pass
         try:
@@ -4630,6 +4642,19 @@ class SatzSidecarRuntime:
             self.news_wake_event.set()
         except Exception:
             pass
+        try:
+            if getattr(self, "mail", None) is not None:
+                self.mail._close_active_connection()
+        except Exception:
+            pass
+        cur = threading.current_thread()
+        for t_attr in ("worker_thread", "bookmark_thread", "news_thread"):
+            t = getattr(self, t_attr, None)
+            if t is not None and t.is_alive() and t is not cur:
+                try:
+                    t.join(timeout=0.5)
+                except Exception:
+                    pass
         try:
             if getattr(self, "google_auth", None) is not None:
                 self.google_auth.stop_pending_servers()

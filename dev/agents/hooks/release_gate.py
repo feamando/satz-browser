@@ -109,7 +109,11 @@ def main() -> int:
                 "sidecar.test_dev_brain",
             ],
             "Sidecar unittest regression suite",
-            extra_env={"SATZ_MEMORY_KEYRING": "1", "PYTHONUTF8": "1"},
+            extra_env={
+                "SATZ_MEMORY_KEYRING": "1",
+                "SATZ_DISABLE_AUTO_NEWS_SYNC": "1",
+                "PYTHONUTF8": "1",
+            },
         )
         staged_py = _staged_python_path()
         if staged_py is not None:
@@ -132,7 +136,12 @@ def main() -> int:
             _run(
                 [str(staged_py), "-I", "-c", smoke_code],
                 "Isolated staged python-runtime (-I, zero ../sgs)",
-                extra_env={"PYTHONNOUSERSITE": "1", "PYTHONUTF8": "1", "SATZ_MEMORY_KEYRING": "1"},
+                extra_env={
+                    "PYTHONNOUSERSITE": "1",
+                    "PYTHONUTF8": "1",
+                    "SATZ_MEMORY_KEYRING": "1",
+                    "SATZ_DISABLE_AUTO_NEWS_SYNC": "1",
+                },
             )
 
     from dev_brain import DevBrain
