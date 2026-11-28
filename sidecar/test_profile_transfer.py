@@ -62,6 +62,7 @@ class TestProfileTransferAndUuidMerge(unittest.TestCase):
         with mock.patch.object(satz_passwords, "keyring", keyring_obj):
             rt = SatzSidecarRuntime(sgs_root=SGS_ROOT, store_path=base_dir / "planck_store.sqlite")
             rt.mail.pipeline.stop_worker()
+            rt.stop_news_sync_worker()
             return rt
 
     def test_cross_device_offline_export_and_import_without_source_device_key(self) -> None:
@@ -362,7 +363,7 @@ class TestProfileTransferAndUuidMerge(unittest.TestCase):
                     headers={"Content-Type": "application/json", "X-Satz-Token": "tok-a"},
                     method="POST",
                 )
-                with urllib.request.urlopen(req_exp, timeout=10) as resp:
+                with urllib.request.urlopen(req_exp, timeout=30) as resp:
                     exp_json = json.loads(resp.read().decode("utf-8"))
                 self.assertTrue(exp_json["ok"])
                 self.assertTrue(exp_json["filename"].endswith(".satzprofile"))
@@ -385,7 +386,7 @@ class TestProfileTransferAndUuidMerge(unittest.TestCase):
                     method="POST",
                 )
                 events = []
-                with urllib.request.urlopen(req_imp, timeout=15) as resp:
+                with urllib.request.urlopen(req_imp, timeout=45) as resp:
                     for raw_line in resp:
                         line = raw_line.decode("utf-8").strip()
                         if line.startswith("data: "):

@@ -1030,18 +1030,25 @@ class SatzSidecarRuntime:
                 # Release Gemma preload priority right after critical DB/sync setup finishes
                 self._unlock_busy_until = 0.0
 
+                if getattr(self, "_closed", False) or gen != self._warmup_gen:
+                    return
                 if getattr(self, "brain", None) is not None and not self.brain.locked:
                     try:
                         self.brain.prewarm_encoder()
                     except Exception:
                         pass
 
+                if getattr(self, "_closed", False) or gen != self._warmup_gen:
+                    return
                 if hasattr(self, "news") and self.news is not None:
                     try:
                         self.news.process_top_stories_to_brain(limit=12, force=False)
                     except Exception as ne:
-                        self.record_error("news_brain_catchup", ne)
+                        if not getattr(self, "_closed", False):
+                            self.record_error("news_brain_catchup", ne)
 
+                if getattr(self, "_closed", False) or gen != self._warmup_gen:
+                    return
                 self.bookmark_wake_event.set()
                 self.news_wake_event.set()
                 if hasattr(self, "behavior") and self.behavior is not None:
@@ -10693,6 +10700,33 @@ def make_sidecar_server(
             self.end_headers()
             self.wfile.write(body)
 
+        def _stream_sse_queue(self, ev_q: "queue.Queue[dict[str, Any] | None]", *, keepalive_secs: float = 1.5) -> None:
+            """Streams queued JSON SSE payloads with periodic comment heartbeats until None sentinel."""
+            self.send_response(200)
+            self._send_cors_headers()
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            while True:
+                try:
+                    item = ev_q.get(timeout=keepalive_secs)
+                except queue.Empty:
+                    try:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                    except Exception:
+                        break
+                    continue
+                if item is None:
+                    break
+                try:
+                    line = f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+                    self.wfile.write(line.encode("utf-8"))
+                    self.wfile.flush()
+                except Exception:
+                    break
+
         def do_OPTIONS(self):
             if not self._is_valid_host():
                 return self._json({"error": "forbidden host"}, 403)
@@ -11258,13 +11292,6 @@ def make_sidecar_server(
                     except Exception as e:
                         return self._json({"ok": False, "error": str(e)}, 400)
 
-                self.send_response(200)
-                self._send_cors_headers()
-                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-                self.send_header("Cache-Control", "no-cache")
-                self.send_header("Connection", "close")
-                self.end_headers()
-
                 ev_q: queue.Queue[dict[str, Any] | None] = queue.Queue()
 
                 def _worker() -> None:
@@ -11282,16 +11309,7 @@ def make_sidecar_server(
                         ev_q.put(None)
 
                 threading.Thread(target=_worker, daemon=True, name="satz-unlock-sse").start()
-                while True:
-                    item = ev_q.get()
-                    if item is None:
-                        break
-                    try:
-                        line = f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
-                        self.wfile.write(line.encode("utf-8"))
-                        self.wfile.flush()
-                    except Exception:
-                        break
+                self._stream_sse_queue(ev_q)
                 return
 
             if self.path == "/profile/lock":
@@ -11369,13 +11387,6 @@ def make_sidecar_server(
                     except Exception as e:
                         return self._json({"ok": False, "error": str(e)}, 400)
 
-                self.send_response(200)
-                self._send_cors_headers()
-                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-                self.send_header("Cache-Control", "no-cache")
-                self.send_header("Connection", "close")
-                self.end_headers()
-
                 ev_q: queue.Queue[dict[str, Any] | None] = queue.Queue()
 
                 def _import_worker() -> None:
@@ -11393,16 +11404,7 @@ def make_sidecar_server(
                         ev_q.put(None)
 
                 threading.Thread(target=_import_worker, daemon=True, name="satz-profile-import-sse").start()
-                while True:
-                    item = ev_q.get()
-                    if item is None:
-                        break
-                    try:
-                        line = f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
-                        self.wfile.write(line.encode("utf-8"))
-                        self.wfile.flush()
-                    except Exception:
-                        break
+                self._stream_sse_queue(ev_q)
                 return
 
             if self.path == "/passwords/upsert":
