@@ -1,0 +1,767 @@
+{
+  "version": "0.5.2",
+  "captured_at": "2026-11-28T09:33:02Z",
+  "git": {
+    "branch": "main",
+    "short_sha": "6bf9d71"
+  },
+  "manifests": {
+    "package_json": "0.5.2",
+    "tauri_conf": "0.5.2",
+    "cargo_toml": "0.5.2"
+  },
+  "requirements_runtime_sha256_16": "150186ad68a5c04d",
+  "shipped_planck_files": [
+    {
+      "path": "sidecar/models/planck/planck13/manifest.json",
+      "bytes": 248
+    },
+    {
+      "path": "sidecar/models/planck/planck13/model.pt.part000",
+      "bytes": 71303168
+    },
+    {
+      "path": "sidecar/models/planck/planck13/model.pt.part001",
+      "bytes": 66543030
+    },
+    {
+      "path": "sidecar/models/planck/tokenizer.model",
+      "bytes": 709375
+    },
+    {
+      "path": "sidecar/models/planck/xreader_planck/manifest.json",
+      "bytes": 248
+    },
+    {
+      "path": "sidecar/models/planck/xreader_planck/model.pt.part000",
+      "bytes": 71303168
+    },
+    {
+      "path": "sidecar/models/planck/xreader_planck/model.pt.part001",
+      "bytes": 67586090
+    }
+  ],
+  "release_binaries": [
+    {
+      "path": "src-tauri/target/release/satz-browser",
+      "bytes": 17136304,
+      "mtime": "2026-11-28T09:18:49Z",
+      "sha256": "8e073d5db4f091ac63ec41fa0010f0605303e7586d1c7c5937cffdf5d06b446e"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/dmg/satz_0.5.1_aarch64.dmg",
+      "bytes": 522593041,
+      "mtime": "2026-11-28T09:20:09Z",
+      "sha256": "67cb5136aee784c9d0afd5d26af1deaf948e92bbde4eef8f81d74f28f698070b"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/joblib/test/data/joblib_0.10.0_compressed_pickle_py27_np16.gz",
+      "bytes": 769,
+      "mtime": "2026-11-27T12:14:28Z",
+      "sha256": "418447e90d83486568ae3092a960b18d358230e24ac9ec38365daa99f415bd0f"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/joblib/test/data/joblib_0.10.0_compressed_pickle_py27_np17.gz",
+      "bytes": 757,
+      "mtime": "2026-11-27T12:14:28Z",
+      "sha256": "a1f4e8cccfca94f25ae744d1f050b0734f663263ba38ed0642181404b348b17b"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/joblib/test/data/joblib_0.10.0_compressed_pickle_py33_np18.gz",
+      "bytes": 792,
+      "mtime": "2026-11-27T12:14:28Z",
+      "sha256": "d9e215780f978ce693e48110ead23652e1c6de1c2189172232690198f7088788"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/joblib/test/data/joblib_0.10.0_compressed_pickle_py34_np19.gz",
+      "bytes": 794,
+      "mtime": "2026-11-27T12:14:28Z",
+      "sha256": "1abdb3ff5b555831f51f7ff00951e66a49277fc2aa787293f18cf8775be65023"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/joblib/test/data/joblib_0.10.0_compressed_pickle_py35_np19.gz",
+      "bytes": 790,
+      "mtime": "2026-11-27T12:14:28Z",
+      "sha256": "a56c3fc6e0db3a4102aaed4a19fd4e154eecd956f30b6bf9179897844ed3c01e"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/joblib/test/data/joblib_0.11.0_compressed_pickle_py36_np111.gz",
+      "bytes": 800,
+      "mtime": "2026-11-27T12:14:28Z",
+      "sha256": "d56ae75c3a83a0d10f60e657d50e56af6e3addbf2f555e9fc385a6e52e1b32de"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/joblib/test/data/joblib_0.8.4_compressed_pickle_py27_np17.gz",
+      "bytes": 659,
+      "mtime": "2026-11-27T12:14:28Z",
+      "sha256": "4a9f994fb8baa63e689f681ba6db33bbb45aaf32693a61c9ebb50a3a608f40c8"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/joblib/test/data/joblib_0.9.2_compressed_pickle_py27_np16.gz",
+      "bytes": 658,
+      "mtime": "2026-11-27T12:14:28Z",
+      "sha256": "34bb43aefa365c81f42af51402f84ea8c7a85c48c65b422e4e4fe8b2ee57883c"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/joblib/test/data/joblib_0.9.2_compressed_pickle_py27_np17.gz",
+      "bytes": 658,
+      "mtime": "2026-11-27T12:14:28Z",
+      "sha256": "34bb43aefa365c81f42af51402f84ea8c7a85c48c65b422e4e4fe8b2ee57883c"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/joblib/test/data/joblib_0.9.2_compressed_pickle_py34_np19.gz",
+      "bytes": 673,
+      "mtime": "2026-11-27T12:14:28Z",
+      "sha256": "9f33bd8a21a41b729b05dac5deeb0e868f218a092b0e3fe5988094cf167217f6"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/joblib/test/data/joblib_0.9.2_compressed_pickle_py35_np19.gz",
+      "bytes": 673,
+      "mtime": "2026-11-27T12:14:28Z",
+      "sha256": "9f33bd8a21a41b729b05dac5deeb0e868f218a092b0e3fe5988094cf167217f6"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/joblib/test/data/joblib_0.9.4.dev0_compressed_cache_size_pickle_py35_np19.gz",
+      "bytes": 802,
+      "mtime": "2026-11-27T12:14:28Z",
+      "sha256": "f2361f589b31d2863627edcb96612280ae5c0a59c9496d89dab7de493670f93b"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/networkx/generators/atlas.dat.gz",
+      "bytes": 8887,
+      "mtime": "2026-11-27T12:14:18Z",
+      "sha256": "73fc416df0164923607751cb759f4ae81deb5f6550bf25be59c86de3b747e41d"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/numpy/random/tests/data/generator_pcg64_np121.pkl.gz",
+      "bytes": 203,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "11f43e5fbd0a9078010055f6a483dc09497830d3f564d44e697394ef9bdd8aa3"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/numpy/random/tests/data/generator_pcg64_np126.pkl.gz",
+      "bytes": 208,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "7cdf1d78d5715fe1c42c0d5e219df691db58bdce21c0ac9aeb0bf4d0625e1f46"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/numpy/random/tests/data/sfc64_np126.pkl.gz",
+      "bytes": 290,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "3156b5ca5172ec350f81404afa821e292755978518122377019ec6dec773cdac"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/pip/_vendor/distlib/t32.exe",
+      "bytes": 97792,
+      "mtime": "2026-11-27T12:14:02Z",
+      "sha256": "5fd873e09786a1eaabaa44261e9e30609d88745da040ebb702c1a5069ab345ca"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/pip/_vendor/distlib/t64-arm.exe",
+      "bytes": 182784,
+      "mtime": "2026-11-27T12:14:02Z",
+      "sha256": "81f7936c6d05cadd4a185bb9a8a64abe9a72c937ad979ea5afe672de59123fcc"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/pip/_vendor/distlib/t64.exe",
+      "bytes": 108032,
+      "mtime": "2026-11-27T12:14:02Z",
+      "sha256": "acd47a82dc01132e3b8414f683c2e117c18aedbf650a370249fe9fdbc445cda1"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/pip/_vendor/distlib/w32.exe",
+      "bytes": 91648,
+      "mtime": "2026-11-27T12:14:02Z",
+      "sha256": "f27b3724964ff524e837374847d2856f7d10a884516fc34200d0a2332a739789"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/pip/_vendor/distlib/w64-arm.exe",
+      "bytes": 168448,
+      "mtime": "2026-11-27T12:14:02Z",
+      "sha256": "f6704d3a1022f69ad6b7e604a927d00ce2f9dae515bfad5a7df9a2e3e4bd2448"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/pip/_vendor/distlib/w64.exe",
+      "bytes": 101888,
+      "mtime": "2026-11-27T12:14:02Z",
+      "sha256": "55b21889fd3d28799b834fba3d29482e7aa1b0519864b790e3914af7cdda666b"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/setuptools/cli-32.exe",
+      "bytes": 11776,
+      "mtime": "2026-11-27T12:14:07Z",
+      "sha256": "32acc1bc543116cbe2cff10cb867772df2f254ff2634c870aef0b46c4b696fdb"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/setuptools/cli-64.exe",
+      "bytes": 14336,
+      "mtime": "2026-11-27T12:14:07Z",
+      "sha256": "bbb3de5707629e6a60a0c238cd477b28f07f0066982fda953fa6fcec39073a4a"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/setuptools/cli-arm64.exe",
+      "bytes": 13824,
+      "mtime": "2026-11-27T12:14:07Z",
+      "sha256": "b9a7d08da880dfac8bcf548eba4b06fb59b6f09b17d33148a0f6618328926c61"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/setuptools/cli.exe",
+      "bytes": 11776,
+      "mtime": "2026-11-27T12:14:07Z",
+      "sha256": "32acc1bc543116cbe2cff10cb867772df2f254ff2634c870aef0b46c4b696fdb"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/setuptools/gui-32.exe",
+      "bytes": 11776,
+      "mtime": "2026-11-27T12:14:07Z",
+      "sha256": "85dae1e95d77845f2cb59bcac3d4afe74bbe4c91a9bcc5bf4a71cd43104dbe7c"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/setuptools/gui-64.exe",
+      "bytes": 14336,
+      "mtime": "2026-11-27T12:14:07Z",
+      "sha256": "3471b6140eadc6412277dbbefe3fef8c345a0f1a59776086b80a3618c3a83e3b"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/setuptools/gui-arm64.exe",
+      "bytes": 13824,
+      "mtime": "2026-11-27T12:14:07Z",
+      "sha256": "e694f4743405c8b5926ff457db6fe7f1a12dec7c16a9c3864784d3f4e07ae097"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/setuptools/gui.exe",
+      "bytes": 11776,
+      "mtime": "2026-11-27T12:14:07Z",
+      "sha256": "85dae1e95d77845f2cb59bcac3d4afe74bbe4c91a9bcc5bf4a71cd43104dbe7c"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/data/diabetes_data_raw.csv.gz",
+      "bytes": 7073,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "7fc0ded571454b1982210d3bb43f0aca44eae01a0b8654a3b24022bdb6b38009"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/data/diabetes_target.csv.gz",
+      "bytes": 1050,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "8e53f65eb811df43c206f3534bb3af0e5fed213bc37ed6ba36310157d6023803"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/data/digits.csv.gz",
+      "bytes": 57523,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "09f66e6debdee2cd2b5ae59e0d6abbb73fc2b0e0185d2e1957e9ebb51e23aa22"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_1/api-v1-jd-1.json.gz",
+      "bytes": 1786,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "862e08520a2433a495a3bd3ae9fd9e6c7c540a9c632db29bb8252784cbdad779"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_1/api-v1-jdf-1.json.gz",
+      "bytes": 889,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "a966dad58cf5fbc914a374ad5556c0414f5ed962237ed55a379fe96e308d00de"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_1/api-v1-jdq-1.json.gz",
+      "bytes": 145,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "84a8726d2c3f8bbca79d54d8b191158744b1993146f8f083b111a8ea78536057"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_1/data-v1-dl-1.arff.gz",
+      "bytes": 1841,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "cfe8945b949770b0da42daf58ce67d1c5fee25cf7b4fd145161837c2abc09429"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_1119/api-v1-jd-1119.json.gz",
+      "bytes": 711,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "c41e5fbb3e59cd4de881ed7c8f88f9b03a750d537ba63581cafde6aafd77adc1"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_1119/api-v1-jdf-1119.json.gz",
+      "bytes": 1108,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "82f899edc59cb41fdd671b256a228e5e06dfc5e24c92712e75005b251b000865"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_1119/api-v1-jdl-dn-adult-census-l-2-dv-1.json.gz",
+      "bytes": 364,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "4a5dc36ca9758313978b2a9d79cce763c6f84d5d95f15ac557b3d7482f22ee21"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_1119/api-v1-jdl-dn-adult-census-l-2-s-act-.json.gz",
+      "bytes": 363,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "6ec0955788914fa81f698e97a4d1aff773d7a125ed6e769c6271a0b48fc4011d"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_1119/api-v1-jdq-1119.json.gz",
+      "bytes": 1549,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "ef7cbcb58c2edcfea45c058b751faf7783e710462a924e9aacad8d47a7e9f94b"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_1119/data-v1-dl-54002.arff.gz",
+      "bytes": 1190,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "6931af256195fcdd2e47dd8b0f9edf16fbf03b198e77b70e3dfd9877cdf09515"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_1590/api-v1-jd-1590.json.gz",
+      "bytes": 1544,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "9b105adfedc6b6b82f4695ca9bfe232393034cdf79803523f397a6dc5bf824d1"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_1590/api-v1-jdf-1590.json.gz",
+      "bytes": 1032,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "046f5e60564693f0f3b8e382725c8012c3e058647139c24685cec984e40fcd00"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_1590/api-v1-jdq-1590.json.gz",
+      "bytes": 1507,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "44b9b0d290a1e339695a431438f84080071c5635161c3977dd17f4c27b00a34a"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_1590/data-v1-dl-1595261.arff.gz",
+      "bytes": 1152,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "ee1dcdf58f2f1072f7dd1b43388969c51bc6cfe776e3e9465ae6a756e5ddb10a"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_2/api-v1-jd-2.json.gz",
+      "bytes": 1363,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "a672d435b97a6033dfd1d2a5c823d237ad1865101bd5e403cd99b5be0ba4e03b"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_2/api-v1-jdf-2.json.gz",
+      "bytes": 866,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "c1b8387a7d08014a1c09807ae458ca7666ab8a3c579cbfb189e09c6d7de892a6"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_2/api-v1-jdl-dn-anneal-l-2-dv-1.json.gz",
+      "bytes": 309,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "e900b190795224ff48e46a1c02b10020d4c986ba142880c02c86f0b472ded3c9"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_2/api-v1-jdl-dn-anneal-l-2-s-act-.json.gz",
+      "bytes": 346,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "ff6225cb98260ca4ebec015a1a2754f2a7b0dbfb4d0f17dcf6727542154e2a10"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_2/api-v1-jdq-2.json.gz",
+      "bytes": 1501,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "c46f6c5f221d877de604b906403b20cbdf674f1225bcdbb3e15bd1882a69a471"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_2/data-v1-dl-1666876.arff.gz",
+      "bytes": 1855,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "d57b2b04cae526306670e3516989dca32c88c155781325ddac42e43dc2322c30"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_292/api-v1-jd-292.json.gz",
+      "bytes": 551,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "1e6a38d79d8f9e53a2ce11b68b4153062d4e96ec0b368d02b2e64f1b33c51693"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_292/api-v1-jd-40981.json.gz",
+      "bytes": 553,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "c26dcbe30cfb39161f305b2b3d43a9b50adc8b368d0749568c47106cbdb20897"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_292/api-v1-jdf-292.json.gz",
+      "bytes": 306,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "255c16f33ed2967fe100cd8011a7e69f789603724b1ec2ecf91dfeb72067c190"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_292/api-v1-jdf-40981.json.gz",
+      "bytes": 306,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "255c16f33ed2967fe100cd8011a7e69f789603724b1ec2ecf91dfeb72067c190"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_292/api-v1-jdl-dn-australian-l-2-dv-1-s-dact.json.gz",
+      "bytes": 327,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "8ef6025425fdfc5f736555ea385252af5bcbf62383615db82489366d4f96a0a7"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_292/api-v1-jdl-dn-australian-l-2-dv-1.json.gz",
+      "bytes": 99,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "9da09e9a6031d060ec416f639a6bf34989e6c88ce641d10621eb906ba1d8c293"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_292/api-v1-jdl-dn-australian-l-2-s-act-.json.gz",
+      "bytes": 319,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "35890d08165c804526b48aad462d7ccc09e808bd7975ba604bd612b9608797ac"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_292/data-v1-dl-49822.arff.gz",
+      "bytes": 2532,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "b7ee24adabd4aaed6419b43fe9d3f86d55fcf4bee0f1698ae21d86c2701314e3"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_3/api-v1-jd-3.json.gz",
+      "bytes": 2473,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "066a216679b197cc51946e17ee9a2e28215425991b0ceb7f10988c14f7f3f869"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_3/api-v1-jdf-3.json.gz",
+      "bytes": 535,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "ec4f2d6bc4df3882b08bba01571e0792a56f79e0a922d984897773acd284b426"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_3/api-v1-jdq-3.json.gz",
+      "bytes": 1407,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "09ef19cfad25c5de487ddbaef3c4d068ca3063777730a288dfd6f5096a0c6f46"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_3/data-v1-dl-3.arff.gz",
+      "bytes": 19485,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "c63fdf8861761f1ca70509f7d2d169a7cc053988c7b7c09c09a6db6124e208be"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40589/api-v1-jd-40589.json.gz",
+      "bytes": 598,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "59d1aa6b02d2358c16fa9e4fbeff523a3bd10ebd38c7c371911fa8335e7bdcbf"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40589/api-v1-jdf-40589.json.gz",
+      "bytes": 856,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "826bab057a3929f41189bc51afa0a1752695e63ccf20e128ca6129e9e3321fc2"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40589/api-v1-jdl-dn-emotions-l-2-dv-3.json.gz",
+      "bytes": 315,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "19e6b2a2a8fec5403c146642a4dc2e077d66a3a1ac87e8239bd1dd31c928ab9c"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40589/api-v1-jdl-dn-emotions-l-2-s-act-.json.gz",
+      "bytes": 318,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "4da63a60163340b6e18922abfe7f1f2a7a7da23da63c269324985d61ffaa6075"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40589/api-v1-jdq-40589.json.gz",
+      "bytes": 913,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "d0f7973193eb35d19e99d1d8bca3c7f3a8b8d0410508af34ad571aee8ec5ab05"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40589/data-v1-dl-4644182.arff.gz",
+      "bytes": 4344,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "2c4226550827ceff3509c67179c473e14385cee206536362e57c5e0dfc7751bf"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40675/api-v1-jd-40675.json.gz",
+      "bytes": 323,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "a787772d60fbfcc21a0e96fd81906f03542e0b942d19dcc95dae47498953a4fd"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40675/api-v1-jdf-40675.json.gz",
+      "bytes": 307,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "d48d9679789d6baf7d0d3c346e3576d7589b663c3640942f9c1dba76e355faaa"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40675/api-v1-jdl-dn-glass2-l-2-dv-1-s-dact.json.gz",
+      "bytes": 317,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "21ed1ecc5d874956e951a9361f251afb2165adda92798c89ca5e2f97ae80dd8f"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40675/api-v1-jdl-dn-glass2-l-2-dv-1.json.gz",
+      "bytes": 85,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "ad0a4a5477605380f8819ce840dbb928a3d084267c512f6cb50d5be2f7c76bc2"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40675/api-v1-jdl-dn-glass2-l-2-s-act-.json.gz",
+      "bytes": 88,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "141ba630e039ea44bbaef92a288e2d964fc3aa2ef805a9723b4aac738a26a627"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40675/api-v1-jdq-40675.json.gz",
+      "bytes": 886,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "88fcdc3a6fed5697f36dc262f69bfffb814767ce336ff28a21def3aac937b08c"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40675/data-v1-dl-4965250.arff.gz",
+      "bytes": 3000,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "543d0887312f43d9f65a7e1d08be78a2436369f632d7382b4134cebb525a48a3"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40945/api-v1-jd-40945.json.gz",
+      "bytes": 437,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "02882c6b02c4e068ef2b16f37f33ae3d5e9dd17ca29d01662c6924e16427eb5d"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40945/api-v1-jdf-40945.json.gz",
+      "bytes": 320,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "95f0938dfdf1b87d0ffc4d526f2c91e097ef7689480b693970126d908f291030"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40945/api-v1-jdq-40945.json.gz",
+      "bytes": 1042,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "9c7e5a46554ab6a8121832dc0cd9f7a60f5034cef1a5a7d61346bbd912516b54"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40945/data-v1-dl-16826755.arff.gz",
+      "bytes": 32243,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "516e961f519876e5f89b339a0364a08dd64160ac3a4d76d5ec62955bfd6d6ce5"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40966/api-v1-jd-40966.json.gz",
+      "bytes": 1660,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "36c63c3ac8c9db59910acbf4c772cd53040ccd0eac0b0452611dd7ad8da50474"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40966/api-v1-jdf-40966.json.gz",
+      "bytes": 3690,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "8adac8e2f8cbcbfa9677acdd4927a961430465d2c99401832160be455cfaced8"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40966/api-v1-jdl-dn-miceprotein-l-2-dv-4.json.gz",
+      "bytes": 325,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "f0c203b4627175cebbf527d81917a499911af915f6f2f46ee7248428a948d603"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40966/api-v1-jdl-dn-miceprotein-l-2-s-act-.json.gz",
+      "bytes": 328,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "301396b4a42c814b1a15038ddfcbcf5c8590501231747d0dc2a500b84b2fd0df"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40966/api-v1-jdq-40966.json.gz",
+      "bytes": 934,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "3dee83987fffa8ec20e23b3cabc00d42beb7a469af6bd803909998c1687fa634"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_40966/data-v1-dl-17928620.arff.gz",
+      "bytes": 6471,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "1c5fd93ffec7deb63a940fd698534dd7ebb7db349fc183930041cbf17e60e2cc"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_42074/api-v1-jd-42074.json.gz",
+      "bytes": 595,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "4fcb215595bb8223321943f0df50f5a5013445bf1819d53d3cb5bfa90d9e79c0"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_42074/api-v1-jdf-42074.json.gz",
+      "bytes": 272,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "38b74e7f02a61ff55bcfac4d87103d5bffc43febb0c019d9aaa162f8f7693068"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_42074/api-v1-jdq-42074.json.gz",
+      "bytes": 722,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "8742a74bd5bc120acd9186c8a8737cb420ed9b009fade00b24e7ce5217797f2c"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_42074/data-v1-dl-21552912.arff.gz",
+      "bytes": 2326,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "f623e777c0a36ae6c82fae10a7c2088cb383298ea244595bf8dc95449c9be4c4"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_42585/api-v1-jd-42585.json.gz",
+      "bytes": 1492,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "7ccbf138e0663895f9cf511136bc6395c153f6238af2eacb6a367e86e15d1a71"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_42585/api-v1-jdf-42585.json.gz",
+      "bytes": 312,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "0985045a454c8186b4e690ebefb6cea1ef7c13292c98d50abda470a0ff3ad425"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_42585/api-v1-jdq-42585.json.gz",
+      "bytes": 348,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "3736e7feb7ad30c68675c2c4e48a9fb262e80308c9083b100ddd0339da1fc282"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_42585/data-v1-dl-21854866.arff.gz",
+      "bytes": 4519,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "c8d00c6690576a9ec39e1cb77054e13296be0fdebab0fb35a64a0e8627b6e6f3"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_561/api-v1-jd-561.json.gz",
+      "bytes": 1798,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "a1d38fdd601b67bb9c6d16152f53ddf166a0cfcfef4fa86438e899bfe449226c"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_561/api-v1-jdf-561.json.gz",
+      "bytes": 425,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "407424fb79cc30b8e9ff90900b3bf29244ac7f3797f278b5be602843f959b4ee"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_561/api-v1-jdl-dn-cpu-l-2-dv-1.json.gz",
+      "bytes": 301,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "0703b0ae20b9ff75087dc601640ee58f1c2ad6768858ea21a245151da9ba8e4c"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_561/api-v1-jdl-dn-cpu-l-2-s-act-.json.gz",
+      "bytes": 347,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "70d4596ad879547863109da8675c2b789d07df66b526d7ebcbce9616c4c9b94c"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_561/api-v1-jdq-561.json.gz",
+      "bytes": 1074,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "8743b2d93d2c62a82fb47e1fbc002b97e25adcfb5bf1fcb26b58ad0bed15bd48"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_561/data-v1-dl-52739.arff.gz",
+      "bytes": 3303,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "e96142b5e00dfec2617b0c22d7192b340ae2c28ec3ffc3a894c5be746b970a59"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_61/api-v1-jd-61.json.gz",
+      "bytes": 898,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "a5c7e79aa41ef580838fb9fc1906280f076c47be1741fddd5004ddb500eb57fe"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_61/api-v1-jdf-61.json.gz",
+      "bytes": 268,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "33cbd6ae945ba04969370ab35604e9363c87256393493382b5118a89d59386d6"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_61/api-v1-jdl-dn-iris-l-2-dv-1.json.gz",
+      "bytes": 293,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "0bce20aae7fd903796d96d5b3a3677b7058fbc5f3fe0996ee9d491e4ee23d132"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_61/api-v1-jdl-dn-iris-l-2-s-act-.json.gz",
+      "bytes": 330,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "a9f4b9317997df63ed8d2bb073a3906344c0e0be017fd384eaec36ced8b94bae"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_61/api-v1-jdq-61.json.gz",
+      "bytes": 1121,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "424cd47c12a51c7bb8d8169fac80fb5601f152bd78468b241d4b115bf7d22f20"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_61/data-v1-dl-61.arff.gz",
+      "bytes": 2342,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "afe4736924606638984e573235191025d419c545d31dc8874c96b72f5ec5db73"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_62/api-v1-jd-62.json.gz",
+      "bytes": 656,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "7ef3551ad47d48023c5a1f1cf077047a9a4b95544bb91d4a86097f8b574f8d07"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_62/api-v1-jdf-62.json.gz",
+      "bytes": 817,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "489b177126cb7f335cb220709233b946d3a0ad71d38bba6d48b79187146e585a"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_62/api-v1-jdq-62.json.gz",
+      "bytes": 805,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "278a52a52d569f07d14c6a7877b104762c77daac429fb1fd9817a0378d6ec634"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app/Contents/Resources/python-runtime/lib/python3.12/site-packages/sklearn/datasets/tests/data/openml/id_62/data-v1-dl-52352.arff.gz",
+      "bytes": 1625,
+      "mtime": "2026-11-27T12:14:30Z",
+      "sha256": "fb5830c82112f62a400c82ac1f1b5eb61c29c0a7cc72ba56d2aeff0fae8a60f9"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/macos/satz.app.tar.gz",
+      "bytes": 524166079,
+      "mtime": "2026-11-27T12:20:12Z",
+      "sha256": "8fcd1fd3c52441d416cc7302ec5764d77986937c630110a2cba8d2fce6b39e49"
+    }
+  ],
+  "dev_brain_monitor": {
+    "ok": false,
+    "db_path": "dev/brain/brain_index.sqlite",
+    "encoder": "planck",
+    "last_reindex_ts": "2026-11-28T09:32:28Z",
+    "disk_files": 109,
+    "nodes": 109,
+    "fts_nodes": 109,
+    "embeddings": 109,
+    "edges": 214,
+    "orphan_nodes": 15,
+    "stale_count": 1,
+    "stale_files": [
+      "dev/versions/CHANGELOG.md"
+    ],
+    "extra_files": [],
+    "broken_edge_count": 0,
+    "broken_links": [],
+    "registry_and_brain_md_ok": true,
+    "latest_eval": {
+      "run_id": "eval-1795771787",
+      "ran_at": "2026-11-27T09:29:47Z",
+      "encoder": "planck",
+      "hit_at_1": 0.8824,
+      "recall_at_3": 0.9412,
+      "recall_at_5": 1.0,
+      "mrr": 0.9235,
+      "term_accuracy": 1.0,
+      "passed": 1
+    }
+  }
+}

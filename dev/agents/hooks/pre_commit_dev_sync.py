@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -44,6 +45,21 @@ def check_ui_and_weight_limits() -> None:
         for f in planck_dir.rglob("*"):
             if f.is_file() and f.stat().st_size > limit:
                 raise AssertionError(f"Model file exceeds 90 MB GitHub limit: {f}")
+
+    if (REPO_ROOT / ".git").exists():
+        sh_proc = subprocess.run(
+            ["git", "ls-files", "--stage", "--", "scripts/*.sh"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+        )
+        if sh_proc.returncode == 0:
+            for line in sh_proc.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 4 and parts[0] != "100755":
+                    raise AssertionError(
+                        f"Shell script {parts[-1]} lacks executable git mode 100755 (got {parts[0]}). Run: git update-index --chmod=+x {parts[-1]}"
+                    )
 
 
 def check_privacy_and_secrets(*, mode: str = "all") -> None:

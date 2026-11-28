@@ -62,6 +62,39 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 PIN_REGEX = re.compile(r"^\d{6}$")
 ENV_LINE_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$")
 KEYRING_SERVICE = "satz-browser"
+_DEFAULT_OS_KEYRING = keyring
+
+
+class _ProcessMemoryKeyring:
+    """Isolated in-memory keyring used only when SATZ_MEMORY_KEYRING=1 (tests/headless CI)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._store: dict[tuple[str, str], str] = {}
+
+    def get_password(self, service: str, username: str) -> str | None:
+        with self._lock:
+            return self._store.get((service, username))
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        with self._lock:
+            self._store[(service, username)] = password
+
+    def delete_password(self, service: str, username: str) -> None:
+        with self._lock:
+            self._store.pop((service, username), None)
+
+
+_MEM_KEYRING = _ProcessMemoryKeyring()
+
+
+def _active_keyring() -> Any:
+    """Return mocked keyring when patched, in-memory keyring under SATZ_MEMORY_KEYRING=1, else OS keyring."""
+    if keyring is not _DEFAULT_OS_KEYRING:
+        return keyring
+    if os.environ.get("SATZ_MEMORY_KEYRING", "").strip() == "1":
+        return _MEM_KEYRING
+    return keyring
 
 # Section 2.3: Exact host / subdomain matching. Notice `google.com` is NOT in GMAIL.
 KNOWN_SERVICE_ALIASES: dict[str, list[str]] = {
@@ -518,6 +551,7 @@ class ProfilePasswordManager:
         self._active_pin: str | None = None
         self._unlocked_env_cache: dict[str, str] = {}
         self._unlocked_meta_ts_cache: dict[str, dict[str, float]] = _empty_vault_meta_ts()
+        self._device_key_accounts: dict[str, str] = {}
         self._last_activity_ts: float = 0.0
         self.on_profile_change: Any = None
         self.on_progress: Any = None
@@ -541,9 +575,26 @@ class ProfilePasswordManager:
                 pass
 
     # ── OS Keychain Device Key Management ────────────────────────────────
+    def _get_device_key_account(self, profile_id: str) -> str:
+        with self.lock:
+            cached = self._device_key_accounts.get(profile_id)
+            if cached:
+                return cached
+            reg = self._load_registry()
+            for p in reg.get("profiles", []):
+                if p.get("id") == profile_id:
+                    acct = str(p.get("device_key_account") or "").strip()
+                    if acct:
+                        self._device_key_accounts[profile_id] = acct
+                        return acct
+                    break
+        return profile_id
+
     def _get_device_key(self, profile_id: str, create_if_missing: bool = False) -> bytes | None:
+        kr = _active_keyring()
+        acct = self._get_device_key_account(profile_id)
         try:
-            raw_b64 = keyring.get_password(KEYRING_SERVICE, profile_id)
+            raw_b64 = kr.get_password(KEYRING_SERVICE, acct)
             if raw_b64:
                 dk = base64.b64decode(raw_b64)
                 if len(dk) == 32:
@@ -553,32 +604,53 @@ class ProfilePasswordManager:
         if not create_if_missing:
             return None
         dk = os.urandom(32)
-        keyring.set_password(KEYRING_SERVICE, profile_id, base64.b64encode(dk).decode("ascii"))
-        return dk
+        dk_b64 = base64.b64encode(dk).decode("ascii")
+        try:
+            kr.set_password(KEYRING_SERVICE, acct, dk_b64)
+            self._device_key_accounts[profile_id] = acct
+            return dk
+        except Exception as exc:
+            msg = f"{type(exc).__name__}: {exc}".lower()
+            # macOS Keychain raises -25244 (errSecInvalidOwnerEdit) when an adhoc/different
+            # binary signature writes to a slug created by another executable.
+            if "-25244" in msg or "owner" in msg or "passwordseterror" in msg:
+                alt_acct = f"{profile_id}:{secrets.token_hex(6)}"
+                kr.set_password(KEYRING_SERVICE, alt_acct, dk_b64)
+                self._device_key_accounts[profile_id] = alt_acct
+                with self.lock:
+                    reg = self._load_registry()
+                    changed = False
+                    for p in reg.get("profiles", []):
+                        if p.get("id") == profile_id and p.get("device_key_account") != alt_acct:
+                            p["device_key_account"] = alt_acct
+                            changed = True
+                    if changed:
+                        self._save_registry(reg)
+                return dk
+            raise
 
     def _delete_device_key(self, profile_id: str) -> None:
-        try:
-            keyring.delete_password(KEYRING_SERVICE, profile_id)
-        except Exception:
-            pass
-        try:
-            keyring.delete_password(KEYRING_SERVICE, f"{profile_id}:touchid_pin")
-        except Exception:
-            pass
-        try:
-            keyring.delete_password(KEYRING_SERVICE, f"{profile_id}:vault_key_v1")
-        except Exception:
-            pass
+        kr = _active_keyring()
+        acct = self._get_device_key_account(profile_id)
+        self._device_key_accounts.pop(profile_id, None)
+        for target_acct in dict.fromkeys((acct, profile_id)):
+            for suffix in ("", ":touchid_pin", ":vault_key_v1"):
+                try:
+                    kr.delete_password(KEYRING_SERVICE, f"{target_acct}{suffix}")
+                except Exception:
+                    pass
 
     def _save_touchid_pin(self, profile_id: str, pin: str) -> None:
+        acct = self._get_device_key_account(profile_id)
         try:
-            keyring.set_password(KEYRING_SERVICE, f"{profile_id}:touchid_pin", pin)
+            _active_keyring().set_password(KEYRING_SERVICE, f"{acct}:touchid_pin", pin)
         except Exception:
             pass
 
     def _get_touchid_pin(self, profile_id: str) -> str | None:
+        acct = self._get_device_key_account(profile_id)
         try:
-            val = keyring.get_password(KEYRING_SERVICE, f"{profile_id}:touchid_pin")
+            val = _active_keyring().get_password(KEYRING_SERVICE, f"{acct}:touchid_pin")
             if val and PIN_REGEX.match(val.strip()):
                 return val.strip()
         except Exception:
@@ -589,20 +661,22 @@ class ProfilePasswordManager:
         """Caches the derived AES-GCM vault DEK in the OS keyring bound to its salt/KDF signature."""
         if not kdf_sig or not vault_key or len(vault_key) != 32:
             return
+        acct = self._get_device_key_account(profile_id)
         try:
             payload = json.dumps(
                 {"sig": kdf_sig, "k": base64.b64encode(vault_key).decode("ascii")},
                 separators=(",", ":"),
             )
-            keyring.set_password(KEYRING_SERVICE, f"{profile_id}:vault_key_v1", payload)
+            _active_keyring().set_password(KEYRING_SERVICE, f"{acct}:vault_key_v1", payload)
         except Exception:
             pass
 
     def _get_cached_vault_key(self, profile_id: str, expected_sig: str) -> bytes | None:
         if not expected_sig:
             return None
+        acct = self._get_device_key_account(profile_id)
         try:
-            raw = keyring.get_password(KEYRING_SERVICE, f"{profile_id}:vault_key_v1")
+            raw = _active_keyring().get_password(KEYRING_SERVICE, f"{acct}:vault_key_v1")
             if not raw:
                 return None
             obj = json.loads(raw)
@@ -853,6 +927,9 @@ class ProfilePasswordManager:
                         "failed_attempts": 0,
                         "lockout_until": 0.0,
                     }
+                    dk_acct = self._device_key_accounts.get(pid)
+                    if dk_acct and dk_acct != pid:
+                        profile_entry["device_key_account"] = dk_acct
                     reg["profiles"].append(profile_entry)
                     reg["last_profile_id"] = pid
                     self._save_registry(reg)
@@ -949,6 +1026,9 @@ class ProfilePasswordManager:
 
         target.pop("pin_hash", None)
         target.pop("salt", None)
+        dk_acct = self._device_key_accounts.get(profile_id)
+        if dk_acct and dk_acct != profile_id:
+            target["device_key_account"] = dk_acct
         env_map, meta_ts = self._parse_env_with_meta(raw_legacy)
         return env_map, meta_ts, vault_kdf_signature(envelope), derived_key
 
@@ -1528,6 +1608,9 @@ class ProfilePasswordManager:
                     "lockout_until": 0.0,
                 }
                 reg["profiles"].append(target)
+            dk_acct = self._device_key_accounts.get(pid)
+            if dk_acct and dk_acct != pid:
+                target["device_key_account"] = dk_acct
 
             if activate:
                 res = self._finalize_unlocked_profile(

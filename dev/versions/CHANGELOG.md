@@ -2,6 +2,10 @@
 
 All notable milestone releases and pipeline changes for `satz-browser`. Historical milestone logs remain preserved in `NOTES_v0.3.md` through `NOTES_v0.9.md`.
 
+## [0.5.2] - 2026-11-28
+### Changed
+- macOS squircle icon, Settings telemetry inspector with opt-in hosted sync, macOS Keychain -25244 recovery, path parity fixes, and dual-OS Python CI gates
+
 ## [0.5.1] - 2026-11-27
 ### Changed
 - Release v0.5.1: first-run onboarding, Planck default launcher, dev hub/brain & hooks, security gates, macOS WebKit fixes, and automated dual-OS CI updater pipeline

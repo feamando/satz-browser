@@ -67,6 +67,7 @@ import type {
   SidecarHealth,
   SourceStatEntry,
   TabTranslationState,
+  TelemetrySummaryResponse,
   WatchItem,
 } from "./types";
 
@@ -506,6 +507,11 @@ export interface AppState {
   evalRunning: boolean;
   evalStatusMsg: string;
   redteamAuditSummary: string;
+  telemetrySummary: TelemetrySummaryResponse | null;
+  telemetryStatusMsg: string;
+  telemetryBusy: boolean;
+  telemetryEndpointDraft: string;
+  telemetryEnabledDraft: boolean | null;
   i18nStatus: I18nStatusResponse | null;
   i18nTranslating: boolean;
   i18nTranslateCompleted: number;
@@ -689,6 +695,7 @@ export const state: AppState = {
     drives: false,
     indexing: false,
     translation: false,
+    telemetry: false,
   },
   contentTranslationConfig: null,
   contentTranslationStatusMsg: "",
@@ -703,7 +710,7 @@ export const state: AppState = {
   localModelSlotDraft: "chat_llm",
   localModelPathDraft: "",
   appUpdateStatus: {
-    currentVersion: "0.5.0",
+    currentVersion: "0.5.2",
     checking: false,
     installing: false,
     availableVersion: null,
@@ -759,6 +766,11 @@ export const state: AppState = {
   evalRunning: false,
   evalStatusMsg: "",
   redteamAuditSummary: "",
+  telemetrySummary: null,
+  telemetryStatusMsg: "",
+  telemetryBusy: false,
+  telemetryEndpointDraft: "",
+  telemetryEnabledDraft: null,
   i18nStatus: null,
   i18nTranslating: false,
   i18nTranslateCompleted: 0,

@@ -19,11 +19,59 @@ if str(REPO_ROOT / "scripts") not in sys.path:
 from pre_commit_dev_sync import check_privacy_and_secrets, check_ui_and_weight_limits, check_version_parity
 
 
-def _run(cmd: list[str], label: str) -> None:
+def _run(cmd: list[str], label: str, *, extra_env: dict[str, str] | None = None) -> None:
     print(f"[release-gate] {label}: {' '.join(cmd)}", flush=True)
-    proc = subprocess.run(cmd, cwd=str(REPO_ROOT), shell=(sys.platform == "win32" and cmd[0] in ("npm", "node", "npx")))
+    env = dict(os.environ)
+    cargo_bin = Path.home() / ".cargo" / "bin"
+    if cargo_bin.is_dir() and str(cargo_bin) not in env.get("PATH", ""):
+        env["PATH"] = f"{cargo_bin}{os.pathsep}{env.get('PATH', '')}"
+    if extra_env:
+        env.update(extra_env)
+    proc = subprocess.run(
+        cmd,
+        cwd=str(REPO_ROOT),
+        env=env,
+        shell=(sys.platform == "win32" and cmd[0] in ("npm", "node", "npx")),
+    )
     if proc.returncode != 0:
         raise RuntimeError(f"Release gate step failed ({proc.returncode}): {label}")
+
+
+def _check_runtime_imports() -> None:
+    required = (
+        ("PIL", "pillow"),
+        ("argon2", "argon2-cffi"),
+        ("keyring", "keyring"),
+        ("httpx", "httpx"),
+        ("torch", "torch"),
+        ("transformers", "transformers"),
+        ("trafilatura", "trafilatura"),
+        ("ddgs", "ddgs"),
+    )
+    missing = []
+    for mod_name, pkg_name in required:
+        try:
+            __import__(mod_name)
+        except ImportError:
+            missing.append(pkg_name)
+    if missing:
+        raise RuntimeError(
+            "Python environment is missing sidecar/requirements-runtime.txt package(s): "
+            + ", ".join(missing)
+            + ". Install with uv pip install -r sidecar/requirements-runtime.txt."
+        )
+
+
+def _staged_python_path() -> Path | None:
+    base = REPO_ROOT / "src-tauri" / "target" / "staged-resources"
+    if not (base / "sidecar" / "satz_models.py").is_file():
+        return None
+    cands = (
+        [base / "python-runtime" / "python.exe"]
+        if sys.platform == "win32"
+        else [base / "python-runtime" / "bin" / "python3", base / "python-runtime" / "bin" / "python3.12"]
+    )
+    return next((c for c in cands if c.is_file()), None)
 
 
 def main() -> int:
@@ -40,6 +88,7 @@ def main() -> int:
     _run(["node", "scripts/i18n_extract.mjs", "--check"], "i18n catalog & AST check")
 
     if not args.quick:
+        _check_runtime_imports()
         _run(["cargo", "test", "--manifest-path", "src-tauri/Cargo.toml"], "Rust cargo test")
         _run(
             [
@@ -53,9 +102,38 @@ def main() -> int:
                 "sidecar.test_satz_models",
                 "sidecar.test_settings_tools",
                 "sidecar.test_web_harness",
+                "sidecar.test_satz_news",
+                "sidecar.test_telemetry",
+                "sidecar.test_translation",
+                "sidecar.test_profile_transfer",
+                "sidecar.test_dev_brain",
             ],
             "Sidecar unittest regression suite",
+            extra_env={"SATZ_MEMORY_KEYRING": "1", "PYTHONUTF8": "1"},
         )
+        staged_py = _staged_python_path()
+        if staged_py is not None:
+            staged_sidecar = REPO_ROOT / "src-tauri" / "target" / "staged-resources" / "sidecar"
+            smoke_code = (
+                "import pathlib, sys, tempfile; "
+                f"sys.path.insert(0, {str(staged_sidecar)!r}); "
+                "from satz_models import SatzSidecarRuntime; "
+                "\nwith tempfile.TemporaryDirectory(prefix='satz_gate_') as td:\n"
+                "    d = pathlib.Path(td)\n"
+                "    rt = SatzSidecarRuntime(sgs_root=d/'no_sgs', store_path=d/'s.sqlite')\n"
+                "    try:\n"
+                "        assert not rt.sgs_root.exists()\n"
+                "        rt.passwords.create_profile('GateSmoke', '123456')\n"
+                "        res = rt.run_read('planck (reader)', 'Who created Ada?', [{'id':'1','url':'https://example.org','title':'T','text':'In 1843 Ada published notes.'}])\n"
+                "        assert 'answer' in res\n"
+                "    finally:\n"
+                "        rt.close()\n"
+            )
+            _run(
+                [str(staged_py), "-I", "-c", smoke_code],
+                "Isolated staged python-runtime (-I, zero ../sgs)",
+                extra_env={"PYTHONNOUSERSITE": "1", "PYTHONUTF8": "1", "SATZ_MEMORY_KEYRING": "1"},
+            )
 
     from dev_brain import DevBrain
 

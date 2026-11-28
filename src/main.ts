@@ -70,6 +70,9 @@ import {
   sidecarFetchHealth,
   sidecarFetchKnowledge,
   sidecarFetchRoutingPolicy,
+  sidecarFetchTelemetrySummary,
+  sidecarSetTelemetryConfig,
+  sidecarSyncTelemetry,
   sidecarGetI18nBundle,
   sidecarGetI18nStatus,
   sidecarGetMailAccounts,
@@ -179,6 +182,7 @@ import {
   setActiveLocaleBundle,
   switchActiveLocale,
   t,
+  tCount,
 } from "./i18n";
 import { fontsReady } from "./design-system/brand";
 import { icon } from "./design-system/icons";
@@ -3457,8 +3461,17 @@ function selectMailAccountFilter(accountId: string | null): void {
   })();
 }
 
+async function refreshTelemetrySummaryState(): Promise<void> {
+  const tel = await sidecarFetchTelemetrySummary();
+  if (tel && tel.ok) {
+    state.telemetrySummary = tel;
+    state.telemetryEnabledDraft = Boolean(tel.instance?.hosted_sync_enabled);
+    state.telemetryEndpointDraft = tel.instance?.hosted_endpoint ?? "";
+  }
+}
+
 async function loadSettingsPanelData(): Promise<void> {
-  const [kb, docRoles, mCfg, gStatus, dStatus, pol, provReg, trCfg] = await Promise.all([
+  const [kb, docRoles, mCfg, gStatus, dStatus, pol, provReg, trCfg, telSum] = await Promise.all([
     sidecarFetchKnowledge(),
     sidecarFetchDoctor(),
     sidecarGetModelConfig(),
@@ -3467,6 +3480,7 @@ async function loadSettingsPanelData(): Promise<void> {
     sidecarFetchRoutingPolicy(),
     sidecarGetProviders(),
     sidecarGetTranslationConfig(),
+    sidecarFetchTelemetrySummary(),
   ]);
   if (kb) state.knowledge = kb;
   state.doctorRoles = docRoles;
@@ -3477,6 +3491,15 @@ async function loadSettingsPanelData(): Promise<void> {
   state.googleOAuthStatus = gStatus;
   if (dStatus) state.drivesStatus = dStatus;
   if (pol && pol.ok) state.routingPolicy = pol;
+  if (telSum && telSum.ok) {
+    state.telemetrySummary = telSum;
+    if (state.telemetryEnabledDraft === null) {
+      state.telemetryEnabledDraft = Boolean(telSum.instance?.hosted_sync_enabled);
+    }
+    if (!state.telemetryEndpointDraft) {
+      state.telemetryEndpointDraft = telSum.instance?.hosted_endpoint ?? "";
+    }
+  }
   if (kb?.profile && !kb.profile.unlocked) {
     state.providerRegistry = null;
     state.contentTranslationConfig = null;
@@ -4601,6 +4624,61 @@ function getKnowledgeActions(): KnowledgeActions {
       },
       onInstallAppUpdate: async () => {
         await runAppUpdateInstall();
+      },
+      onRefreshTelemetry: async () => {
+        if (state.telemetryBusy) return;
+        state.telemetryBusy = true;
+        renderAllRegions();
+        try {
+          await refreshTelemetrySummaryState();
+          state.telemetryStatusMsg = "";
+        } finally {
+          state.telemetryBusy = false;
+          renderAllRegions();
+        }
+      },
+      onSaveTelemetryConfig: async (enabled: boolean, endpoint: string) => {
+        if (state.telemetryBusy) return;
+        state.telemetryBusy = true;
+        renderAllRegions();
+        try {
+          const res = await sidecarSetTelemetryConfig({
+            hosted_sync_enabled: enabled,
+            hosted_endpoint: endpoint,
+          });
+          if (!res.ok) {
+            state.telemetryStatusMsg = `${t("common.error_prefix")} ${res.error ?? "failed"}`;
+            showAppToast(state.telemetryStatusMsg, "danger");
+            return;
+          }
+          await refreshTelemetrySummaryState();
+          state.telemetryStatusMsg = t("settings.telemetry_saved");
+          showAppToast(state.telemetryStatusMsg);
+        } finally {
+          state.telemetryBusy = false;
+          renderAllRegions();
+        }
+      },
+      onSyncTelemetry: async () => {
+        if (state.telemetryBusy) return;
+        state.telemetryBusy = true;
+        renderAllRegions();
+        try {
+          const res = await sidecarSyncTelemetry(200);
+          await refreshTelemetrySummaryState();
+          if (!res.ok) {
+            state.telemetryStatusMsg = `${t("common.error_prefix")} ${res.error ?? "failed"}`;
+            showAppToast(state.telemetryStatusMsg, "danger");
+            return;
+          }
+          state.telemetryStatusMsg = tCount("settings.telemetry_synced_n", res.uploaded ?? 0, {
+            remaining: res.remaining ?? 0,
+          });
+          showAppToast(state.telemetryStatusMsg);
+        } finally {
+          state.telemetryBusy = false;
+          renderAllRegions();
+        }
       },
       onOpenSettingsChat: () => {
         state.activeTabId = "chat";

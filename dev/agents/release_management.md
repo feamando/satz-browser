@@ -11,16 +11,17 @@ Every release requires an exact semver match across all three manifests (verifie
 Never allow model files larger than `90 MB` under `sidecar/models/planck/` (standard Git, no Git LFS).
 
 ## 2. Mandatory Pre-Release Verification Gate
-Run before every local preview bundle or release tag:
+Run before every local preview bundle or release tag (prefer repo `.venv`, or `../sgs/.venv` if all `sidecar/requirements-runtime.txt` packages including `pillow` are present):
 ```powershell
-..\sgs\.venv\Scripts\python.exe dev/agents/hooks/release_gate.py
+.venv\Scripts\python.exe dev/agents/hooks/release_gate.py
 ```
 `release_gate.py` enforces:
-1. Manifest semver parity and UI/model weight hygiene checks
-2. `npm run build` and `node scripts/i18n_extract.mjs --check`
-3. `cargo test --manifest-path src-tauri/Cargo.toml`
-4. Core sidecar regression `unittest` modules (unless `--quick` is explicitly passed for UI-only dry runs)
-5. `scripts/dev_brain.py monitor` + `eval` retrieval thresholds
+1. Manifest semver parity, UI/model weight hygiene, and executable `100755` git index mode on `scripts/*.sh` (so Windows commits never break `./scripts/build_preview.sh` on macOS)
+2. Upfront `sidecar/requirements-runtime.txt` import check (`PIL`, `argon2`, `keyring`, `httpx`, `torch`, `transformers`, `trafilatura`, `ddgs`)
+3. `npm run build` and `node scripts/i18n_extract.mjs --check`
+4. `cargo test --manifest-path src-tauri/Cargo.toml`
+5. Full 12-module Python sidecar regression suite (`SATZ_MEMORY_KEYRING=1` to isolate OS Keychain across dev/adhoc binaries), plus isolated `staged-resources/python-runtime -I` smoke verification (`../sgs` bypassed) when staged resources exist
+6. `scripts/dev_brain.py monitor` + `eval` retrieval thresholds
 
 ## 3. Standalone Runtime Staging (`scripts/prepare_sidecar_bundle.py`)
 - Uses `uv` relocatable Python 3.12 (`python-build-standalone`) and `sidecar/requirements-runtime.txt` into `src-tauri/target/staged-resources/` (`sidecar/` + `python-runtime/`).

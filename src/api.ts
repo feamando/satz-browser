@@ -62,6 +62,9 @@ import type {
   SourceStatEntry,
   TabBoundsSpec,
   TabKind,
+  TelemetryInstanceMeta,
+  TelemetrySummaryResponse,
+  TelemetrySyncResponse,
   WatchItem,
 } from "./types";
 
@@ -4957,6 +4960,45 @@ export async function sidecarDisconnectDrive(
       }),
     });
     return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarFetchTelemetrySummary(): Promise<TelemetrySummaryResponse | null> {
+  try {
+    const res = await sidecarFetch("/telemetry/summary");
+    if (!res.ok) return null;
+    return (await res.json()) as TelemetrySummaryResponse;
+  } catch {
+    return null;
+  }
+}
+
+export async function sidecarSetTelemetryConfig(payload: {
+  hosted_sync_enabled: boolean;
+  hosted_endpoint: string;
+}): Promise<{ ok: boolean; instance?: TelemetryInstanceMeta; error?: string }> {
+  try {
+    const res = await sidecarFetch("/telemetry/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function sidecarSyncTelemetry(limit = 200): Promise<TelemetrySyncResponse> {
+  try {
+    const res = await sidecarFetch("/telemetry/sync", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ limit }),
+    });
+    return (await res.json()) as TelemetrySyncResponse;
   } catch (e) {
     return { ok: false, error: String(e) };
   }

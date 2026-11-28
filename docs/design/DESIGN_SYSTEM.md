@@ -131,7 +131,8 @@ Rules:
 - The word is one unit at normal Besley spacing. Do not add space between S and atz, and do not set "atz" separately.
 - **Light:** letters in `#1f1b22` with a thin knock-out gap in the dots around each letter.
 - **Dark:** letters in `#f4f1f8`, no outline or knock-out on the S.
-- **Icon:** disc only, solid white S, no outline. Below 24px the dots get coarser automatically. Favicon, dock, collapsed sidebar and the telemetry popover header use the icon.
+- **Icon:** disc only, solid white S, no outline. Below 24px the dots get coarser automatically. Favicon, web/Windows app icon, collapsed sidebar and the telemetry popover header use the icon.
+- **macOS app icon (`src-tauri/icons/icon.icns`):** `#3f2775` rounded-square container (`824x824` Apple continuous squircle centered in `1024x1024` with 100px margin and subtle drop shadow), filled with the Bayer dither dot pattern and centered white Besley `S`.
 - Minimum wordmark height 18px. Below that, use the icon.
 - Clear space around the mark: half the cap height on every side.
 - Do not recolor the dither, rotate it, put it on a photo, or add a shadow.

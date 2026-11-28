@@ -187,6 +187,9 @@ export interface KnowledgeActions {
     mail_include_promos_pings?: boolean;
   }) => Promise<void>;
   onBackfillContentTranslation?: () => Promise<void>;
+  onRefreshTelemetry?: () => Promise<void>;
+  onSaveTelemetryConfig?: (enabled: boolean, endpoint: string) => Promise<void>;
+  onSyncTelemetry?: () => Promise<void>;
   onCloseKnowledgeView: () => void;
 }
 
@@ -1472,6 +1475,7 @@ export function renderKnowledgeView(
   const showProviders = !isLaneView || activeLane === "providers";
   const showSources = !isLaneView || activeLane === "sources";
   const showTranslation = !isLaneView || activeLane === "translation";
+  const showTelemetry = !isLaneView || activeLane === "profiles";
 
   const kbScope = isEmbedded ? "embedded" : isLaneView ? `lane:${activeLane}` : "manual";
   const prevPage = container.querySelector(".kb-page") as HTMLElement | null;
@@ -1572,7 +1576,7 @@ export function renderKnowledgeView(
           ${renderAppLanguageSectionHtml()}
           <div class="form-row">
             <span class="muted">${escapeHtml(t("settings.app_updates_title"))}</span>
-            <span class="badge soft">${escapeHtml(t("settings.app_version_label", { version: state.appUpdateStatus.currentVersion || "0.5.0" }))}</span>
+            <span class="badge soft">${escapeHtml(t("settings.app_version_label", { version: state.appUpdateStatus.currentVersion || "0.5.2" }))}</span>
             <button id="kb-check-update-btn" type="button" class="btn" ${state.appUpdateStatus.checking || state.appUpdateStatus.installing ? "disabled" : ""}>${escapeHtml(state.appUpdateStatus.checking ? t("settings.app_checking_update") : t("settings.app_check_update_btn"))}</button>
             <button id="kb-replay-tour-btn" type="button" class="btn">${escapeHtml(t("settings.replay_tour_btn"))}</button>
             ${
@@ -1905,6 +1909,7 @@ export function renderKnowledgeView(
                 discoveredCloudModels.map((m) => m.id)
               )
         }
+        ${!showTelemetry ? "" : renderTelemetrySectionHtml(Boolean(acc.telemetry))}
       </div>
     </div>
   `;
@@ -2537,6 +2542,7 @@ export function renderKnowledgeView(
 
   bindActionProvidersListeners(container, actions);
   bindContentTranslationListeners(container, actions);
+  bindTelemetryListeners(container, actions);
 
   if (preserveScroll) {
     const nextPage = container.querySelector(".kb-page") as HTMLElement | null;
@@ -2549,6 +2555,170 @@ export function renderKnowledgeView(
       nextOverrideWrap.scrollTop = prevOverrideScrollTop;
     }
   }
+}
+
+function renderTelemetrySectionHtml(accOpen: boolean): string {
+  const sum = state.telemetrySummary;
+  const totalEvents = sum?.totals?.total_events ?? 0;
+  const errEvents = sum?.totals?.error_events ?? 0;
+  const pendingEvents = sum?.totals?.unexported_events ?? 0;
+  const enabledVal =
+    state.telemetryEnabledDraft !== null
+      ? state.telemetryEnabledDraft
+      : Boolean(sum?.instance?.hosted_sync_enabled);
+  const endpointVal =
+    state.telemetryEndpointDraft || sum?.instance?.hosted_endpoint || "";
+  const instShort = (sum?.instance?.instance_id || "").slice(0, 12) || "-";
+  const lastSyncAt = sum?.instance?.last_sync_at || "";
+  const lastSyncErr = sum?.instance?.last_sync_error || "";
+  const subsystems = sum?.by_subsystem ?? [];
+  const recentEvals = sum?.recent_evals ?? [];
+
+  return `
+    <div class="card kb-acc-card acc ${accOpen ? "open" : ""}" id="kb-telemetry-card">
+      <div class="settings-acc-bar">
+        <button type="button" class="acc-h" data-settings-accordion="telemetry">
+          <span>${escapeHtml(t("settings.telemetry_title"))}</span>
+          <span class="ct">${escapeHtml(tCount("settings.telemetry_events_ct", totalEvents))}</span>
+          ${icon("chev", "ico-sm")}
+        </button>
+        <button id="kb-telemetry-refresh-btn" type="button" class="btn" ${state.telemetryBusy ? "disabled" : ""}>${escapeHtml(t("settings.telemetry_refresh_btn"))}</button>
+      </div>
+      ${
+        !accOpen
+          ? ""
+          : `
+      <div class="acc-b section">
+        <div class="muted">${escapeHtml(t("settings.telemetry_desc"))}</div>
+        ${
+          !sum
+            ? `<div class="muted">${escapeHtml(t("settings.telemetry_empty"))}</div>`
+            : `
+          <div class="kb-tel-meta-row">
+            <span class="badge soft">${escapeHtml(t("settings.telemetry_total"))}: ${totalEvents}</span>
+            <span class="badge ${errEvents > 0 ? "warn" : "soft"}">${escapeHtml(t("settings.telemetry_errors"))}: ${errEvents}</span>
+            <span class="badge soft">${escapeHtml(t("settings.telemetry_pending"))}: ${pendingEvents}</span>
+            <span>${escapeHtml(t("settings.telemetry_instance"))}: <code>${escapeHtml(instShort)}</code></span>
+          </div>
+          <div class="lm-inline-meta">${escapeHtml(t("settings.telemetry_folder"))}: ${escapeHtml(sum.dev_dir)}</div>
+          ${
+            subsystems.length === 0
+              ? ""
+              : `
+          <div>
+            <div class="label">${escapeHtml(t("settings.telemetry_subsystems"))}</div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>${escapeHtml(t("settings.telemetry_col_subsystem"))}</th>
+                    <th>${escapeHtml(t("settings.telemetry_col_count"))}</th>
+                    <th>${escapeHtml(t("settings.telemetry_col_errors"))}</th>
+                    <th>${escapeHtml(t("settings.telemetry_col_latency"))}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${subsystems
+                    .map(
+                      (row) => `
+                  <tr>
+                    <td><code>${escapeHtml(row.subsystem)}</code></td>
+                    <td>${row.count}</td>
+                    <td>${row.errors}</td>
+                    <td>${row.avg_duration_ms !== null && row.avg_duration_ms !== undefined ? String(row.avg_duration_ms) : "-"}</td>
+                  </tr>
+                  `
+                    )
+                    .join("")}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          `
+          }
+          ${
+            recentEvals.length === 0
+              ? ""
+              : `
+          <div>
+            <div class="label">${escapeHtml(t("settings.telemetry_recent_evals"))}</div>
+            <div class="list">
+              ${recentEvals
+                .map(
+                  (ev) => `
+              <div class="kb-kv-row">
+                <span><code>${escapeHtml(ev.run_type)}</code> · ${escapeHtml(t("settings.telemetry_eval_summary", { passed: ev.passed_count, total: ev.cases_total }))}</span>
+                <span class="muted">${escapeHtml(ev.ts)}</span>
+              </div>
+              `
+                )
+                .join("")}
+            </div>
+          </div>
+          `
+          }
+        `
+        }
+        <div class="lm-subcard">
+          <div class="label">${escapeHtml(t("settings.telemetry_hosted_title"))}</div>
+          <label class="kb-tel-toggle">
+            <input id="kb-telemetry-sync-enabled" type="checkbox" ${enabledVal ? "checked" : ""} ${state.telemetryBusy ? "disabled" : ""} />
+            <span>${escapeHtml(t("settings.telemetry_hosted_toggle"))}</span>
+          </label>
+          <div class="form-row">
+            <input
+              id="kb-telemetry-endpoint"
+              class="input kb-tel-endpoint"
+              type="url"
+              spellcheck="false"
+              placeholder="${escapeHtml(t("settings.telemetry_endpoint_ph"))}"
+              value="${escapeHtml(endpointVal)}"
+              ${state.telemetryBusy ? "disabled" : ""}
+            />
+            <button id="kb-telemetry-save-btn" type="button" class="btn" ${state.telemetryBusy ? "disabled" : ""}>${escapeHtml(t("settings.telemetry_save_btn"))}</button>
+            <button id="kb-telemetry-sync-btn" type="button" class="btn primary" ${state.telemetryBusy || !enabledVal || !endpointVal.trim() ? "disabled" : ""}>${escapeHtml(t("settings.telemetry_sync_btn"))}</button>
+          </div>
+          ${lastSyncAt ? `<div class="muted">${escapeHtml(t("settings.telemetry_last_sync", { ts: lastSyncAt }))}</div>` : ""}
+          ${lastSyncErr ? `<div class="muted">${escapeHtml(t("settings.telemetry_last_err", { error: lastSyncErr }))}</div>` : ""}
+          ${state.telemetryStatusMsg ? `<div class="muted">${escapeHtml(state.telemetryStatusMsg)}</div>` : ""}
+        </div>
+      </div>
+      `
+      }
+    </div>
+  `;
+}
+
+function bindTelemetryListeners(container: HTMLElement, actions: KnowledgeActions): void {
+  const toggleEl = container.querySelector("#kb-telemetry-sync-enabled") as HTMLInputElement | null;
+  const endpointEl = container.querySelector("#kb-telemetry-endpoint") as HTMLInputElement | null;
+
+  toggleEl?.addEventListener("change", () => {
+    state.telemetryEnabledDraft = toggleEl.checked;
+    renderKnowledgeView(container, actions);
+  });
+
+  endpointEl?.addEventListener("input", () => {
+    state.telemetryEndpointDraft = endpointEl.value;
+  });
+
+  container.querySelector("#kb-telemetry-refresh-btn")?.addEventListener("click", () => {
+    void actions.onRefreshTelemetry?.();
+  });
+
+  container.querySelector("#kb-telemetry-save-btn")?.addEventListener("click", () => {
+    const enabled = Boolean(
+      (container.querySelector("#kb-telemetry-sync-enabled") as HTMLInputElement | null)?.checked
+    );
+    const ep = (
+      (container.querySelector("#kb-telemetry-endpoint") as HTMLInputElement | null)?.value ?? ""
+    ).trim();
+    void actions.onSaveTelemetryConfig?.(enabled, ep);
+  });
+
+  container.querySelector("#kb-telemetry-sync-btn")?.addEventListener("click", () => {
+    void actions.onSyncTelemetry?.();
+  });
 }
 
 function renderContentTranslationSectionHtml(

@@ -2968,7 +2968,7 @@ dependencies = [
 
 [[package]]
 name = "satz-browser"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "block2",
  "objc2",

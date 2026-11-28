@@ -188,7 +188,7 @@ class TestSatzI18n(unittest.TestCase):
         self.assertEqual(self.rt.i18n.get_status(catalog=updated_cat)["active_locale"], "de")
         self.rt.passwords.lock_profile()
         self.assertEqual(self.rt.i18n.get_status(catalog=updated_cat)["active_locale"], "de")
-        self.assertEqual(self.rt.i18n.i18n_dir, self.temp_dir / "i18n")
+        self.assertEqual(self.rt.i18n.i18n_dir, (self.temp_dir / "i18n").resolve())
 
     def test_oauth_callback_html_uses_active_locale_and_rtl(self) -> None:
         self.rt.i18n.import_pack(

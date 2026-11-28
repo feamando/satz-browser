@@ -43,6 +43,8 @@ Runbook: [RELEASE_RUNBOOK.md](../../../docs/RELEASE_RUNBOOK.md) · Protocol: [re
    Append build sizes/durations to `dev/analytics/build_telemetry.jsonl` and run `python scripts/dev_brain.py reindex`.
 
 ## Field Notes (Windows & macOS Standalone Previews)
-- Keep all `sidecar/requirements-runtime.txt` packages (including `httpx`) installed in local `../sgs/.venv` across Windows and macOS.
-- To verify the embedded `python-runtime` inside a built `.app`/`.exe` on a dev machine, remove any leftover `"python"` and `"repo_root"` keys from AppData/Application Support `settings.json`, otherwise the app falls back to your local repo checkout + `../sgs/.venv`.
+- Keep repo `.venv` (or `../sgs/.venv`) synced with all `sidecar/requirements-runtime.txt` packages (including `pillow` / `PIL` and `httpx`) across Windows and macOS (`uv venv .venv --python 3.12 && uv pip install -r sidecar/requirements-runtime.txt`).
+- When creating or modifying `scripts/*.sh` on Windows, keep git executable mode `100755` (`git update-index --chmod=+x scripts/build_preview.sh`), enforced by `pre_commit_dev_sync.py`.
+- `.github/workflows/ci.yml` executes Node build/i18n, Rust `cargo test`, `security_audit.py`, and the 12-module Python sidecar suite (`SATZ_MEMORY_KEYRING=1`) on both `windows-latest` and `macos-latest`.
+- To verify the embedded `python-runtime` inside a built `.app`/`.exe` on a dev machine, remove any leftover `"python"` and `"repo_root"` keys from AppData/Application Support `settings.json`, otherwise the app falls back to your local repo checkout + `.venv` / `../sgs/.venv`.
 - Secondary build hosts lacking `~/.tauri/satz.key` automatically build `.app`/`.dmg`/installers via `scripts/build_preview.sh` / `.ps1` (`src-tauri/tauri.bundle.noupdater.conf.json` / `--no-updater`) without updater signature errors; signed updater bundles come from the key host or CI (`TAURI_SIGNING_PRIVATE_KEY`).

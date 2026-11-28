@@ -12108,6 +12108,13 @@ def make_sidecar_server(
                 except Exception as e:
                     return self._json({"ok": False, "error": str(e)}, 400)
 
+            if self.path == "/telemetry/sync":
+                try:
+                    res = runtime.telemetry.flush_hosted_sync(limit=int(data.get("limit") or 200))
+                    return self._json(res, 200 if res.get("ok") else 400)
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+
             if self.path == "/evals/update":
                 try:
                     eid = str(data.get("eval_id") or "").strip()

@@ -19,6 +19,8 @@ import platform
 import re
 import sqlite3
 import threading
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -388,13 +390,100 @@ class SatzTelemetryManager:
 
     def set_hosted_sync(self, *, enabled: bool, endpoint: str = "") -> dict[str, Any]:
         ep = endpoint.strip()
-        if enabled and ep and not (ep.startswith("https://") or ep.startswith("http://127.0.0.1") or ep.startswith("http://localhost")):
+        if enabled and not ep:
+            raise ValueError("Hosted telemetry endpoint URL is required when hosted sync is enabled.")
+        if ep and not (ep.startswith("https://") or ep.startswith("http://127.0.0.1") or ep.startswith("http://localhost")):
             raise ValueError("Hosted telemetry endpoint must use https:// (or localhost for testing).")
         with self._lock:
             meta = self.get_instance_meta()
             meta["hosted_sync_enabled"] = bool(enabled)
-            if ep or not enabled:
+            if endpoint or not enabled:
                 meta["hosted_endpoint"] = ep
             meta["updated_at"] = _utc_iso()
             self.instance_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
         return {"ok": True, "instance": meta}
+
+    def flush_hosted_sync(self, *, limit: int = 200, timeout: float = 8.0) -> dict[str, Any]:
+        """Upload pending scrubbed telemetry batches when hosted sync is explicitly opted in."""
+        meta = self.get_instance_meta()
+        enabled = bool(meta.get("hosted_sync_enabled"))
+        ep = str(meta.get("hosted_endpoint") or "").strip()
+        if not enabled or not ep:
+            return {
+                "ok": False,
+                "skipped": True,
+                "uploaded": 0,
+                "error": "Hosted telemetry sync is disabled or endpoint is not configured.",
+                "instance": meta,
+            }
+        if not (ep.startswith("https://") or ep.startswith("http://127.0.0.1") or ep.startswith("http://localhost")):
+            return {
+                "ok": False,
+                "uploaded": 0,
+                "error": "Hosted telemetry endpoint must use https:// (or localhost for testing).",
+                "instance": meta,
+            }
+
+        batch = self.export_pending_batch(limit=limit)
+        events = batch.get("events") or []
+        if not events:
+            return {
+                "ok": True,
+                "uploaded": 0,
+                "through_seq": 0,
+                "remaining": 0,
+                "instance": meta,
+            }
+
+        payload = {
+            "schema_version": 1,
+            "instance_id": str(meta.get("instance_id") or "unknown"),
+            "app_version": self.app_version,
+            "os": str(meta.get("os") or platform.system().lower()),
+            "arch": str(meta.get("arch") or platform.machine().lower()),
+            "max_seq": int(batch.get("max_seq") or 0),
+            "count": len(events),
+            "events": events,
+        }
+        req = urllib.request.Request(
+            ep,
+            data=json.dumps(payload, ensure_ascii=True).encode("utf-8"),
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Satz-Instance": payload["instance_id"],
+                "X-Satz-App-Version": self.app_version,
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=float(timeout)) as resp:
+                status_code = int(getattr(resp, "status", 200) or 200)
+                if status_code < 200 or status_code >= 300:
+                    raise RuntimeError(f"HTTP {status_code}")
+                _ = resp.read(256)
+        except Exception as exc:
+            clean_err = str(_scrub_value("error", str(exc)))[:180]
+            with self._lock:
+                meta = self.get_instance_meta()
+                meta["last_sync_error"] = clean_err
+                meta["updated_at"] = _utc_iso()
+                self.instance_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+            return {"ok": False, "uploaded": 0, "error": clean_err, "instance": meta}
+
+        ack = self.mark_exported_through(int(batch["max_seq"]))
+        remaining = int(self.get_summary().get("totals", {}).get("unexported_events") or 0)
+        with self._lock:
+            meta = self.get_instance_meta()
+            meta["last_sync_at"] = _utc_iso()
+            meta["last_sync_error"] = ""
+            meta["last_sync_count"] = len(events)
+            meta["updated_at"] = _utc_iso()
+            self.instance_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+        return {
+            "ok": True,
+            "status": status_code,
+            "uploaded": len(events),
+            "through_seq": int(ack.get("through_seq") or 0),
+            "remaining": remaining,
+            "instance": meta,
+        }

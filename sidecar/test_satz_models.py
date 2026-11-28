@@ -34,6 +34,10 @@ class TestSatzSidecar(unittest.TestCase):
         )
 
     def tearDown(self):
+        try:
+            self.runtime.close()
+        except Exception:
+            pass
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_m5_health_and_non_factual_reader_guard(self):
@@ -297,6 +301,44 @@ class TestSatzSidecar(unittest.TestCase):
         self.assertTrue((legacy_dir / "vault.enc").exists(), "vault.enc must be created")
         rev_gh = pm.reveal_service_field("GITHUB", "token", "654321")
         self.assertEqual(rev_gh, "ghp_legacy_secret_999")
+
+    def test_m8_macos_keychain_owner_conflict_recovers_with_scoped_account(self):
+        from unittest import mock
+        import satz_passwords
+
+        store: dict[tuple[str, str], str] = {}
+
+        class _OwnerConflictKeyring:
+            def get_password(self, service: str, username: str):
+                if username == "nikita":
+                    raise RuntimeError("(-25293, 'ACL denied')")
+                return store.get((service, username))
+
+            def set_password(self, service: str, username: str, password: str) -> None:
+                if username == "nikita":
+                    raise RuntimeError("PasswordSetError: Can't store password on keychain: (-25244, 'Unknown Error')")
+                store[(service, username)] = password
+
+            def delete_password(self, service: str, username: str) -> None:
+                store.pop((service, username), None)
+
+        with mock.patch.object(satz_passwords, "keyring", _OwnerConflictKeyring()):
+            pm = satz_passwords.ProfilePasswordManager(self.tmp / "kc_conflict")
+            created = pm.create_profile("Nikita", "123456")
+            self.assertTrue(created.get("unlocked"))
+            reg_entry = pm._load_registry()["profiles"][0]
+            acct = reg_entry.get("device_key_account", "")
+            self.assertTrue(acct.startswith("nikita:"), f"Expected scoped fallback account, got {acct!r}")
+            pm.upsert_service_credential("github.com", username="feamando", password="secret-token-123")
+            pm.lock_profile()
+            pm._device_key_accounts.clear()
+
+            # Unlock after restarting manager still resolves the scoped account
+            pm2 = satz_passwords.ProfilePasswordManager(self.tmp / "kc_conflict")
+            pm2.unlock_profile("nikita", "123456")
+            self.assertEqual(pm2.reveal_service_field("GITHUB", "password", "123456"), "secret-token-123")
+            pm2.delete_profile("nikita", "123456")
+            self.assertFalse(any(k[1].startswith("nikita:") for k in store))
 
     def test_m8_exact_host_autofill_and_brain_proposals(self):
         pm = self.runtime.passwords

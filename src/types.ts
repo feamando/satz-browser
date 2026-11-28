@@ -1516,3 +1516,54 @@ export interface DriveNavSnapshot {
   owner: string;
   query: string;
 }
+
+export interface TelemetryInstanceMeta {
+  schema_version: number;
+  instance_id: string;
+  created_at?: string;
+  updated_at?: string;
+  app_version: string;
+  os: string;
+  arch?: string;
+  hosted_sync_enabled: boolean;
+  hosted_endpoint: string;
+  last_sync_at?: string;
+  last_sync_error?: string;
+  last_sync_count?: number;
+}
+
+export interface TelemetrySummaryResponse {
+  ok: boolean;
+  dev_dir: string;
+  instance: TelemetryInstanceMeta;
+  totals: {
+    total_events: number;
+    error_events: number;
+    unexported_events: number;
+  };
+  by_subsystem: Array<{
+    subsystem: string;
+    count: number;
+    errors: number;
+    avg_duration_ms: number | null;
+  }>;
+  recent_evals: Array<{
+    ts: string;
+    run_type: string;
+    cases_total: number;
+    passed_count: number;
+    failed_count: number;
+    passed: number;
+  }>;
+}
+
+export interface TelemetrySyncResponse {
+  ok: boolean;
+  skipped?: boolean;
+  status?: number;
+  uploaded?: number;
+  through_seq?: number;
+  remaining?: number;
+  error?: string;
+  instance?: TelemetryInstanceMeta;
+}

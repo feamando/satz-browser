@@ -61,13 +61,35 @@ jobs:
       - name: Run Rust test suite
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
-      - name: Setup Python 3.12
-        uses: actions/setup-python@v5
+      - name: Setup uv and Python 3.12 sidecar dependencies
+        uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.12"
+          enable-cache: true
 
-      - name: Verify release manifest parity & security audit
+      - name: Install sidecar runtime dependencies
         shell: bash
         run: |
-          python3 scripts/release_version.py status
-          python3 scripts/security_audit.py scan --mode all
+          uv venv .venv --python 3.12
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            uv pip install --python .venv/Scripts/python.exe --index-url https://download.pytorch.org/whl/cpu "torch>=2.5.0"
+            grep -vE '^\s*(#|$|torch)' sidecar/requirements-runtime.txt > .venv/ci-reqs.txt
+            uv pip install --python .venv/Scripts/python.exe --no-upgrade -r .venv/ci-reqs.txt
+          else
+            uv pip install --python .venv/bin/python -r sidecar/requirements-runtime.txt
+          fi
+
+      - name: Verify cross-platform Python sidecar tests, parity & security audit
+        shell: bash
+        env:
+          SATZ_MEMORY_KEYRING: "1"
+          PYTHONUTF8: "1"
+        run: |
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            PY_BIN=".venv/Scripts/python.exe"
+          else
+            PY_BIN=".venv/bin/python"
+          fi
+          "$PY_BIN" scripts/release_version.py status
+          "$PY_BIN" scripts/security_audit.py scan --mode all
+          "$PY_BIN" dev/agents/hooks/pre_commit_dev_sync.py --check-only
+          "$PY_BIN" -m unittest sidecar.test_local_models sidecar.test_i18n sidecar.test_m16 sidecar.test_m18 sidecar.test_satz_models sidecar.test_settings_tools sidecar.test_web_harness sidecar.test_satz_news sidecar.test_telemetry sidecar.test_translation sidecar.test_profile_transfer sidecar.test_dev_brain -v

@@ -1,6 +1,6 @@
 [package]
 name = "satz-browser"
-version = "0.5.1"
+version = "0.5.2"
 description = "Satz: AI-Native Browser (v0.5 Parity, Trust, Agents)"
 authors = ["Nikita Gorshkov"]
 edition = "2021"

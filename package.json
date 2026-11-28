@@ -1,7 +1,7 @@
 {
   "name": "satz-browser",
   "private": true,
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Satz: AI-Native Browser (Phase 0 Shell - Conversations as Tabs, Focus Mode, Compare View)",
   "type": "module",
   "scripts": {

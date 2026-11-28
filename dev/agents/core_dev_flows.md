@@ -24,9 +24,10 @@ Reference from [INSTRUCTIONS.md](INSTRUCTIONS.md) Â· Hub: [dev/](../README.md) Â
 - **Optional `../sgs` Boundary:** All runtime paths (`satz_models.py`, `satz_brain.py`, `satz_news.py`, `satz_mail_pipeline.py`) must operate cleanly with zero `../sgs` directory via `sidecar/planck_vendor/` and `sidecar/models/planck/`.
 - **PyTorch CPU Compatibility:** `CrossReader` (`sidecar/planck_vendor/src/planck3/xreader.py`) supports `onednn` / safe float32 fallback on PyTorch `2.15+` CPU wheels.
 - **Model Safety:** Missing local Gemma must skip preload without recording startup errors and route generative chat via installed custom local LLMs, configured cloud models, or Settings setup prompts.
+- **Keychain & Path Parity:** Tests run with `SATZ_MEMORY_KEYRING=1` so adhoc macOS binaries never hit `-25244` owner conflicts in `login.keychain-db`, `satz_passwords.py` recovers with scoped `device_key_account` on real `-25244` collisions, and temp-path tests `.resolve()` macOS `/var` symlinks. Whenever creating or editing `scripts/*.sh` on Windows, keep git executable mode `100755` (`git update-index --chmod=+x scripts/<name>.sh`).
 - **Checks:**
   ```bash
-  ..\sgs\.venv\Scripts\python.exe -m unittest sidecar.test_local_models sidecar.test_i18n sidecar.test_m16 sidecar.test_m18 sidecar.test_satz_models sidecar.test_settings_tools sidecar.test_web_harness sidecar.test_dev_brain -v
+  SATZ_MEMORY_KEYRING=1 .venv/bin/python -m unittest sidecar.test_local_models sidecar.test_i18n sidecar.test_m16 sidecar.test_m18 sidecar.test_satz_models sidecar.test_settings_tools sidecar.test_web_harness sidecar.test_satz_news sidecar.test_telemetry sidecar.test_translation sidecar.test_profile_transfer sidecar.test_dev_brain -v
   ```
 
 ### D. Desktop Re-Verify Workflow (Windows)

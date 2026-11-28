@@ -2834,6 +2834,27 @@ html, body, #app {
   gap: var(--sp-2);
 }
 
+/* ---------- Settings telemetry inspector ---------- */
+.kb-tel-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--ink);
+  cursor: pointer;
+}
+.kb-tel-endpoint {
+  flex: 1 1 260px;
+}
+.kb-tel-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-items: center;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
 
 
 
